@@ -1,0 +1,13 @@
+{
+	"app_name": "T+plus",
+	"app_description": "Somos una empresa de tecnológia en movilidad ",
+	"app_identifier": "",
+	"ios_app_version": "1.8.8",
+	"android_app_version": "444",
+	"web_version": "1.0.1",
+	"expo_owner": "t+plus",
+	"expo_slug": "t+plus",
+	"expo_project_id": "dc698937-0f27-4392-bea5-388fc1cc97c4",
+	"admin_email": "gerenciageneral@solucionestmasplus.com",
+	"purchase_code": "9a32cf4f-de66-42e4-b970-4fe26a693b19"
+}

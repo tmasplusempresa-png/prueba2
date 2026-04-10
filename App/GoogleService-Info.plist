@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>212923549236-fdfsd461qvdnqgsjjgvppi85pkt3hib9.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.212923549236-fdfsd461qvdnqgsjjgvppi85pkt3hib9</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>212923549236-37eptr7tsjjdsjbdl3k5vm9vlvooev6i.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyCSVNAzcal6oqDoX65qVmTIXUR8IFYWaYE</string>
+	<key>GCM_SENDER_ID</key>
+	<string>212923549236</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.treasapp.treas24</string>
+	<key>PROJECT_ID</key>
+	<string>treasupdate</string>
+	<key>STORAGE_BUCKET</key>
+	<string>treasupdate.appspot.com</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:212923549236:ios:741af1701f01091c266c61</string>
+	<key>DATABASE_URL</key>
+	<string>https://treasupdate-default-rtdb.firebaseio.com</string>
+</dict>
+</plist>

@@ -1,0 +1,61 @@
+{
+  "build": {
+    "development": {
+      "channel": "development",
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
+      }
+    },
+    "preview": {
+      "channel": "preview",
+      "android": {
+        "buildType": "apk",
+        "image": "latest"
+      },
+      "ios": {
+        "simulator": false,
+        "image": "latest"
+      },
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
+      }
+    },
+    "simulator": {
+      "channel": "simulator",
+      "developmentClient": true,
+      "ios": {
+        "simulator": true
+      },
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "channel": "production",
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "android": {
+        "serviceAccountKeyPath": "./serviceaccount.json",
+        "track": "internal"
+      }
+    }
+  },
+  "cli": {
+    "version": ">= 0.50.0",
+    "requireCommit": false,
+    "appVersionSource": "remote"
+  }
+}
