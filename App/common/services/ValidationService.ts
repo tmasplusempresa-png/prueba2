@@ -35,8 +35,8 @@ export const ValidationService = {
       // Buscar en tabla 'users' con timeout usando Promise.race
       const queryPromise = supabase
         .from('users')
-        .select('email', { count: 'exact' })
-        .ilike('email', trimmedEmail);
+        .select('id', { count: 'exact' })
+        .eq('email', trimmedEmail);
       
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('Query timeout')), QUERY_TIMEOUT)
@@ -53,8 +53,9 @@ export const ValidationService = {
         console.warn('⚠️ [ValidationService] Error en búsqueda users:', usersError?.message);
       }
       
-      if (count && count > 0) {
-        console.log(`✅ [ValidationService] Email existe en BD (${duration}ms)`);
+      const userCount = typeof count === 'number' ? count : Array.isArray(usersData) ? usersData.length : 0;
+      if (userCount > 0) {
+        console.log(`✅ [ValidationService] Email existe en users (${duration}ms) count=${userCount}`);
         return { exists: true };
       }
       

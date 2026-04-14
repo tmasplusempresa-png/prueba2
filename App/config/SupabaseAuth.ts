@@ -1,4 +1,5 @@
 import { AuthError, AuthTokenResponsePassword, Session, User } from '@supabase/supabase-js';
+import Constants from 'expo-constants';
 import { supabase } from './SupabaseConfig';
 
 // ==================== INTERFACES TYPESCRIPT ====================
@@ -171,10 +172,23 @@ export const SupabaseAuth = {
         return { data: null, error: validationError, success: false };
       }
 
+      const expoConfig = Constants.expoConfig as any;
+      const manifest = Constants.manifest as any;
+      const extra = expoConfig?.extra || manifest?.extra || {};
+      const defaultRedirect = __DEV__
+        ? 'http://localhost:5173/register-driver'
+        : 'https://dashboard.tmasplus.com/register-driver';
+      const emailRedirectTo =
+        extra?.SUPABASE_EMAIL_REDIRECT_TO ||
+        (process.env?.SUPABASE_EMAIL_REDIRECT_TO as string | undefined) ||
+        defaultRedirect;
+
+      console.log('[SupabaseAuth.signUp] emailRedirectTo:', emailRedirectTo);
       const response = await supabase.auth.signUp({
         email: credentials.email.toLowerCase().trim(),
         password: credentials.password,
         options: {
+          emailRedirectTo,
           data: {
             full_name: credentials.fullName || '',
             phone: credentials.phone || '',
@@ -186,6 +200,7 @@ export const SupabaseAuth = {
       const { data, error } = response as any;
 
       if (error) {
+        console.error('[SupabaseAuth.signUp] error details:', error);
         const errorMessage = ErrorUtils.mapAuthError(error);
         return { data: null, error: errorMessage, success: false };
       }

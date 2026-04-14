@@ -5,7 +5,7 @@ import Constants from 'expo-constants';
 import Navigation from './Navigation/Navigation';
 import { Provider } from 'react-redux';
 import store from '@/common/store';
-import supabase from '@/config/SupabaseConfig';
+import supabase, { Auth, clearStoredSession } from '@/config/SupabaseConfig';
 import { login, logout } from '@/common/reducers/authReducer';
 
 // Desactivar el escalado de fuente del sistema — la app usa su propio tamaño fijo
@@ -58,9 +58,7 @@ export default function RootLayout() {
 
     const syncInitialSession = async () => {
       try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
+        const session = await Auth.getCurrentSession();
 
         if (!isMounted) return;
 
@@ -71,6 +69,7 @@ export default function RootLayout() {
         }
       } catch (e) {
         console.warn('Error syncing initial auth session:', e);
+        await clearStoredSession();
         if (isMounted) {
           store.dispatch(logout());
         }

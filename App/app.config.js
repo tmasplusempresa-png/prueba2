@@ -17,13 +17,13 @@ const AppConfig = {
     expo_project_id: process.env.EXPO_PROJECT_ID || '16f8e33a-1dda-48f1-84a6-eeb3c8c5c51f'
 };
 
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const SUPABASE_URL = process.env.SUPABASE_URL || '';
+    const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-const API_KEY = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
-const MAPBOX_ACCESS_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || '';
-const RNMAPBOX_MAPS_DOWNLOAD_TOKEN = process.env.RNMAPBOX_MAPS_DOWNLOAD_TOKEN || process.env.MAPBOX_DOWNLOAD_TOKEN || '';
+    const API_KEY = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
+    const MAPBOX_ACCESS_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || '';
+    const RNMAPBOX_MAPS_DOWNLOAD_TOKEN = process.env.RNMAPBOX_MAPS_DOWNLOAD_TOKEN || process.env.MAPBOX_DOWNLOAD_TOKEN || '';
 
 module.exports = {
     name: AppConfig.app_name,
@@ -67,6 +67,7 @@ module.exports = {
         SUPABASE_URL: process.env.SUPABASE_URL || '',
         SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || '',
         SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+        SUPABASE_EMAIL_REDIRECT_TO: process.env.SUPABASE_EMAIL_REDIRECT_TO || (process.env.NODE_ENV === 'production' ? 'https://dashboard.tmasplus.com/register-driver' : 'http://localhost:5173/register-driver'),
         GOOGLE_MAPS_API_KEY_ANDROID: process.env.GOOGLE_MAPS_API_KEY_ANDROID || '',
         GOOGLE_MAPS_API_KEY_IOS: process.env.GOOGLE_MAPS_API_KEY_IOS || '',
         MAPBOX_ACCESS_TOKEN: MAPBOX_ACCESS_TOKEN

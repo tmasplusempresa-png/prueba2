@@ -114,6 +114,15 @@ export const getSupabaseAuthHeaders = async (includeContentType = false) => {
   return headers;
 };
 
+export const clearStoredSession = async (): Promise<void> => {
+  try {
+    await AsyncStorage.removeItem('tmasplus_auth_session');
+    await supabase.auth.signOut();
+  } catch (error) {
+    console.error('Error clearing stored auth session:', error);
+  }
+};
+
 // ==================== FUNCIONES DE AUTENTICACION MEJORADAS ====================
 export const Auth = {
   /**
@@ -124,11 +133,15 @@ export const Auth = {
       const { data: { user }, error } = await supabase.auth.getUser();
       if (error) {
         console.error('Error obteniendo usuario:', error.message);
+        if (error.message.includes('Invalid Refresh Token') || error.message.includes('Refresh Token Not Found')) {
+          await clearStoredSession();
+        }
         return null;
       }
       return user;
     } catch (error) {
       console.error('Error inesperado obteniendo usuario:', error);
+      await clearStoredSession();
       return null;
     }
   },
@@ -141,11 +154,15 @@ export const Auth = {
       const { data: { session }, error } = await supabase.auth.getSession();
       if (error) {
         console.error('Error obteniendo sesion:', error.message);
+        if (error.message.includes('Invalid Refresh Token') || error.message.includes('Refresh Token Not Found')) {
+          await clearStoredSession();
+        }
         return null;
       }
       return session;
     } catch (error) {
       console.error('Error inesperado obteniendo sesion:', error);
+      await clearStoredSession();
       return null;
     }
   },
