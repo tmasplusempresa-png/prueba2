@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, RefreshControl, Platform, Dimensions,
@@ -8,10 +8,15 @@ import { useNavigation } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
+import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
+import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
-import { updateDriverNotification } from '@/hooks/DriverNotificationService';
+import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
+import { fetchMemberships } from '@/common/reducers/membershipSlice';
+
+const IMMEDIATE_RANGE_KM = 3;
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -37,7 +42,11 @@ type Reservation = {
   customer_contact: string;
   customer_token: string;
   pickup_address: string;
+  pickup_lat?: string | number;
+  pickup_lng?: string | number;
   drop_address: string;
+  drop_lat?: string | number;
+  drop_lng?: string | number;
   booking_date: string;
   driver_share: number;
   estimate: number;
@@ -50,6 +59,10 @@ type Reservation = {
   customer: string;
   customer_id: string;
   car_type: string;
+};
+
+type DriverReservationsScreenProps = {
+  embedded?: boolean;
 };
 
 const formatDate = (ts: string) => {
@@ -75,22 +88,130 @@ const formatTime = (ts: string) => {
   } catch { return ts || ''; }
 };
 
-const DriverReservationsScreen = () => {
+const isUuid = (value?: string | null) => {
+  if (!value) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+};
+
+const toFiniteNumber = (value: any): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const extractLatLng = (source: any): { lat: number; lng: number } | null => {
+  if (!source) return null;
+
+  const directLat = toFiniteNumber(source.lat ?? source.latitude ?? source.pickup_lat ?? source.driver_lat);
+  const directLng = toFiniteNumber(source.lng ?? source.longitude ?? source.pickup_lng ?? source.driver_lng);
+  if (directLat !== null && directLng !== null) {
+    return { lat: directLat, lng: directLng };
+  }
+
+  const nestedLocation = source.location || source.pickup_location;
+  if (nestedLocation) {
+    if (typeof nestedLocation === 'string') {
+      try {
+        return extractLatLng(JSON.parse(nestedLocation));
+      } catch {
+        return null;
+      }
+    }
+    return extractLatLng(nestedLocation);
+  }
+
+  return null;
+};
+
+const getDistanceKm = (
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number,
+) => {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const deltaLat = toRad(lat2 - lat1);
+  const deltaLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+};
+
+const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreenProps) => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
+  const dispatch = useAppDispatch();
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
+  const memberships = useSelector((s: RootState) => s.memberships.memberships);
+
+  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
+  // y caemos a users.id por compatibilidad con datos legacy.
+  const driverIdCandidates = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
+            .map((v) => (v ? String(v) : ''))
+            .filter(Boolean),
+        ),
+      ),
+    [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
+  );
+  const driverConductorId = driverIdCandidates[0];
+  const activeMembership = memberships.find(
+    (m: any) =>
+      m.status === 'ACTIVA' &&
+      driverIdCandidates.includes(String(m.conductor)),
+  );
+
+  useEffect(() => {
+    if (driverConductorId) {
+      driverIdCandidates.forEach((id) => dispatch(fetchMemberships(id)));
+    }
+  }, [dispatch, driverConductorId, driverIdCandidates]);
 
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [accepting, setAccepting] = useState<string | null>(null);
+  const [activeCarType, setActiveCarType] = useState<string | null>(null);
 
   /* ── Tab selector: Reservas vs Inmediatos ── */
   const [activeTab, setActiveTab] = useState<'reservations' | 'immediate'>('immediate');
   const [immediateServices, setImmediateServices] = useState<Reservation[]>([]);
   const [searchingImmediate, setSearchingImmediate] = useState(false);
-  const [rangeKm, setRangeKm] = useState(3);  // Inicia en 3km
+  const rangeKm = IMMEDIATE_RANGE_KM;
+
+  /* ── Live GPS del conductor (para filtro estricto de 3km) ── */
+  const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [locationDenied, setLocationDenied] = useState(false);
+  useEffect(() => {
+    let sub: Location.LocationSubscription | null = null;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationDenied(true);
+        return;
+      }
+      const first = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setLiveCoords({ lat: first.coords.latitude, lng: first.coords.longitude });
+      sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
+        loc => setLiveCoords({ lat: loc.coords.latitude, lng: loc.coords.longitude }),
+      );
+    })();
+    return () => { sub?.remove(); };
+  }, []);
+
+  /* ── IDs ya vistos para notificar solo nuevos ── */
+  const seenReservationIdsRef = useRef<Set<string> | null>(null);
+  const seenImmediateIdsRef = useRef<Set<string> | null>(null);
+  /* ── IDs de cancelaciones ya notificadas (evita repetir en ciclos sucesivos) ── */
+  const notifiedCancelledIdsRef = useRef<Set<string>>(new Set());
 
   /* ── Custom alert state ── */
   const [alertVisible, setAlertVisible] = useState(false);
@@ -104,12 +225,102 @@ const DriverReservationsScreen = () => {
     setAlertVisible(true);
   };
 
-  const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+  const topPad = embedded ? 8 : Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
 
   const driverName = [
     profile?.first_name || user?.first_name || user?.firstName || '',
     profile?.last_name || user?.last_name || user?.lastName || '',
   ].filter(Boolean).join(' ') || 'Conductor';
+
+  const driverCoords = liveCoords ?? extractLatLng({
+    ...profile,
+    ...user,
+    location: user?.location || profile?.location,
+  });
+
+  const resolveDriverId = useCallback(async (): Promise<string> => {
+    const candidates = [user?.auth_id, user?.id, profile?.auth_id, profile?.id]
+      .map((value) => String(value || '').trim())
+      .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index);
+
+    if (candidates.length === 0) {
+      throw new Error('No se pudo resolver el conductor autenticado.');
+    }
+
+    const headers = await getSupabaseAuthHeaders();
+
+    for (const candidate of candidates) {
+      if (!isUuid(candidate)) continue;
+      const byIdUrl = `${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidate)}&select=id&limit=1`;
+      const byIdRes = await fetch(byIdUrl, { headers });
+      const byIdData = byIdRes.ok ? await byIdRes.json() : [];
+      if (Array.isArray(byIdData) && byIdData.length > 0 && byIdData[0]?.id) {
+        return byIdData[0].id;
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (!isUuid(candidate)) continue;
+      const byAuthUrl = `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidate)}&select=id&limit=1`;
+      const byAuthRes = await fetch(byAuthUrl, { headers });
+      const byAuthData = byAuthRes.ok ? await byAuthRes.json() : [];
+      if (Array.isArray(byAuthData) && byAuthData.length > 0 && byAuthData[0]?.id) {
+        return byAuthData[0].id;
+      }
+    }
+
+    throw new Error('No se encontró el perfil del conductor en users.');
+  }, [profile?.auth_id, profile?.id, user?.auth_id, user?.id]);
+
+  // Los nombres entre la app del cliente (car_types.name) y la del conductor
+  // (cars.features.carType) divergieron históricamente. Esta tabla los reconcilia
+  // a un canónico para comparar correctamente.
+  const CAR_TYPE_ALIASES: Record<string, string> = {
+    'taxiplus': 't+plus taxi',
+    't+plus taxi': 't+plus taxi',
+    'vanplus': 't+plus van',
+    't+plus van': 't+plus van',
+    'xplus': 't+plus particular',
+    't+plus particular': 't+plus particular',
+    'confortplus': 't+plus especial',
+    'comfortplus': 't+plus especial',
+    't+plus especial': 't+plus especial',
+  };
+
+  const normalizeCarType = (value: any): string => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return '';
+    return CAR_TYPE_ALIASES[raw] || raw;
+  };
+
+  const fetchActiveCarType = useCallback(async (): Promise<string | null> => {
+    try {
+      const headers = await getSupabaseAuthHeaders();
+      const driverId = await resolveDriverId();
+      const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=features,is_active&limit=1`;
+      const res = await fetch(url, { headers });
+      if (res.ok) {
+        const data = await res.json();
+        const row = Array.isArray(data) ? data[0] : null;
+        const fromCar = row?.features?.carType;
+        if (fromCar && String(fromCar).trim()) {
+          const value = String(fromCar).trim();
+          setActiveCarType(value);
+          return value;
+        }
+      }
+    } catch (e) {
+      console.warn('[carType] fetchActiveCarType error:', (e as any)?.message);
+    }
+    setActiveCarType(null);
+    return null;
+  }, [resolveDriverId]);
+
+  useEffect(() => {
+    fetchActiveCarType();
+    const interval = setInterval(fetchActiveCarType, 30000);
+    return () => clearInterval(interval);
+  }, [fetchActiveCarType]);
 
   const fetchReservations = useCallback(async () => {
     try {
@@ -130,14 +341,44 @@ const DriverReservationsScreen = () => {
       if (data && data.length > 0) {
         console.log('  Ejemplos:', data.slice(0, 2).map((r: any) => ({ ref: r.reference, type: r.booking_type, status: r.status, driver: r.driver })));
       }
-      setReservations(data || []);
+
+      const rawList: any[] = Array.isArray(data) ? data : [];
+      const driverCarTypeNorm = normalizeCarType(activeCarType);
+      const list: any[] = driverCarTypeNorm
+        ? rawList.filter((it: any) =>
+            normalizeCarType(it?.car_type || it?.carType) === driverCarTypeNorm,
+          )
+        : [];
+      if (!driverCarTypeNorm) {
+        console.log('[RESERVAS] Sin vehículo activo: no se muestran reservas.');
+      } else {
+        console.log(`[RESERVAS] Filtradas por carType="${activeCarType}": ${list.length}/${rawList.length}`);
+      }
+      const currentIds = new Set<string>(list.map((it: any) => String(it.id)));
+      const previous = seenReservationIdsRef.current;
+      if (previous) {
+        for (const it of list) {
+          if (!previous.has(String(it.id))) {
+            const pickup = it.pickup_address || 'punto desconocido';
+            const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
+            notifyNewBooking(
+              '📅 Nueva reserva programada',
+              `Recogida: ${pickup}${when}`,
+              { bookingId: it.id, bookingType: 'reservation' },
+            ).catch(() => {});
+          }
+        }
+      }
+      seenReservationIdsRef.current = currentIds;
+
+      setReservations(list);
     } catch (e) {
       console.error('❌ Fetch reservations error:', e);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [activeCarType]);
 
   /* ── Buscar servicios inmediatos disponibles ── */
   const searchImmediateServices = useCallback(async () => {
@@ -145,9 +386,9 @@ const DriverReservationsScreen = () => {
       setSearchingImmediate(true);
       const headers = await getSupabaseAuthHeaders();
       
-      // Estrategia: Traer TODO immediate sin driver, luego filtrar en código
-      // Con limit=1000 para evitar límite por defecto de PostgREST
-      const urlImmediates = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.immediate&driver_id=is.null&limit=1000&select=*&order=created_at.desc`;
+      // Traer inmediatos recientes y filtrar en cliente para evitar perder filas
+      // cuando driver/driver_id vienen null, vacíos o con formatos distintos.
+      const urlImmediates = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.immediate&limit=1000&select=*&order=created_at.desc`;
       
       console.log('🟢 [INMEDIATOS] Query:', urlImmediates);
       
@@ -168,16 +409,87 @@ const DriverReservationsScreen = () => {
         return;
       }
       
-      // Filtrar en código: NEW y PENDING
-      const filtered = allData.filter((item: any) => 
-        item.status === 'NEW' || item.status === 'PENDING'
-      );
+      const driverCarType = normalizeCarType(activeCarType);
+
+      if (!driverCarType) {
+        console.log('[INMEDIATOS] Sin vehículo activo: no se muestran servicios.');
+        setImmediateServices([]);
+        return;
+      }
+
+      const filtered = allData.filter((item: any) => {
+        const status = String(item?.status || '').toUpperCase();
+        const isAvailableStatus = status === 'NEW' || status === 'PENDING';
+        if (!isAvailableStatus) return false;
+
+        const hasAssignedDriver = Boolean(String(item?.driver || '').trim()) || Boolean(String(item?.driver_id || '').trim());
+        if (hasAssignedDriver) return false;
+
+        const bookingCarType = normalizeCarType(item?.car_type || item?.carType);
+        if (bookingCarType !== driverCarType) return false;
+
+        // Filtro estricto: si no podemos verificar la distancia, NO mostramos.
+        // Los inmediatos solo deben aparecer si el pickup está a <= 3km.
+        const pickupCoords = extractLatLng(item);
+        if (!pickupCoords || !driverCoords) return false;
+
+        const distanceKm = getDistanceKm(
+          driverCoords.lat,
+          driverCoords.lng,
+          pickupCoords.lat,
+          pickupCoords.lng,
+        );
+
+        item.distance_to_pickup_km = distanceKm;
+        return distanceKm <= rangeKm;
+      });
       
       const newCount = filtered.filter((item: any) => item.status === 'NEW').length;
       const pendingCount = filtered.filter((item: any) => item.status === 'PENDING').length;
       
-      console.log(`✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}`);
-      
+      console.log(`✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}, rangeKm: ${rangeKm}, driverCoords: ${driverCoords ? `${driverCoords.lat},${driverCoords.lng}` : 'N/A'}`);
+
+      // Notificar nuevos inmediatos (que no estaban en la lista anterior)
+      const currentIds = new Set<string>(filtered.map((it: any) => String(it.id)));
+      const previous = seenImmediateIdsRef.current;
+      if (previous) {
+        for (const it of filtered as any[]) {
+          if (!previous.has(String(it.id))) {
+            const pickup = it.pickup_address || 'punto desconocido';
+            const distTxt = typeof it.distance_to_pickup_km === 'number'
+              ? ` · ${it.distance_to_pickup_km.toFixed(1)} km`
+              : '';
+            notifyNewBooking(
+              '⚡ Nuevo servicio inmediato',
+              `Recogida: ${pickup}${distTxt}`,
+              { bookingId: it.id, bookingType: 'immediate' },
+            ).catch(() => {});
+          }
+        }
+
+        // Detectar servicios que desaparecieron porque el cliente canceló
+        for (const prevId of previous) {
+          if (!currentIds.has(prevId) && !notifiedCancelledIdsRef.current.has(prevId)) {
+            const disappeared = allData.find((b: any) => String(b.id) === prevId);
+            if (
+              disappeared &&
+              String(disappeared.status || '').toUpperCase() === 'CANCELLED' &&
+              disappeared.cancelled_by === 'customer'
+            ) {
+              notifiedCancelledIdsRef.current.add(prevId);
+              const customerName = disappeared.customer_name || 'El cliente';
+              const reference = disappeared.reference ? ` (${disappeared.reference})` : '';
+              notifyNewBooking(
+                '❌ Servicio cancelado por el cliente',
+                `${customerName} canceló el servicio${reference}`,
+                { bookingId: disappeared.id, bookingType: 'immediate' },
+              ).catch(() => {});
+            }
+          }
+        }
+      }
+      seenImmediateIdsRef.current = currentIds;
+
       setImmediateServices(filtered);
     } catch (e) {
       console.error('❌ Search immediate services error:', e);
@@ -185,18 +497,7 @@ const DriverReservationsScreen = () => {
     } finally {
       setSearchingImmediate(false);
     }
-  }, []);
-
-  /* ── Incrementar rango cada 5 minutos (timer) ── */
-  useEffect(() => {
-    if (activeTab === 'immediate' && searchingImmediate === false) {
-      const interval = setInterval(() => {
-        setRangeKm(prev => prev + 3);
-        console.log(`[RANGE UPDATE] Nuevo rango: ${(rangeKm + 3)}km`);
-      }, 5 * 60 * 1000);  // 5 minutos
-      return () => clearInterval(interval);
-    }
-  }, [activeTab, searchingImmediate, rangeKm]);
+  }, [driverCoords, rangeKm, activeCarType]);
 
   useEffect(() => {
     fetchReservations();
@@ -205,20 +506,78 @@ const DriverReservationsScreen = () => {
     return () => clearInterval(interval);
   }, [fetchReservations]);
 
-  /* ── Auto-refresh inmediatos cada 10 segundos ── */
+  /* ── Auto-refresh inmediatos cada 10 segundos (siempre, no solo en su tab) ── */
   useEffect(() => {
-    if (activeTab === 'immediate') {
-      searchImmediateServices();
-      const interval = setInterval(searchImmediateServices, 10000);
-      return () => clearInterval(interval);
-    }
-  }, [activeTab, searchImmediateServices]);
+    searchImmediateServices();
+    const interval = setInterval(searchImmediateServices, 10000);
+    return () => clearInterval(interval);
+  }, [searchImmediateServices]);
 
   const handleAccept = async (reservation: Reservation) => {
     const isImmmediate = reservation.booking_type === 'immediate';
+
+    // Regla de negocio: el conductor solo puede tomar servicios cuya categoría
+    // coincida con la del vehículo que tiene actualmente activo.
+    const driverCarTypeNorm = normalizeCarType(activeCarType);
+    if (!driverCarTypeNorm) {
+      showAlert(
+        'warning',
+        'Sin vehículo activo',
+        'Debes activar un vehículo en "Mis Vehículos" antes de tomar servicios o reservas.',
+        [
+          { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+          {
+            text: 'Ir a vehículos',
+            onPress: () => {
+              setAlertVisible(false);
+              nav.navigate('Cars');
+            },
+          },
+        ],
+      );
+      return;
+    }
+    const bookingCarTypeNorm = normalizeCarType(reservation?.car_type);
+    if (bookingCarTypeNorm && bookingCarTypeNorm !== driverCarTypeNorm) {
+      showAlert(
+        'warning',
+        'Categoría no coincide',
+        `Este ${isImmmediate ? 'servicio' : 'reserva'} es para la categoría "${reservation.car_type}". Tu vehículo activo es de la categoría "${activeCarType}".`,
+      );
+      return;
+    }
+
+    // Bloquear toma de servicios si no hay membresía ACTIVA (regla de negocio para conductores).
+    if (!activeMembership) {
+      console.log('[Membership] DriverReservations.handleAccept BLOQUEADO: sin membresía activa', {
+        driverIdCandidates,
+        memberships: memberships.length,
+      });
+      showAlert(
+        'warning',
+        'Membresía requerida',
+        'No tienes una membresía activa. Puedes ver los servicios disponibles, pero para tomarlos necesitas renovar tu membresía.',
+        [
+          { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+          {
+            text: 'Renovar membresía',
+            onPress: () => {
+              setAlertVisible(false);
+              nav.navigate('Wallet');
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    const observationText = reservation.observations && String(reservation.observations).trim()
+      ? `\n\nObservación del cliente: ${String(reservation.observations).trim()}`
+      : '';
+
     showAlert('confirm',
       isImmmediate ? 'Aceptar Servicio' : 'Aceptar Reserva',
-      `¿Deseas aceptar ${isImmmediate ? 'el servicio' : 'la reserva'} de ${reservation.customer_name}?\n\nOrigen: ${reservation.pickup_address}\nDestino: ${reservation.drop_address}${!isImmmediate ? `\nFecha: ${formatDate(reservation.booking_date)}\nHora: ${formatTime(reservation.booking_date)}` : ''}`,
+      `¿Deseas aceptar ${isImmmediate ? 'el servicio' : 'la reserva'} de ${reservation.customer_name}?\n\nOrigen: ${reservation.pickup_address}\nDestino: ${reservation.drop_address}${!isImmmediate ? `\nFecha: ${formatDate(reservation.booking_date)}\nHora: ${formatTime(reservation.booking_date)}` : ''}${observationText}`,
       [
         { text: 'Cancelar', style: 'cancel', onPress: () => setAlertVisible(false) },
         {
@@ -234,6 +593,7 @@ const DriverReservationsScreen = () => {
     try {
       const headers = await getSupabaseAuthHeaders(true);
       const isImmediate = reservation.booking_type === 'immediate';
+      const driverId = await resolveDriverId();
 
       // First check it's still available (get without status filter, then check in code)
       const checkUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}&booking_type=eq.${reservation.booking_type}&select=id,status`;
@@ -257,12 +617,27 @@ const DriverReservationsScreen = () => {
         return;
       }
 
-      // Get driver vehicle data
-      const driverId = user?.auth_id || user?.id;
-      const carUrl = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${driverId}&select=plate,make,model,color,vehicle_number,vehicle_make,vehicle_model,vehicle_color&limit=1`;
+      // Get driver vehicle data — prefer active car, fall back to any registered car
+      const carUrl = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=plate,make,model,color,vehicle_number,vehicle_make,vehicle_model,vehicle_color&limit=1`;
       const carRes = await fetch(carUrl, { headers });
       const cars = await carRes.json();
-      const car = cars?.[0] || {};
+      let car = cars?.[0];
+
+      // If no active car found, try any car for this driver
+      if (!car) {
+        const anyCarUrl = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&select=plate,make,model,color,vehicle_number,vehicle_make,vehicle_model,vehicle_color&order=created_at.desc&limit=1`;
+        const anyCarRes = await fetch(anyCarUrl, { headers });
+        const anyCars = await anyCarRes.json();
+        car = anyCars?.[0] || {};
+      }
+
+      // Plate fallback chain: cars.plate → cars.vehicle_number → user profile vehicle_number → user Firebase vehicleNumber
+      const resolvedPlate =
+        car.plate ||
+        car.vehicle_number ||
+        user?.vehicle_number ||
+        user?.vehicleNumber ||
+        null;
 
       // Update booking to ACCEPTED with driver info
       const updateBody = {
@@ -272,8 +647,8 @@ const DriverReservationsScreen = () => {
         driver_name: driverName,
         driver_contact: user?.mobile || '',
         driver_token: user?.pushToken || user?.push_token || '',
-        plate_number: car.plate || car.vehicle_number || null,
-        vehicle_number: car.plate || car.vehicle_number || null,
+        plate_number: resolvedPlate,
+        vehicle_number: resolvedPlate,
         vehicle_make: car.make || car.vehicle_make || null,
         vehicle_model: car.model || car.vehicle_model || null,
         vehicle_color: car.color || car.vehicle_color || null,
@@ -379,7 +754,15 @@ const DriverReservationsScreen = () => {
       );
     } catch (e: any) {
       console.error('Accept booking error:', e);
-      showAlert('error', 'Error', 'No se pudo aceptar. Intenta de nuevo.');
+      const raw = String(e?.message || 'Error desconocido');
+      let detail = raw;
+      try {
+        const parsed = JSON.parse(raw);
+        detail = parsed?.message || parsed?.details || raw;
+      } catch {
+        detail = raw;
+      }
+      showAlert('error', 'Error', `No se pudo aceptar. ${detail}`);
     } finally {
       setAccepting(null);
     }
@@ -448,11 +831,23 @@ const DriverReservationsScreen = () => {
         </View>
         ) : null}
 
+        {/* Observations (nota del cliente) */}
+        {item.observations && String(item.observations).trim() ? (
+        <View style={s.obsBlock}>
+          <View style={s.obsHeader}>
+            <Ionicons name="chatbubble-ellipses-outline" size={14} color="#00E5FF" />
+            <Text style={s.obsLabel}>Observación del cliente</Text>
+          </View>
+          <Text style={s.obsText}>{String(item.observations).trim()}</Text>
+        </View>
+        ) : null}
+
         {/* Stats */}
         <View style={s.statsRow}>
           <View style={s.stat}>
             <Text style={s.statLabel}>Valor</Text>
-            <Text style={s.statValue}>$ {fmtMoney(item.driver_share)} - $ {fmtMoney(item.estimate || item.price)}</Text>
+            <Text style={s.statValue}>$ {fmtMoney(item.driver_share)}</Text>
+            <Text style={s.statValue}>$ {fmtMoney(item.estimate || item.price)}</Text>
           </View>
           <View style={s.stat}>
             <Text style={s.statLabel}>Dist.</Text>
@@ -496,23 +891,37 @@ const DriverReservationsScreen = () => {
 
   const EmptyState = () => (
     <View style={s.emptyWrap}>
-      <Ionicons name="calendar-outline" size={60} color="rgba(0,229,255,0.3)" />
-      <Text style={s.emptyTitle}>No hay reservas disponibles</Text>
-      <Text style={s.emptySub}>Las nuevas reservas de clientes aparecerán aquí</Text>
+      <Ionicons
+        name={activeCarType ? 'calendar-outline' : 'car-outline'}
+        size={60}
+        color="rgba(0,229,255,0.3)"
+      />
+      <Text style={s.emptyTitle}>
+        {activeCarType ? 'No hay reservas disponibles' : 'Activa un vehículo'}
+      </Text>
+      <Text style={s.emptySub}>
+        {activeCarType
+          ? `Solo se muestran reservas de tu categoría activa (${activeCarType}).`
+          : 'Debes activar un vehículo en "Mis Vehículos" para ver reservas de tu categoría.'}
+      </Text>
     </View>
   );
 
   return (
-    <View style={s.root}>
+    <View style={[s.root, embedded && s.rootEmbedded]}>
       <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
         <Image source={BG_IMAGE} style={s.bgImage} resizeMode="cover" />
         <View style={s.bgOverlay} />
       </View>
 
-      <View style={[s.header, { paddingTop: topPad }]}>
-        <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
-          <Ionicons name="chevron-back" size={24} color="#FFF" />
-        </TouchableOpacity>
+      <View style={[s.header, embedded && s.headerEmbedded, { paddingTop: topPad }]}> 
+        {embedded ? (
+          <View style={s.headerSpacer} />
+        ) : (
+          <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
+            <Ionicons name="chevron-back" size={24} color="#FFF" />
+          </TouchableOpacity>
+        )}
         <Text style={s.headerTitle}>
           {activeTab === 'reservations' ? 'Reservas Disponibles' : 'Servicios Inmediatos'}
         </Text>
@@ -565,7 +974,6 @@ const DriverReservationsScreen = () => {
           style={[s.tab, activeTab === 'immediate' && s.tabActive]}
           onPress={() => {
             setActiveTab('immediate');
-            setRangeKm(3);  // Reset rango a 3km
             searchImmediateServices();
           }}
         >
@@ -586,14 +994,30 @@ const DriverReservationsScreen = () => {
           data={activeTab === 'reservations' ? reservations : immediateServices}
           keyExtractor={item => item.id}
           renderItem={renderItem}
-          contentContainerStyle={[s.list, { paddingBottom: insets.bottom + 30 }]}
+          contentContainerStyle={[s.list, { paddingBottom: embedded ? 18 : insets.bottom + 30 }]}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             activeTab === 'reservations' ? EmptyState : (
               <View style={s.emptyWrap}>
-                <Ionicons name="flash-outline" size={60} color="rgba(0,229,255,0.3)" />
-                <Text style={s.emptyTitle}>No hay servicios inmediatos</Text>
-                <Text style={s.emptySub}>Presiona GO para buscar en tu área (rango: {rangeKm}km)</Text>
+                <Ionicons
+                  name={!activeCarType ? 'car-outline' : locationDenied ? 'location-outline' : 'flash-outline'}
+                  size={60}
+                  color="rgba(0,229,255,0.3)"
+                />
+                <Text style={s.emptyTitle}>
+                  {!activeCarType
+                    ? 'Activa un vehículo'
+                    : locationDenied
+                      ? 'Activa la ubicación'
+                      : 'No hay servicios inmediatos cerca'}
+                </Text>
+                <Text style={s.emptySub}>
+                  {!activeCarType
+                    ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
+                    : locationDenied
+                      ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
+                      : `Solo servicios a menos de ${rangeKm} km y de tu categoría (${activeCarType}).`}
+                </Text>
               </View>
             )
           }
@@ -631,6 +1055,10 @@ export default DriverReservationsScreen;
 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#051A26' },
+  rootEmbedded: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,229,255,0.2)',
+  },
   bgImage: { ...StyleSheet.absoluteFillObject, opacity: 0.3 },
   bgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(5,26,38,0.78)' },
   header: {
@@ -638,6 +1066,13 @@ const s = StyleSheet.create({
     paddingHorizontal: 20, paddingBottom: 14,
     backgroundColor: 'rgba(5,26,38,0.85)',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  headerEmbedded: {
+    paddingBottom: 10,
+  },
+  headerSpacer: {
+    width: 40,
+    height: 40,
   },
   backBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
@@ -699,7 +1134,18 @@ const s = StyleSheet.create({
     paddingVertical: 14, borderRadius: 16, backgroundColor: '#00E5FF',
   },
   acceptTxt: { fontSize: 15, fontWeight: '700', color: '#051A26' },
-  
+  obsBlock: {
+    marginBottom: 14, padding: 12, borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.06)',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.18)',
+  },
+  obsHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  obsLabel: {
+    fontSize: 10, fontWeight: '700', color: '#00E5FF',
+    textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  obsText: { fontSize: 13, color: 'rgba(255,255,255,0.85)', lineHeight: 18 },
+
   // Tab styles
   tabContainer: {
     flexDirection: 'row', gap: 10,

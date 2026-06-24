@@ -238,6 +238,7 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
   const [activeBookingsCount, setActiveBookingsCount] = useState(0);
   const [type, setType] = useState<number | null>(null);
   const [routeGeometry, setRouteGeometry] = useState<any>(null);
+  const [editingMode, setEditingMode] = useState(false); // Modo para cambiar punto de origen
   const suggestions = [
     { id: 1, image: require("@/assets/images/TREAS-E.png"), label: "T+Plus Especial", description: "Servicio Especial" },
     { id: 2, image: require("@/assets/images/TREAS-X.png"), label: "T+Plus Particular", description: "Vehículo Particular" },
@@ -382,6 +383,23 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
     }
   };
 
+  // Función para eliminar el marcador de origen
+  const handleRemoveOrigin = () => {
+    setOrigin(null);
+    originAutocompleteRef.current?.setAddressText("");
+  };
+
+  // Función para eliminar el marcador de destino
+  const handleRemoveDestination = () => {
+    setDestination(null);
+    destinationAutocompleteRef.current?.setAddressText("");
+  };
+
+  // Función para cambiar el punto de origen
+  const toggleEditingMode = () => {
+    setEditingMode(!editingMode);
+  };
+
   // Removed auto-navigation to BookingScreen - now goes through TripPreviewScreen first
 
   useEffect(() => {
@@ -473,10 +491,17 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
         console.warn("No hay usuario autenticado.");
         return;
       }
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const authUserId = authUser?.id || user?.auth_id;
+      if (!authUserId) {
+        console.warn("No se pudo resolver auth.uid() para el update.");
+        alert("No se pudo identificar al usuario autenticado.");
+        return;
+      }
       setLoading(true);
-      // Actualiza en Supabase
+      // Actualiza en Supabase usando auth.uid() (= users.auth_id)
       const result = await updateUserProfileSupabase(
-        user.id,
+        authUserId,
         {
           ...userData,
           verify_id_image: userData.verifyIdImage,
@@ -1363,23 +1388,65 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
 
         {isMapVisible && (
           <View style={{ flex: 1 }}>
-            {/* Botón de Back */}
-            <View style={{ position: 'absolute', top: 0, left: 0, zIndex: 2, padding: 30 }}>
-              <TouchableOpacity style={{
-                backgroundColor: '#b3fcfc',
-                borderRadius: 100,
-                width: 40,  // Aumenta el ancho
-                height: 40,  // Aumenta la altura
-                justifyContent: 'center',  // Centrar contenido verticalmente
-                alignItems: 'center'  // Centrar contenido horizontalmente
-              }}
+            {/* Map Header - Botón de Cambiar Origen y otros controles */}
+            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, padding: 20, paddingTop: 30 }}>
+              <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                {/* Botón de Back */}
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#b3fcfc',
+                    borderRadius: 100,
+                    width: 40,
+                    height: 40,
+                    justifyContent: 'center',
+                    alignItems: 'center'
+                  }}
+                  onPress={() => setIsMapVisible(false)}
+                >
+                  <Ionicons name="arrow-back" size={24} color="black" />
+                </TouchableOpacity>
 
-                onPress={() => setIsMapVisible(false)}>
-                <Ionicons name="arrow-back" size={24} color="black" />
-              </TouchableOpacity>
+                {/* Botón para cambiar punto de origen */}
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: editingMode ? '#ff6b6b' : '#b3fcfc',
+                    borderRadius: 10,
+                    paddingVertical: 10,
+                    paddingHorizontal: 15,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    flex: 1
+                  }}
+                  onPress={toggleEditingMode}
+                >
+                  <Text style={{
+                    color: editingMode ? 'white' : 'black',
+                    fontWeight: '600',
+                    fontSize: 14
+                  }}>
+                    {editingMode ? '✓ Modo Edición' : '✎ Cambiar Origen'}
+                  </Text>
+                </TouchableOpacity>
+
+                {/* Botón para centrar en ubicación actual */}
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#b3fcfc',
+                    borderRadius: 100,
+                    width: 40,
+                    height: 40,
+                    justifyContent: 'center',
+                    alignItems: 'center'
+                  }}
+                  onPress={centerMap}
+                >
+                  <Ionicons name="locate" size={24} color="black" />
+                </TouchableOpacity>
+              </View>
             </View>
 
-            <View style={{ position: 'absolute', top: 40, width: '100%', zIndex: 1, padding: 30, marginTop: 10 }}>
+            {/* Inputs flotantes */}
+            <View style={{ position: 'absolute', top: 80, width: '100%', zIndex: 1, padding: 20 }}>
               {/* Input de origen */}
               <GooglePlacesAutocomplete
                 ref={originAutocompleteRef}
@@ -1419,7 +1486,7 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
                 textInputProps={{
                   onFocus: () => {
                     setFocus('origin');
-                    setIsMapVisible(true); // Mostrar el mapa cuando el campo de "Origen" gana el foco
+                    setIsMapVisible(true);
                     setButtonsVisible(false);
                     if (!sessionTokenOriginRef.current) {
                       const generateUID = () => {
@@ -1444,8 +1511,6 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
                 ref={destinationAutocompleteRef}
                 enablePoweredByContainer={false}
                 placeholder={destination ? destination.title : "Destino"}
-
-
                 minLength={4}
                 debounce={2000}
                 fetchDetails
@@ -1584,38 +1649,129 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
                 latitudeDelta: 0.0922,
                 longitudeDelta: 0.0421,
               }}
+              zoomEnabled={true}
+              scrollEnabled={true}
+              pitchEnabled={true}
             >
+              {/* Polyline - Línea de viaje DEBE ir primero */}
+              {routeGeometry && (
+                <>
+                  {/* Línea de sombra (más gruesa, semitransparente) */}
+                  <Polyline
+                    coordinates={routeGeometry.coordinates.map((coord: [number, number]) => ({ latitude: coord[1], longitude: coord[0] }))}
+                    strokeColor="rgba(0, 244, 245, 0.3)"
+                    strokeWidth={8}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                  {/* Línea principal (bright cyan) */}
+                  <Polyline
+                    coordinates={routeGeometry.coordinates.map((coord: [number, number]) => ({ latitude: coord[1], longitude: coord[0] }))}
+                    strokeColor="#00f4f5"
+                    strokeWidth={4}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                </>
+              )}
+
+              {/* Marcador de Origen - Clickeable */}
               {origin && (
                 <Marker
                   coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
                   title={origin.title}
+                  onPress={() => {
+                    if (editingMode) {
+                      handleRemoveOrigin();
+                    }
+                  }}
                 >
-                  <View style={styles.markerContainer}>
+                  <TouchableOpacity
+                    style={{
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: editingMode ? '#ff6b6b' : 'transparent',
+                      borderRadius: 20,
+                      padding: 4,
+                    }}
+                    disabled={!editingMode}
+                  >
                     <Image
                       source={markerIcon}
-                      style={{ width: 26, height: 50 }}
+                      style={{ width: 30, height: 50 }}
                     />
-                  </View>
+                    {editingMode && (
+                      <View
+                        style={{
+                          position: 'absolute',
+                          backgroundColor: '#ff6b6b',
+                          borderRadius: 12,
+                          width: 24,
+                          height: 24,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          top: -8,
+                          right: -8,
+                        }}
+                      >
+                        <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>×</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
                 </Marker>
               )}
 
+              {/* Marcador de Destino - Clickeable */}
               {destination && (
                 <Marker
                   coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
                   title={destination.title}
+                  onPress={() => {
+                    if (editingMode) {
+                      handleRemoveDestination();
+                    }
+                  }}
                 >
-                  <View style={styles.markerContainer}>
-                    <Ionicons name="location" size={36} color="#00f4f5" />
-                  </View>
+                  <TouchableOpacity
+                    style={{
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: editingMode ? '#ff6b6b' : 'transparent',
+                      borderRadius: 20,
+                      padding: 4,
+                    }}
+                    disabled={!editingMode}
+                  >
+                    <View
+                      style={{
+                        backgroundColor: '#00f4f5',
+                        borderRadius: 50,
+                        padding: 8,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <Ionicons name="location" size={32} color="white" />
+                    </View>
+                    {editingMode && (
+                      <View
+                        style={{
+                          position: 'absolute',
+                          backgroundColor: '#ff6b6b',
+                          borderRadius: 12,
+                          width: 24,
+                          height: 24,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          top: -8,
+                          right: -8,
+                        }}
+                      >
+                        <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>×</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
                 </Marker>
-              )}
-
-              {routeGeometry && (
-                <Polyline
-                  coordinates={routeGeometry.coordinates.map((coord: [number, number]) => ({ latitude: coord[1], longitude: coord[0] }))}
-                  strokeColor="#00f4f5"
-                  strokeWidth={3}
-                />
               )}
             </MapView>
           </View>

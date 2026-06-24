@@ -1,18 +1,15 @@
 # Configuration for Supabase project
 
-[project]
-name = "completion-2.0"
-description = "Ride booking and calling platform"
-
-[functions]
-verify_jwt = true
+project_id = "completion-2.0"
 
 [functions.generateAgoraToken]
-verify_jwt = false  # No requiere autenticación para generar token
-main = "generateAgoraToken/index.ts"
-import_map = "./functions/import_map.json"
+verify_jwt = false
+entrypoint = "./functions/generateAgoraToken/index.ts"
 
 [functions.notifyIncomingCall]
-verify_jwt = true  # Requiere autenticación
-main = "notifyIncomingCall/index.ts"
-import_map = "./functions/import_map.json"
+verify_jwt = true
+entrypoint = "./functions/notifyIncomingCall/index.ts"
+
+[functions.sync-driver-to-primary]
+verify_jwt = true
+entrypoint = "./functions/sync-driver-to-primary/index.ts"

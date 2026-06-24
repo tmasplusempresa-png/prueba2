@@ -7,7 +7,7 @@ const AppConfig = {
     app_description: process.env.APP_DESCRIPTION || 'Sistema de transporte urbano inteligente T+Plus',
     app_display_name: process.env.APP_DISPLAY_NAME || 'TmasPlus',
     icon_app: './assets/images/logo-Preview.png',
-    app_identifier: process.env.APP_IDENTIFIER || 'com.tmasplus.tmasplus',
+    app_identifier: process.env.APP_IDENTIFIER || 'com.releaseunocero',
     app_identifier_ios: process.env.APP_IDENTIFIER_IOS || 'tmasplus.tmasplus',
     ios_app_version: process.env.APP_VERSION || '1.10.3',
     runtime_Version: process.env.EXPO_RUNTIME_VERSION || '1.0.4',
@@ -48,9 +48,8 @@ module.exports = {
     orientation: "portrait",
     icon: AppConfig.icon_app,
     splash: {
-        "image": "./assets/images/splash.png",
-        "resizeMode": 'cover',
-        "backgroundColor": "#ffffff"
+        "resizeMode": 'contain',
+        "backgroundColor": "#051A26"
     },
     updates: {
         "fallbackToCacheTimeout": 0,
@@ -67,7 +66,7 @@ module.exports = {
         SUPABASE_URL: process.env.SUPABASE_URL || '',
         SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || '',
         SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
-        SUPABASE_EMAIL_REDIRECT_TO: process.env.SUPABASE_EMAIL_REDIRECT_TO || (process.env.NODE_ENV === 'production' ? 'https://dashboard.tmasplus.com/register-driver' : 'http://localhost:5173/register-driver'),
+        SUPABASE_EMAIL_REDIRECT_TO: process.env.SUPABASE_EMAIL_REDIRECT_TO || 'https://dashboard.tmasplus.com/welcome',
         GOOGLE_MAPS_API_KEY_ANDROID: process.env.GOOGLE_MAPS_API_KEY_ANDROID || '',
         GOOGLE_MAPS_API_KEY_IOS: process.env.GOOGLE_MAPS_API_KEY_IOS || '',
         MAPBOX_ACCESS_TOKEN: MAPBOX_ACCESS_TOKEN
@@ -145,7 +144,8 @@ module.exports = {
             "ACCESS_BACKGROUND_LOCATION",
             "SCHEDULE_EXACT_ALARM",
             "BODY_SENSORS",
-            "ACTIVITY_RECOGNITION"
+            "ACTIVITY_RECOGNITION",
+            "POST_NOTIFICATIONS"
         ],
         blockedPermissions: ["com.google.android.gms.permission.AD_ID"],
         config: {
@@ -157,6 +157,7 @@ module.exports = {
     "plugins": [
         "expo-asset",
         "expo-localization",
+        "expo-secure-store",
         // "@react-native-firebase/app",
         // "@react-native-firebase/auth",
         // "react-native-background-fetch",
@@ -176,7 +177,7 @@ module.exports = {
                     "useFrameworks": "static"
                 },
                 "android": {
-                    "enableHermes": false
+                    "enableHermes": true
                 }
             }
         ],

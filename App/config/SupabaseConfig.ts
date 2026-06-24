@@ -20,6 +20,7 @@ interface SupabaseClientOptions {
     autoRefreshToken: boolean;
     persistSession: boolean;
     detectSessionInUrl: boolean;
+    flowType?: 'pkce' | 'implicit';
     storageKey?: string;
   };
   global: {
@@ -44,14 +45,65 @@ interface DatabaseHealth {
   isHealthy: boolean;
 }
 
+const SESSION_STORAGE_KEY = 'tmasplus_auth_session';
+
+const toErrorMessage = (error: any): string => {
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  return String(error.message || error.error_description || error.name || '');
+};
+
+const isInvalidRefreshTokenError = (error: any): boolean => {
+  const msg = toErrorMessage(error);
+  if (!msg) return false;
+  return msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found');
+};
+
+// Storage envuelto: descarta sesiones malformadas o cuyo access_token expiró
+// hace más de 14 días (entonces el refresh_token también suele estar invalidado
+// en el servidor). Evita que el SDK intente refrescar tokens muertos al iniciar.
+const REFRESH_GRACE_SECONDS = 14 * 24 * 60 * 60;
+const sessionStorageAdapter = {
+  getItem: async (key: string): Promise<string | null> => {
+    try {
+      const value = await AsyncStorage.getItem(key);
+      if (!value) return null;
+      if (key !== SESSION_STORAGE_KEY) return value;
+
+      const parsed = JSON.parse(value);
+      const expiresAt: number | undefined = parsed?.expires_at;
+      if (typeof expiresAt === 'number') {
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (nowSec - expiresAt > REFRESH_GRACE_SECONDS) {
+          console.warn('[SupabaseStorage] Sesión guardada caducó hace mucho, descartando.');
+          await AsyncStorage.removeItem(key);
+          return null;
+        }
+      }
+      return value;
+    } catch (err) {
+      console.warn('[SupabaseStorage] Sesión guardada inválida, descartando:', (err as any)?.message);
+      try { await AsyncStorage.removeItem(key); } catch {}
+      return null;
+    }
+  },
+  setItem: (key: string, value: string) => AsyncStorage.setItem(key, value),
+  removeItem: (key: string) => AsyncStorage.removeItem(key),
+};
+
 // ==================== CONFIGURACION OPTIMIZADA DEL CLIENTE ====================
 const createSupabaseClientOptions = (): SupabaseClientOptions => ({
   auth: {
-    storage: AsyncStorage,
+    storage: sessionStorageAdapter,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false, // Especifico para React Native
-    storageKey: 'tmasplus_auth_session',
+    // PKCE: el enlace de recuperación llega como ?code=... (query) en vez de
+    // #access_token=... (fragmento). En Android el fragmento se pierde al saltar
+    // del navegador al deep link; el query sobrevive. La app intercambia el code
+    // por la sesión con exchangeCodeForSession (ver ResetPassword.tsx).
+    flowType: 'pkce',
+    storageKey: SESSION_STORAGE_KEY,
   },
   global: {
     headers: {
@@ -76,6 +128,17 @@ export const supabase: SupabaseClient<Database> = createClient<Database>(
   SupabaseConfig.anonKey,
   createSupabaseClientOptions()
 ); 
+
+// ==================== FLAG DE RECUPERACION DE CONTRASEÑA ====================
+// Mientras el usuario restablece su contraseña por deep link, exchangeCodeForSession
+// crea una sesión temporal que dispara SIGNED_IN. Sin este flag, el listener global
+// marcaría al usuario como autenticado y el navegador conmutaría de stack,
+// desmontando la pantalla ResetPassword (inputs quedaban inutilizables).
+let _passwordRecoveryInProgress = false;
+export const setPasswordRecoveryInProgress = (value: boolean): void => {
+  _passwordRecoveryInProgress = value;
+};
+export const isPasswordRecoveryInProgress = (): boolean => _passwordRecoveryInProgress;
 
 // ==================== REST API CREDENTIALS (for direct fetch calls) ====================
 export const SUPABASE_URL = SupabaseConfig.url;
@@ -116,10 +179,40 @@ export const getSupabaseAuthHeaders = async (includeContentType = false) => {
 
 export const clearStoredSession = async (): Promise<void> => {
   try {
-    await AsyncStorage.removeItem('tmasplus_auth_session');
+    await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch (error) {
+    console.warn('Error clearing stored auth session:', error);
+  }
+
+  try {
+    // Reset Supabase auth state in memory too, para evitar que el cliente siga usando una sesión inválida.
     await supabase.auth.signOut();
   } catch (error) {
-    console.error('Error clearing stored auth session:', error);
+    // El refresh token puede no existir o ser inválido, así que ignoramos el error.
+    console.warn('Error clearing Supabase auth state:', error);
+  }
+};
+
+export const getSafeSession = async (): Promise<Session | null> => {
+  try {
+    const { data: { session }, error } = await supabase.auth.getSession();
+
+    if (error) {
+      if (isInvalidRefreshTokenError(error)) {
+        await clearStoredSession();
+        return null;
+      }
+      return null;
+    }
+
+    return session;
+  } catch (error) {
+    if (isInvalidRefreshTokenError(error)) {
+      await clearStoredSession();
+      return null;
+    }
+    console.warn('Error inesperado obteniendo sesion segura:', error);
+    return null;
   }
 };
 
@@ -132,16 +225,18 @@ export const Auth = {
     try {
       const { data: { user }, error } = await supabase.auth.getUser();
       if (error) {
-        console.error('Error obteniendo usuario:', error.message);
-        if (error.message.includes('Invalid Refresh Token') || error.message.includes('Refresh Token Not Found')) {
+        if (isInvalidRefreshTokenError(error)) {
           await clearStoredSession();
         }
         return null;
       }
       return user;
     } catch (error) {
-      console.error('Error inesperado obteniendo usuario:', error);
-      await clearStoredSession();
+      if (isInvalidRefreshTokenError(error)) {
+        await clearStoredSession();
+        return null;
+      }
+      console.warn('Error inesperado obteniendo usuario:', error);
       return null;
     }
   },
@@ -150,21 +245,7 @@ export const Auth = {
    * Obtiene la sesion actual con validacion
    */
   getCurrentSession: async (): Promise<Session | null> => {
-    try {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (error) {
-        console.error('Error obteniendo sesion:', error.message);
-        if (error.message.includes('Invalid Refresh Token') || error.message.includes('Refresh Token Not Found')) {
-          await clearStoredSession();
-        }
-        return null;
-      }
-      return session;
-    } catch (error) {
-      console.error('Error inesperado obteniendo sesion:', error);
-      await clearStoredSession();
-      return null;
-    }
+    return getSafeSession();
   },
 
   /**
@@ -250,6 +331,11 @@ export const Health = {
       const { error: authError } = await supabase.auth.getSession();
       
       if (authError) {
+        if (isInvalidRefreshTokenError(authError)) {
+          await clearStoredSession();
+          status.isConnected = true;
+          return status;
+        }
         status.error = `Autenticacion falló: ${authError.message}`;
         return status;
       }
@@ -440,28 +526,40 @@ export const setupAuthListeners = (): { unsubscribe: () => void } => {
     switch (event) {
       case 'SIGNED_IN':
         console.log('Usuario autenticado:', session?.user?.email);
-        
-        // Sincronizar perfil de usuario si es necesario
+
+        // IMPORTANTE: nunca usar `await` sobre llamadas a Supabase dentro de un
+        // callback de onAuthStateChange. El evento se emite mientras setSession/
+        // exchangeCodeForSession mantienen el lock de auth; si el callback espera
+        // otra llamada de auth (p.ej. getUserProfile), se produce un DEADLOCK y la
+        // promesa de setSession nunca resuelve. Diferimos con setTimeout(0) para
+        // liberar el lock primero.
         if (session?.user) {
-          try {
-            const profile = await Auth.getUserProfile();
-            if (!profile) {
-              console.log('Perfil de usuario no encontrado, podria requerir creacion');
+          setTimeout(async () => {
+            try {
+              const profile = await Auth.getUserProfile();
+              if (!profile) {
+                console.log('Perfil de usuario no encontrado, podria requerir creacion');
+              }
+            } catch (error) {
+              console.error('Error verificando perfil:', error);
             }
-          } catch (error) {
-            console.error('Error verificando perfil:', error);
-          }
+          }, 0);
         }
         break;
         
       case 'SIGNED_OUT':
-        console.log('Usuario cerro sesion');
+        console.log('Usuario cerro sesion (o refresh token inválido)');
+        try {
+          await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
+        } catch (storageError) {
+          console.warn('Error clearing stored auth session in listener:', storageError);
+        }
         break;
-        
+
       case 'TOKEN_REFRESHED':
         console.log('Token renovado exitosamente');
         break;
-        
+
       case 'USER_UPDATED':
         console.log('Usuario actualizado');
         break;
@@ -503,13 +601,13 @@ export const Realtime = {
    */
   subscribeToTracking: (bookingId: string, callback: (payload: any) => void) => {
     return supabase
-      .channel('tracking-changes')
+      .channel(`booking_tracking-${bookingId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'tracking',
+          table: 'booking_tracking',
           filter: `booking_id=eq.${bookingId}`
         },
         callback
@@ -538,12 +636,13 @@ export const Realtime = {
 } as const;
 
 // ==================== INICIALIZACION AUTOMATICA ====================
+// Los listeners de auth deben quedar SIEMPRE registrados (también en release),
+// si no, cuando el SDK detecta un refresh token inválido nadie limpia el storage
+// y el error se repite en cada arranque.
+setupAuthListeners();
+
 if (process.env.NODE_ENV === 'development') {
-  // Log de informacion de conexion en desarrollo
   DevUtils.logConnectionInfo();
-  
-  // Configurar listeners de autenticacion
-  setupAuthListeners();
 }
 
 // ==================== EXPORTACIONES PRINCIPALES ====================

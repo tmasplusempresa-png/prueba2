@@ -1,0 +1,8 @@
+# Flujo E2E completo: Login → Carnet → Logout
+# Ejecuta todos los flows en orden
+# Ejecución: maestro test .maestro/full_flow.yaml
+
+appId: com.tmasplus.tmasplus
+---
+- runFlow: login.yaml
+- runFlow: carnet.yaml

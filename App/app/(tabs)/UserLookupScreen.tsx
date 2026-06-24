@@ -241,7 +241,7 @@ const UserLookupScreen = ({ navigation }: Props) => {
 
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()}>
-          <AntDesign name="arrowleft" size={22} color="#EAFBFF" />
+          <AntDesign name="arrow-left" size={22} color="#EAFBFF" />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <View style={styles.headerBadgeIcon}>

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   Linking,
   ActivityIndicator,
 } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons, MaterialIcons, FontAwesome, Feather } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSelector, useDispatch } from "react-redux";
@@ -32,6 +33,7 @@ type Props = NativeStackScreenProps<any>;
 
 const WalletDetails = ({ navigation }: Props) => {
   const user = useSelector((state: RootState) => state.auth.user);
+  const profile = useSelector((state: RootState) => state.auth.profile);
   const walletHistory = useSelector(selectWalletHistory);
   const walletLoading = useSelector(selectWalletLoading);
   const memberships = useSelector(
@@ -40,68 +42,75 @@ const WalletDetails = ({ navigation }: Props) => {
   const isLoadingMemberships = useSelector(selectMembershipLoading);
   const dispatch = useDispatch<AppDispatch>();
   const settings = useSelector(selectSettings);
-  
-  // 🔄 Estado local para actualizar en tiempo real
-  const [realtimeMemberships, setRealtimeMemberships] = useState<any[]>([]);
-  const [membershipRefresh, setMembershipRefresh] = useState(false);
 
-  const glow1 = useRef(new Animated.Value(0)).current;
-  const glow2 = useRef(new Animated.Value(0)).current;
-  const glow3 = useRef(new Animated.Value(0)).current;
-  // Orb animation - Comentado: El círculo del orb no se está usando en la interfaz
-  // const orbRotate = useRef(new Animated.Value(0)).current; // Orb animation not used
-  const shineAnim = useRef(new Animated.Value(0)).current;
+  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
+  // y caemos a users.id por compatibilidad con datos legacy.
+  const driverIdCandidates = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [profile?.auth_id, (user as any)?.auth_id, profile?.id, user?.id, (user as any)?.uid]
+            .map((v) => (v ? String(v) : ''))
+            .filter(Boolean),
+        ),
+      ),
+    [profile?.auth_id, profile?.id, (user as any)?.auth_id, user?.id, (user as any)?.uid],
+  );
+  const driverConductorId = driverIdCandidates[0];
+  
+
+  const glowAnimRef = useRef({
+    glow1: new Animated.Value(0),
+    glow2: new Animated.Value(0),
+    glow3: new Animated.Value(0),
+    shineAnim: new Animated.Value(0),
+  }).current;
+
+  const { glow1, glow2, glow3, shineAnim } = glowAnimRef;
 
   useEffect(() => {
     dispatch(listenToSettingsChanges());
   }, [dispatch]);
 
-  // 📡 CARGAR MEMBRESÍAS Y CONFIGURAR LISTENER EN TIEMPO REAL
+  // 📡 Cargar datos iniciales
   useEffect(() => {
     if (user?.id) {
-      console.log('👤 [WalletDetails] Usuario actual:', {
-        uid: user?.id,
-        email: (user as any)?.email,
-      });
-      
-      // Cargar historial
       dispatch(fetchWalletHistory(user?.id));
-      
-      // Cargar membresías desde Redux
-      console.log('📡 [WalletDetails] Haciendo dispatch de fetchMemberships con UID:', user?.id);
-      dispatch(fetchMemberships(user?.id));
-      
-      // 🔄 Configurar Realtime listener para membresías (CON TIMEOUT)
-      console.log('📡 [WalletDetails] Subscribiendo a cambios en memberships para:', user.id);
-      
+    }
+    if (driverConductorId) {
+      // Un único fetch con el id canónico (igual que index.tsx). Disparar uno
+      // por cada candidato sobrescribe state.memberships y borra la membresía
+      // activa cuando el último candidato no tiene filas.
+      dispatch(fetchMemberships(driverConductorId));
+    }
+  }, [dispatch, user?.id, driverConductorId]);
+
+  // 🔄 Configurar Realtime listener solo cuando la pantalla está enfocada
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!driverConductorId) return;
+
       const channel = supabase
-        .channel(`memberships-${user.id}`)
+        .channel(`memberships-${driverConductorId}`)
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
             table: 'memberships',
-            filter: `conductor=eq.${user.id}`,
+            filter: `conductor=eq.${driverConductorId}`,
           },
-          (payload) => {
-            console.log('🔔 [Realtime] Cambio detectado en memberships:', payload);
-            setMembershipRefresh(!membershipRefresh); // Trigger re-render
-            // Re-cargar desde BD (asíncrono, no bloquea)
-            dispatch(fetchMemberships(user.id));
+          () => {
+            dispatch(fetchMemberships(driverConductorId));
           }
         )
-        .subscribe((status) => {
-          console.log('📡 [Realtime] Estado de suscripción:', status);
-        });
-      
-      // Cleanup
+        .subscribe();
+
       return () => {
-        console.log('🧹 [WalletDetails] Limpiando suscripción de Realtime');
         supabase.removeChannel(channel);
       };
-    }
-  }, [dispatch, user?.id]);
+    }, [driverConductorId, dispatch])
+  );
 
   useEffect(() => {
     Animated.loop(
@@ -177,90 +186,99 @@ const WalletDetails = ({ navigation }: Props) => {
     }
   };
 
-  // 🎯 Usar membresías del Redux (ya están en tiempo real con fetchMemberships)
-  const activeMembership = memberships && memberships.length > 0 
-    ? memberships[0] // Tomar la más reciente
-    : null;
+  // 🎯 Filtrar por candidatos de conductor para no confundir membresías de otro id
+  // (fetchMemberships sobrescribe state.memberships con el último candidato consultado).
+  const activeMembership = useMemo(() => {
+    if (!memberships || memberships.length === 0) return null;
+    const mine = memberships.filter((m: any) =>
+      driverIdCandidates.includes(String(m.conductor))
+    );
+    const list = mine.length > 0 ? mine : memberships;
+    return (
+      list.find((m: any) => m?.status?.toString().toUpperCase() === 'ACTIVA') ||
+      list[0] ||
+      null
+    );
+  }, [memberships, driverIdCandidates]);
 
-  console.log('📊 [WalletDetails] Membresía actual:', activeMembership);
-
-  const daysRemaining = activeMembership
-    ? calculateDaysRemaining(activeMembership.fecha_terminada)
-    : 0;
-
-  // ✅ NO bloquear la UI si está cargando - permitir ver datos parciales mientras se carga
-  // if (walletLoading || isLoadingMemberships) return <Text>Loading...</Text>;
+  const daysRemaining = useMemo(
+    () =>
+      activeMembership
+        ? calculateDaysRemaining(activeMembership.fecha_terminada)
+        : 0,
+    [activeMembership]
+  );
 
   const walletBalance = user?.walletBalance || 0;
   const hasHistory = Array.isArray(walletHistory) && walletHistory.length > 0;
-  const latestHistory = hasHistory ? walletHistory[walletHistory.length - 1] : null;
-  
-  // 🟢 DETERMINAR ESTADO REAL DE LA MEMBRESÍA
-  let membershipStatus = "❌ Sin datos";
-  let statusColor = "#E91E63";
-  
-  if (activeMembership) {
-    const estado = activeMembership.status?.toUpperCase();
-    const diasRestantes = daysRemaining;
-    
-    if (estado === 'ACTIVA' && diasRestantes > 0) {
-      membershipStatus = "✅ ACTIVA";
-      statusColor = "#4CAF50";
-    } else if (estado === 'ACTIVA' && diasRestantes <= 0) {
-      membershipStatus = "⏰ VENCIDA";
-      statusColor = "#00E5FF";
-    } else if (estado === 'PENDIENTE') {
-      membershipStatus = "⏳ PENDIENTE";
-      statusColor = "#2196F3";
-    } else if (estado === 'CANCELADA') {
-      membershipStatus = "❌ CANCELADA";
-      statusColor = "#E91E63";
-    } else {
-      membershipStatus = `${estado}`;
-      statusColor = "#9C27B0";
+
+  // 🟢 Memoizar el estado de membresía
+  const { membershipStatus, expiryDate, startDate, renewalText } = useMemo(() => {
+    let status = "❌ Sin datos";
+
+    if (activeMembership) {
+      const estado = activeMembership.status?.toUpperCase();
+
+      if (estado === 'ACTIVA' && daysRemaining > 0) {
+        status = "✅ ACTIVA";
+      } else if (estado === 'ACTIVA' && daysRemaining <= 0) {
+        status = "⏰ VENCIDA";
+      } else if (estado === 'PENDIENTE') {
+        status = "⏳ PENDIENTE";
+      } else if (estado === 'CANCELADA') {
+        status = "❌ CANCELADA";
+      } else {
+        status = `${estado}`;
+      }
     }
-  }
-  
-  const expiryDate = activeMembership?.fecha_terminada
-    ? format(new Date(activeMembership.fecha_terminada), "dd/MM/yyyy")
-    : "-- / --";
-    
-  const startDate = activeMembership?.fecha_inicio
-    ? format(new Date(activeMembership.fecha_inicio), "dd/MM/yyyy")
-    : "-- / --";
 
-  const renewalText = activeMembership && daysRemaining > 0
-    ? `Te quedan ${daysRemaining} ${daysRemaining === 1 ? 'día' : 'días'} de membresía`
-    : activeMembership?.status === 'PENDIENTE'
-    ? "Tu membresía está pendiente de activación"
-    : "Necesita renovar su suscripción";
+    const expiry = activeMembership?.fecha_terminada
+      ? format(new Date(activeMembership.fecha_terminada), "dd/MM/yyyy")
+      : "-- / --";
 
-  // const orbSpin = orbRotate.interpolate({ ... }); // Not used
+    const start = activeMembership?.fecha_inicio
+      ? format(new Date(activeMembership.fecha_inicio), "dd/MM/yyyy")
+      : "-- / --";
 
-  const shineX = shineAnim.interpolate({
-    inputRange: [0, 0.8, 1],
-    outputRange: [-320, -320, 420],
-  });
+    const renewal = activeMembership && daysRemaining > 0
+      ? `Te quedan ${daysRemaining} ${daysRemaining === 1 ? 'día' : 'días'} de membresía`
+      : activeMembership?.status === 'PENDIENTE'
+      ? "Tu membresía está pendiente de activación"
+      : "No tienes membresía registrada. Adquiere una para poder aceptar servicios.";
 
-  const cardGlowOpacity = glow1.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.16, 0.28],
-  });
+    return { membershipStatus: status, expiryDate: expiry, startDate: start, renewalText: renewal };
+  }, [activeMembership, daysRemaining]);
+
+  const shineX = useMemo(
+    () =>
+      shineAnim.interpolate({
+        inputRange: [0, 0.8, 1],
+        outputRange: [-320, -320, 420],
+      }),
+    [shineAnim]
+  );
+
+  const cardGlowOpacity = useMemo(
+    () =>
+      glow1.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.16, 0.28],
+      }),
+    [glow1]
+  );
 
   return (
     <View style={styles.container}>
-      {/* Eliminado: elipses/círculos de fondo (walletGlowOne, walletGlowTwo, walletGlowThree, walletOrb, walletOrbInner) */}
-
       <View style={styles.header}>
         <TouchableOpacity style={styles.headerIconBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="chevron-back" size={22} color="#D9F6FF" />
         </TouchableOpacity>
         <Text style={styles.headerText}>Mi Billetera</Text>
-        <TouchableOpacity 
-          style={styles.headerIconBtn} 
+        <TouchableOpacity
+          style={styles.headerIconBtn}
           onPress={() => Linking.openURL("https://wa.me/573118841054")}
         >
-          <MaterialIcons name="settings" size={22} color="#00E5FF" />
+          <MaterialIcons name="help" size={22} color="#00E5FF" />
         </TouchableOpacity>
       </View>
       <ScrollView
@@ -322,39 +340,52 @@ const WalletDetails = ({ navigation }: Props) => {
               </View>
             )}
 
-            <View style={styles.cardFooter}>
-              <View>
-                <Text style={styles.cardFooterLabel}>Membresia</Text>
-                <Text style={styles.cardFooterValue}>
-                  Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estándar'}
-                </Text>
-              </View>
-              <View style={styles.cardFooterRight}>
-                <Text style={styles.cardFooterLabel}>Vence</Text>
-                <Text style={styles.cardFooterDate}>{expiryDate}</Text>
-              </View>
-            </View>
+            {activeMembership ? (
+              <>
+                <View style={styles.cardFooter}>
+                  <View>
+                    <Text style={styles.cardFooterLabel}>Membresia</Text>
+                    <Text style={styles.cardFooterValue}>
+                      Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estándar'}
+                    </Text>
+                  </View>
+                  <View style={styles.cardFooterRight}>
+                    <Text style={styles.cardFooterLabel}>Vence</Text>
+                    <Text style={styles.cardFooterDate}>{expiryDate}</Text>
+                  </View>
+                </View>
 
-            {/* 📊 MOSTRAR MÁS DETALLES */}
-            <View style={styles.cardDetailsRow}>
-              <View style={styles.cardDetailItem}>
-                <Text style={styles.cardDetailLabel}>Costo</Text>
-                <Text style={styles.cardDetailValue}>${Number(activeMembership?.costo || 0).toLocaleString("es-CO")}</Text>
+                {/* 📊 MOSTRAR MÁS DETALLES */}
+                <View style={styles.cardDetailsRow}>
+                  <View style={styles.cardDetailItem}>
+                    <Text style={styles.cardDetailLabel}>Costo</Text>
+                    <Text style={styles.cardDetailValue}>${Number(activeMembership?.costo || 0).toLocaleString("es-CO")}</Text>
+                  </View>
+                  <View style={styles.cardDetailItem}>
+                    <Text style={styles.cardDetailLabel}>Inicio</Text>
+                    <Text style={styles.cardDetailValue}>{startDate}</Text>
+                  </View>
+                </View>
+              </>
+            ) : (
+              <View style={styles.noMembershipSection}>
+                <Ionicons name="information-circle-outline" size={32} color="#FF6B6B" />
+                <Text style={styles.noMembershipText}>No tienes una membresía activa</Text>
+                <Text style={styles.noMembershipSubtext}>Debes adquirir una membresía para poder aceptar y completar servicios en T+Plus.</Text>
+                <TouchableOpacity
+                  style={styles.ctaMini}
+                  onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
+                >
+                  <Ionicons name="card-outline" size={16} color="#FFFFFF" />
+                  <Text style={styles.ctaMiniText}>Obtener Membresía</Text>
+                </TouchableOpacity>
               </View>
-              <View style={styles.cardDetailItem}>
-                <Text style={styles.cardDetailLabel}>Inicio</Text>
-                <Text style={styles.cardDetailValue}>{startDate}</Text>
-              </View>
-            </View>
+            )}
           </View>
         </View>
 
         {activeMembership ? (
           <View style={styles.supportBannerHighlight}>
-            <Image
-              source={require("@/assets/images/logo-Preview-Photoroom.png")}
-              style={styles.supportBannerLogo}
-            />
             <View style={styles.supportBannerContent}>
               <Text style={styles.supportBannerTitle}>¡Ya eres miembro!</Text>
               <Text style={styles.supportBannerSubtitle}>Necesitas ayuda? Contáctanos</Text>
@@ -369,17 +400,17 @@ const WalletDetails = ({ navigation }: Props) => {
         ) : (
           <View style={styles.alertBanner}>
             <View style={styles.alertIconWrap}>
-              <Ionicons name="warning-outline" size={18} color="#FFFFFF" />
+              <Ionicons name="alert-circle-outline" size={18} color="#FFFFFF" />
             </View>
             <View style={styles.alertTextWrap}>
-              <Text style={styles.alertTitle}>Membresia por Vencer</Text>
-              <Text style={styles.alertSub}>{renewalText}</Text>
+              <Text style={styles.alertTitle}>❌ Sin Membresía Activa</Text>
+              <Text style={styles.alertSub}>No tienes una membresía registrada. Para poder aceptar servicios, necesitas adquirir una membresía.</Text>
             </View>
             <TouchableOpacity
               style={styles.renewMiniBtn}
               onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
             >
-              <Text style={styles.renewMiniBtnText}>Renovar</Text>
+              <Text style={styles.renewMiniBtnText}>Obtener</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -901,6 +932,47 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     borderColor: "rgba(37,211,102,0.35)",
+  },
+
+  // 🔴 SECCIÓN SIN MEMBRESÍA
+  noMembershipSection: {
+    marginTop: 16,
+    paddingVertical: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(0,229,255,0.12)",
+  },
+  noMembershipText: {
+    marginTop: 16,
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#FF6B6B",
+    textAlign: "center",
+  },
+  noMembershipSubtext: {
+    marginTop: 8,
+    fontSize: 13,
+    color: "rgba(255,255,255,0.7)",
+    textAlign: "center",
+    paddingHorizontal: 16,
+    lineHeight: 18,
+  },
+  ctaMini: {
+    marginTop: 16,
+    borderRadius: 18,
+    backgroundColor: "#FF6B6B",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  ctaMiniText: {
+    color: "#FFFFFF",
+    fontWeight: "700",
+    fontSize: 14,
   },
 });
 

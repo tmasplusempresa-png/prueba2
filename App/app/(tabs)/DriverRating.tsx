@@ -34,14 +34,6 @@ export default function DriverRating(props) {
   const onStarRatingPress = (rating) => {
     setStarCount(rating); // Corrected the typo here
 };
-  const skipRating = () => {
-    let curBooking = { ...booking };
-    curBooking.status = "COMPLETE";
-    dispatch(completePaymentBooking({ booking: curBooking }));
-    props.navigation.navigate("HomeScreen");
-
-  };
-
   const initData = {
     feedback: "",
   };
@@ -52,16 +44,17 @@ export default function DriverRating(props) {
 
 
   const submitNow = () => {
-    
+    if (starCount < 1) {
+      // Forzamos elegir una calificación de 1 a 5
+      return;
+    }
     let curBooking = { ...booking };
-    //console.log("Reserva actual antes de la actualización:", curBooking);
     console.log("Estado de la reserva:", curBooking.status);
-    curBooking.rating = starCount; // Agregamos la calificación
-    console.log("Calificación agregada:", starCount);
-    curBooking.feedback = state.feedback; // Agregamos los comentarios
-    console.log("Comentarios agregados:", state.feedback);
-  curBooking.status = "COMPLETE"; // Cambiamos el estado a COMPLETE
-  
+    curBooking.rating = starCount;
+    curBooking.driver_rating = starCount;
+    curBooking.driver_review = state.feedback || null;
+    curBooking.feedback = state.feedback;
+    curBooking.status = "COMPLETE";
 
     dispatch(completePaymentBooking({ booking: curBooking }))
       .unwrap()
@@ -325,23 +318,35 @@ export default function DriverRating(props) {
               />
             </View>
             <View style={{ marginHorizontal: 10 }}>
-              <TouchableOpacity style={styles.myButtonStyle}>
+              <TouchableOpacity
+                style={[
+                  styles.myButtonStyle,
+                  starCount < 1 ? { backgroundColor: "#cccccc" } : null,
+                ]}
+                disabled={starCount < 1}
+                onPress={() => submitNow()}
+              >
                 <Text
-                  onPress={() => submitNow()}
                   style={[
                     styles.skip,
                     styles.textStyle,
                     { color: "#FFF", fontWeight: "bold" },
                   ]}
                 >
-                  {" "}
-                  Calificar a {booking ? booking.driver_name : null}{" "}
+                  {starCount < 1
+                    ? "Selecciona una calificación"
+                    : `Calificar a ${booking ? booking.driver_name : ""}`}
                 </Text>
               </TouchableOpacity>
-
-              <TouchableOpacity onPress={() => skipRating()}>
-                <Text style={[styles.skip, styles.textStyle]}>{"Omitir"}</Text>
-              </TouchableOpacity>
+              <Text
+                style={[
+                  styles.skip,
+                  styles.textStyle,
+                  { fontSize: 12, color: "#666" },
+                ]}
+              >
+                1 estrella = poco satisfecho · 5 estrellas = muy satisfecho
+              </Text>
             </View>
           </ScrollView>
         </KeyboardAvoidingView>

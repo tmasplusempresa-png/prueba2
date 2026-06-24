@@ -30,12 +30,40 @@ type Props = NativeStackScreenProps<any>;
 const BG_IMAGE = require("../../assets/images/bg.png");
 const FALLBACK_CAR_IMAGE = require("../../assets/images/iconos3d/12.png");
 
+const CATEGORY_IMAGES: Record<string, any> = {
+  "T+Plus Taxi": require("../../assets/images/categoryTaxi.png"),
+  "T+Plus Van": require("../../assets/images/categoryVan.png"),
+  "T+Plus Particular": require("../../assets/images/categoryParticular.png"),
+  "T+Plus Especial": require("../../assets/images/categoryEspecial.png"),
+};
+
+const getCategoryImage = (carType?: string) => {
+  if (carType && CATEGORY_IMAGES[carType]) {
+    return CATEGORY_IMAGES[carType];
+  }
+  return FALLBACK_CAR_IMAGE;
+};
+
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 
 const REST_HEADERS = {
   'apikey': SUPABASE_ANON_KEY,
   'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
   'Content-Type': 'application/json',
+};
+
+const fetchWithTimeout = async (
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 15000
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 /** Mapea una fila de Supabase `cars` al formato que usa la UI */
@@ -121,19 +149,46 @@ const CarsScreen = ({ navigation }: Props) => {
 
   /* ─── Resolver driver_id vía REST ─── */
   const resolveDriverId = useCallback(async (): Promise<string | null> => {
-    const authId = user?.id || user?.auth_id;
-    if (!authId) return null;
+    const candidateIds = [user?.auth_id, user?.id, user?.user_id]
+      .map((value: any) => String(value || "").trim())
+      .filter((value: string, index: number, array: string[]) => value.length > 0 && array.indexOf(value) === index);
 
-    // Si el id ya es UUID y existe como driver_id directamente, usarlo
+    if (candidateIds.length === 0) return null;
+
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (isUuid.test(authId)) return authId;
+
+    const authHeaders = await getSupabaseAuthHeaders(true);
 
     try {
-      const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=id&limit=1`;
-      const resp = await fetch(url, { headers: REST_HEADERS });
-      const data = await resp.json();
-      if (Array.isArray(data) && data.length > 0) return data[0].id;
-    } catch (_) {}
+      // 1) Buscar coincidencia directa en users.id
+      for (const candidateId of candidateIds) {
+        if (!isUuid.test(candidateId)) continue;
+
+        const byIdUrl = `${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`;
+        const byIdResp = await fetchWithTimeout(byIdUrl, { headers: authHeaders }, 12000);
+        if (!byIdResp.ok) continue;
+        const byIdData = await byIdResp.json();
+        if (Array.isArray(byIdData) && byIdData.length > 0 && byIdData[0]?.id) {
+          return byIdData[0].id;
+        }
+      }
+
+      // 2) Si no existe, buscar por users.auth_id
+      for (const candidateId of candidateIds) {
+        if (!isUuid.test(candidateId)) continue;
+
+        const byAuthUrl = `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`;
+        const byAuthResp = await fetchWithTimeout(byAuthUrl, { headers: authHeaders }, 12000);
+        if (!byAuthResp.ok) continue;
+        const byAuthData = await byAuthResp.json();
+        if (Array.isArray(byAuthData) && byAuthData.length > 0 && byAuthData[0]?.id) {
+          return byAuthData[0].id;
+        }
+      }
+    } catch (e: any) {
+      console.warn('[CarsScreen] resolveDriverId error:', e?.message);
+    }
+
     return null;
   }, [user?.id, user?.auth_id]);
 
@@ -150,8 +205,9 @@ const CarsScreen = ({ navigation }: Props) => {
         return;
       }
 
+      const authHeaders = await getSupabaseAuthHeaders(true);
       const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&order=created_at.desc`;
-      const resp = await fetch(url, { headers: REST_HEADERS });
+      const resp = await fetchWithTimeout(url, { headers: authHeaders }, 15000);
 
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
@@ -159,8 +215,11 @@ const CarsScreen = ({ navigation }: Props) => {
       const mapped = Array.isArray(data) ? data.map(mapCarRow) : [];
       setVehicles(mapped);
     } catch (e: any) {
-      console.warn('[CarsScreen] Error cargando vehículos:', e?.message);
-      setError(e?.message || 'Error desconocido');
+      const msg = e?.name === 'AbortError'
+        ? 'Tiempo de espera agotado. Revisa tu conexión.'
+        : (e?.message || 'Error desconocido');
+      console.warn('[CarsScreen] Error cargando vehículos:', msg);
+      setError(msg);
       setVehicles([]);
     } finally {
       setLoading(false);
@@ -226,13 +285,26 @@ const CarsScreen = ({ navigation }: Props) => {
           setAlertVisible(false);
           setDeleting(true);
           try {
+            const authHeaders = await getSupabaseAuthHeaders(true);
             const resp = await fetch(
               `${SUPABASE_URL}/rest/v1/cars?id=eq.${encodeURIComponent(car.id)}`,
-              { method: 'DELETE', headers: REST_HEADERS }
+              {
+                method: 'DELETE',
+                headers: { ...authHeaders, 'Prefer': 'return=representation' },
+              }
             );
             if (!resp.ok) {
               const body = await resp.text();
-              throw new Error(body);
+              throw new Error(body || `HTTP ${resp.status}`);
+            }
+            // Cuando RLS bloquea el DELETE silenciosamente, Supabase responde 200/204
+            // pero con 0 filas afectadas. Con Prefer=return=representation podemos
+            // confirmar que sí se eliminó leyendo el body.
+            const text = await resp.text();
+            let deletedRows: any[] = [];
+            try { deletedRows = text ? JSON.parse(text) : []; } catch {}
+            if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+              throw new Error('La base de datos rechazó la eliminación (sin permisos RLS o el vehículo ya no existe).');
             }
             setModalVisible(false);
             setSelectedCar(null);
@@ -256,7 +328,8 @@ const CarsScreen = ({ navigation }: Props) => {
       const driverId = selectedCar.driver_id || (await resolveDriverId());
       if (!driverId) throw new Error("No se pudo resolver el conductor");
 
-      const writeHeaders = { ...REST_HEADERS, 'Prefer': 'return=representation' };
+      const authHeaders = await getSupabaseAuthHeaders(true);
+      const writeHeaders = { ...authHeaders, 'Prefer': 'return=representation' };
 
       // Desactivar todos los vehículos del conductor
       await fetch(
@@ -396,7 +469,7 @@ const CarsScreen = ({ navigation }: Props) => {
                 <TouchableOpacity activeOpacity={0.92} onPress={() => openDetails(car)}>
                   <View style={styles.vehicleImageWrap}>
                     <Image
-                      source={car?.car_image ? { uri: car.car_image } : FALLBACK_CAR_IMAGE}
+                      source={car?.car_image ? { uri: car.car_image } : getCategoryImage(car?.carType)}
                       style={styles.vehicleImage}
                       resizeMode="cover"
                     />
@@ -498,7 +571,7 @@ const CarsScreen = ({ navigation }: Props) => {
             {selectedCar && (
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalContent}>
                 <Image
-                  source={selectedCar?.car_image ? { uri: selectedCar.car_image } : FALLBACK_CAR_IMAGE}
+                  source={selectedCar?.car_image ? { uri: selectedCar.car_image } : getCategoryImage(selectedCar?.carType)}
                   style={styles.modalVehicleImage}
                   resizeMode="cover"
                 />

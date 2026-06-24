@@ -1,0 +1,41 @@
+# Flujo E2E: Pantalla de Carnet
+# Prerrequisito: usuario autenticado (ejecuta login.yaml primero)
+# Ejecución: maestro test .maestro/carnet.yaml
+
+appId: com.tmasplus.tmasplus
+---
+- launchApp
+
+# Asegura que el usuario esté en la pantalla principal
+- assertVisible:
+    text: "Inicio"
+    timeout: 10000
+
+# Navega al tab de Carnet
+- tapOn:
+    text: "Carnet"
+
+# Verifica que el header de carnet es visible
+- assertVisible:
+    text: "Carnet"
+    timeout: 5000
+
+# Verifica que se muestran las etiquetas de información
+- assertVisible:
+    text: "Correo"
+- assertVisible:
+    text: "Nombre y Apellido"
+- assertVisible:
+    text: "Tipo de Documento"
+- assertVisible:
+    text: "Número de Documento"
+
+# Toma screenshot del carnet
+- takeScreenshot: carnet_screen
+
+# Regresa a la pantalla anterior con el botón de retroceso
+- tapOn:
+    id: "back-button"
+- assertVisible:
+    text: "Inicio"
+    timeout: 5000

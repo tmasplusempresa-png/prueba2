@@ -36,6 +36,14 @@ export const loginThunk = createAsyncThunk(
       // ✅ CAST DIRECTO A TIPO UNIFICADO
       const profile = profileResult.data[0] as UserProfile;
 
+      // 2.1 Bloquear acceso si la cuenta está bloqueada (Conductor o Cliente)
+      if (profile.blocked) {
+        await SupabaseAuth.signOut();
+        const blockedMsg = 'Su cuenta está bloqueada. Comuníquese con soporte.';
+        dispatch(setError({ flag: true, msg: blockedMsg }));
+        return rejectWithValue(blockedMsg);
+      }
+
       // 3. Actualizar estado
       dispatch(loginSuccess({ user: session.user, session }));
       dispatch(setProfile(profile));
@@ -154,10 +162,18 @@ export const checkAuthThunk = createAsyncThunk(
       if (profileResult.success && profileResult.data && profileResult.data.length > 0) {
         // ✅ CAST DIRECTO A TIPO UNIFICADO
         const profile = profileResult.data[0] as UserProfile;
-        
+
+        // Si la cuenta fue bloqueada, cerrar sesión y negar acceso
+        if (profile.blocked) {
+          await SupabaseAuth.signOut();
+          const blockedMsg = 'Su cuenta está bloqueada. Comuníquese con soporte.';
+          dispatch(setError({ flag: true, msg: blockedMsg }));
+          return rejectWithValue(blockedMsg);
+        }
+
         dispatch(loginSuccess({ user: session.user, session }));
         dispatch(setProfile(profile));
-        
+
         return {
           authenticated: true,
           user: session.user,

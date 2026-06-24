@@ -1,0 +1,29 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "TmasPlus — Referencia de código",
+  "entryPoints": [
+    "common",
+    "hooks",
+    "config",
+    "constants"
+  ],
+  "entryPointStrategy": "expand",
+  "exclude": [
+    "**/node_modules/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/__tests__/**",
+    "**/__mocks__/**",
+    "**/*.backup.tsx"
+  ],
+  "out": "docs/api",
+  "plugin": ["typedoc-plugin-markdown"],
+  "readme": "none",
+  "skipErrorChecking": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "githubPages": false,
+  "hideGenerator": true,
+  "sort": ["source-order"],
+  "categorizeByGroup": true
+}

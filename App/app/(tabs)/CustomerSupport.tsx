@@ -13,14 +13,10 @@ import {
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { Ionicons, AntDesign } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { useSelector } from "react-redux";
-import { RootState } from "@/common/store";
 
 type Props = NativeStackScreenProps<any>;
 
 const CustomerSupport = ({ navigation }: Props) => {
-  const user = useSelector((state: RootState) => state.auth.user) as any;
-
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -37,7 +33,6 @@ const CustomerSupport = ({ navigation }: Props) => {
   const glow1 = useRef(new Animated.Value(0)).current;
   const glow2 = useRef(new Animated.Value(0)).current;
   const orbRotate = useRef(new Animated.Value(0)).current;
-  const pulse = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     Animated.loop(
@@ -82,49 +77,33 @@ const CustomerSupport = ({ navigation }: Props) => {
         useNativeDriver: true,
       })
     ).start();
-
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: 1500,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0,
-          duration: 1500,
-          easing: Easing.inOut(Easing.ease),
-          useNativeDriver: true,
-        }),
-      ])
-    ).start();
-  }, [glow1, glow2, orbRotate, pulse]);
+  }, [glow1, glow2, orbRotate]);
 
   const openWhatsAppChat = async () => {
-    const isCustomer = (user?.usertype || "").toLowerCase() === "customer";
-    const primaryUrl = isCustomer
-      ? "https://wa.me/message/BTQOY5GZC7REF1"
-      : "whatsapp://send?text=Hola&phone=573208202221";
-    const fallbackUrl = "https://wa.me/573208202221?text=Hola";
+    const phone = "573118841054";
+    const text = "Hola";
+    const deepLink = `whatsapp://send?phone=${phone}&text=${encodeURIComponent(text)}`;
+    const universalLink = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+    const apiLink = `https://api.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text)}`;
 
-    try {
-      const canOpenPrimary = await Linking.canOpenURL(primaryUrl);
-      if (canOpenPrimary) {
-        await Linking.openURL(primaryUrl);
-        return;
+    const tryOpen = async (url: string) => {
+      try {
+        await Linking.openURL(url);
+        return true;
+      } catch {
+        return false;
       }
+    };
 
-      const canOpenFallback = await Linking.canOpenURL(fallbackUrl);
-      if (canOpenFallback) {
-        await Linking.openURL(fallbackUrl);
-        return;
-      }
+    if (await tryOpen(deepLink)) return;
+    if (await tryOpen(universalLink)) return;
+    if (await tryOpen(apiLink)) return;
 
-      showAlert('warning', 'No disponible', 'No fue posible abrir WhatsApp en este dispositivo.');
-    } catch (error) {
-      showAlert('error', 'Error', 'Ocurrio un problema al abrir WhatsApp.');
-    }
+    showAlert(
+      'warning',
+      'WhatsApp no disponible',
+      'No fue posible abrir WhatsApp. Por favor instala la aplicacion de WhatsApp o contactanos al +57 311 884 1054.'
+    );
   };
 
   const orbSpin = orbRotate.interpolate({
@@ -142,16 +121,6 @@ const CustomerSupport = ({ navigation }: Props) => {
     outputRange: [1, 1.18],
   });
 
-  const pulseScale = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.05],
-  });
-
-  const pulseOpacity = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.45, 0.95],
-  });
-
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
@@ -167,7 +136,7 @@ const CustomerSupport = ({ navigation }: Props) => {
 
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()}>
-          <AntDesign name="arrowleft" size={22} color="#EAFBFF" />
+          <AntDesign name="arrow-left" size={22} color="#EAFBFF" />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <View style={styles.headerBadgeIcon}>
@@ -200,11 +169,12 @@ const CustomerSupport = ({ navigation }: Props) => {
       </View>
 
       <View style={styles.actionWrap}>
-        <Animated.View style={[styles.ctaGlow, { opacity: pulseOpacity, transform: [{ scale: pulseScale }] }]} />
-        <TouchableOpacity style={styles.ctaButton} onPress={openWhatsAppChat} activeOpacity={0.88}>
-          <Ionicons name="logo-whatsapp" size={22} color="#03141A" />
-          <Text style={styles.ctaText}>Abrir WhatsApp</Text>
-          <Ionicons name="arrow-forward" size={18} color="#03141A" />
+        <TouchableOpacity
+          style={styles.ctaButton}
+          onPress={openWhatsAppChat}
+          activeOpacity={0.88}
+        >
+          <Ionicons name="logo-whatsapp" size={24} color="#25D366" />
         </TouchableOpacity>
       </View>
 
@@ -385,33 +355,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  ctaGlow: {
-    position: "absolute",
-    width: "84%",
-    height: 64,
-    borderRadius: 18,
-    backgroundColor: "rgba(0,229,255,0.22)",
-  },
   ctaButton: {
-    width: "84%",
-    height: 58,
-    borderRadius: 18,
-    backgroundColor: "#25D366",
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "rgba(37,211,102,0.15)",
     alignItems: "center",
     justifyContent: "center",
-    flexDirection: "row",
-    gap: 10,
-    shadowColor: "#25D366",
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 6,
-  },
-  ctaText: {
-    color: "#03141A",
-    fontWeight: "900",
-    fontSize: 16,
-    letterSpacing: 0.3,
+    borderWidth: 1,
+    borderColor: "rgba(37,211,102,0.35)",
   },
 });
 

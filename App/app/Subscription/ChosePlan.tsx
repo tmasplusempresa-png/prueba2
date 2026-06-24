@@ -122,7 +122,7 @@ const NoMembershipScreen = () => {
   return (
     <SafeAreaView style={styles.container}>
        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-        <AntDesign name="arrowleft" size={24} color={colorScheme === "dark" ? "#fff" : "#000"} />
+        <AntDesign name="arrow-left" size={24} color={colorScheme === "dark" ? "#fff" : "#000"} />
     </TouchableOpacity>
       <ImageBackground
         source={{ uri: "background-image-url" }}

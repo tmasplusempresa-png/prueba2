@@ -20,7 +20,7 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
 } from "firebase/auth";
-import supabase from "@/config/SupabaseConfig";
+import supabase, { Auth } from "@/config/SupabaseConfig";
 import base64 from "react-native-base64";
  
 import AccessKey from "@/common/other/AccessKey";
@@ -282,9 +282,7 @@ export const updateProfileImage = (imageBlob) => {
 export const updatePushToken = (token: string, platform: string) => {
   return async (dispatch: Dispatch) => {
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const session = await Auth.getCurrentSession();
       const authUser = session?.user;
 
       if (!authUser) {
@@ -318,9 +316,7 @@ export const updatePushToken = (token: string, platform: string) => {
 export const updateUserLocation = (latitude: number | undefined, longitude: number | undefined) => {
   return async (dispatch: Dispatch) => {
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const session = await Auth.getCurrentSession();
       const authUser = session?.user;
 
       if (!authUser) {

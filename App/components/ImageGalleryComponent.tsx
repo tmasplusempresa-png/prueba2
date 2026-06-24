@@ -13,11 +13,14 @@ import {
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { Ionicons, AntDesign, MaterialIcons } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { useSelector } from "react-redux";
+import { useSelector, useDispatch } from "react-redux";
 import { RootState } from "@/common/store";
 import * as ImagePicker from "expo-image-picker";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { getDatabase, ref as dbRef, update } from "firebase/database";
+import * as FileSystem from "expo-file-system/legacy";
+import { decode } from "base64-arraybuffer";
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from "@/config/SupabaseConfig";
+import { updateUserProfile } from "@/common/reducers/authReducer";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -49,6 +52,8 @@ const DOC_DEFS: DocDef[] = [
 
 const ImageGalleryComponent = ({ navigation, route }: Props) => {
   const user = useSelector((state: RootState) => state.auth.user) as any;
+  const profile = useSelector((state: RootState) => (state.auth as any).profile) as any;
+  const dispatch = useDispatch();
   const { data } = route.params || {};
 
   const [sourceModalVisible, setSourceModalVisible] = useState(false);
@@ -73,16 +78,15 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
   };
 
   const [savedUris, setSavedUris] = useState<Record<DocKey, string | null>>({
-    verifyIdImage: user?.verifyIdImage || null,
-    verifyIdImageBk: user?.verifyIdImageBk || null,
-    SOATImage: user?.SOATImage || null,
-    cardPropImage: user?.cardPropImage || null,
-    cardPropImageBK: user?.cardPropImageBK || user?.cardPropImageBk || null,
-    licenseImage: user?.licenseImage || null,
-    licenseImageBack: user?.licenseImageBack || null,
+    verifyIdImage: profile?.verify_id_image || user?.verifyIdImage || null,
+    verifyIdImageBk: profile?.verify_id_image_bk || user?.verifyIdImageBk || null,
+    SOATImage: profile?.soat_image || user?.SOATImage || null,
+    cardPropImage: profile?.card_prop_image || user?.cardPropImage || null,
+    cardPropImageBK: profile?.card_prop_image_bk || user?.cardPropImageBK || user?.cardPropImageBk || null,
+    licenseImage: profile?.license_image || user?.licenseImage || null,
+    licenseImageBack: profile?.license_image_back || user?.licenseImageBack || null,
   });
 
-  const [pendingUris, setPendingUris] = useState<Partial<Record<DocKey, string>>>({});
 
   const glowPulse = useRef(new Animated.Value(0)).current;
   const orbSpin = useRef(new Animated.Value(0)).current;
@@ -123,17 +127,20 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
     };
   }, [glowPulse, orbSpin]);
 
-  const docs = useMemo(() => {
-    const isCustomer = user?.usertype === "customer";
-    const defs = isCustomer ? DOC_DEFS.slice(0, 1) : DOC_DEFS;
-    return defs.map((doc) => ({
-      ...doc,
-      currentUri: savedUris[doc.key] || null,
-      nextUri: pendingUris[doc.key] || null,
-    }));
-  }, [pendingUris, savedUris, user?.usertype]);
+  const isCustomer = user?.usertype === "customer";
 
-  const pendingCount = useMemo(() => Object.keys(pendingUris).length, [pendingUris]);
+  const docs = useMemo(() => {
+    const defs = isCustomer ? DOC_DEFS.slice(0, 1) : DOC_DEFS;
+    return defs.map((doc) => {
+      const currentUri = savedUris[doc.key] || null;
+      const locked = isCustomer && doc.key === "verifyIdImage" && !!currentUri;
+      return {
+        ...doc,
+        currentUri,
+        locked,
+      };
+    });
+  }, [savedUris, isCustomer]);
 
   const glowScale = glowPulse.interpolate({
     inputRange: [0, 1],
@@ -166,13 +173,24 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       aspect: [5, 3],
-      quality: 0.8,
+      quality: 0.5,
     });
 
     if (!result.canceled) {
-      setCandidateUri(result.assets[0].uri);
+      const uri = result.assets[0].uri;
       setSourceModalVisible(false);
-      setCompareModalVisible(true);
+
+      if (isCustomer && selectedDoc) {
+        const userId = user?.uid || user?.id;
+        if (!userId) {
+          showAlert('error', 'Error', 'No se pudo identificar al usuario.');
+          return;
+        }
+        await uploadDocDirectly(userId, selectedDoc.key, uri);
+      } else {
+        setCandidateUri(uri);
+        setCompareModalVisible(true);
+      }
     }
   };
 
@@ -187,29 +205,44 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       aspect: [5, 3],
-      quality: 0.8,
+      quality: 0.5,
     });
 
     if (!result.canceled) {
-      setCandidateUri(result.assets[0].uri);
+      const uri = result.assets[0].uri;
       setSourceModalVisible(false);
-      setCompareModalVisible(true);
+
+      if (isCustomer && selectedDoc) {
+        const userId = user?.uid || user?.id;
+        if (!userId) {
+          showAlert('error', 'Error', 'No se pudo identificar al usuario.');
+          return;
+        }
+        await uploadDocDirectly(userId, selectedDoc.key, uri);
+      } else {
+        setCandidateUri(uri);
+        setCompareModalVisible(true);
+      }
     }
   };
 
-  const confirmCandidate = () => {
+  const confirmCandidate = async () => {
     if (!selectedDoc || !candidateUri) {
       setCompareModalVisible(false);
       return;
     }
 
-    setPendingUris((prev) => ({
-      ...prev,
-      [selectedDoc.key]: candidateUri,
-    }));
-
+    const doc = selectedDoc;
+    const uri = candidateUri;
     setCompareModalVisible(false);
     setCandidateUri(null);
+
+    const userId = user?.uid || user?.id;
+    if (!userId) {
+      showAlert('error', 'Error', 'No se pudo identificar al usuario.');
+      return;
+    }
+    await uploadDocDirectly(userId, doc.key, uri);
   };
 
   const discardCandidate = () => {
@@ -217,69 +250,170 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
     setCandidateUri(null);
   };
 
+
+  // fetch con timeout: ningún paso puede dejar el botón colgado en "Guardando..."
+  const fetchWithTimeout = async (url: string, options: RequestInit, ms = 30000): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('La operación tardó demasiado. Verifica tu conexión e intenta de nuevo.');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
   const uploadDoc = async (userId: string, docKey: DocKey, localUri: string) => {
-    const storage = getStorage();
-    const storageRef = ref(storage, `users/${userId}/${docKey}`);
+    void userId;
 
-    const response = await fetch(localUri);
-    const blob = await response.blob();
+    // 1. Mapear DocKey → columna de la tabla users
+    const dbFieldMap: Record<DocKey, string> = {
+      verifyIdImage: 'verify_id_image',
+      verifyIdImageBk: 'verify_id_image_bk',
+      SOATImage: 'soat_image',
+      cardPropImage: 'card_prop_image',
+      cardPropImageBK: 'card_prop_image_bk',
+      licenseImage: 'license_image',
+      licenseImageBack: 'license_image_back',
+    };
 
-    await uploadBytes(storageRef, blob);
-    const downloadURL = await getDownloadURL(storageRef);
+    const dbField = dbFieldMap[docKey];
+    if (!dbField) throw new Error(`Unknown doc key: ${docKey}`);
 
-    const db = getDatabase();
-    const updates: Record<string, string> = {};
-    updates[`/users/${userId}/${docKey}`] = downloadURL;
-    await update(dbRef(db), updates);
+    // 2. Leer el JWT directo de AsyncStorage.
+    //    NO usar supabase.auth.getSession(): en RN su lock interno se queda colgado
+    //    (por eso el botón se quedaba en "Guardando..." sin avanzar de "obteniendo sesión").
+    console.log('[ImageGallery] uploadDoc: leyendo sesión de AsyncStorage...');
+    const sessionStr = await AsyncStorage.getItem('tmasplus_auth_session');
+    if (!sessionStr) throw new Error('Sesión no encontrada. Inicia sesión nuevamente.');
+    const sessionData = JSON.parse(sessionStr);
+    const token: string | undefined = sessionData?.access_token || sessionData?.session?.access_token;
+    if (!token) throw new Error('Sesión no encontrada. Inicia sesión nuevamente.');
 
-    return downloadURL;
-  };
+    let authId: string | undefined = sessionData?.user?.id || sessionData?.session?.user?.id;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      if (payload?.sub) authId = payload.sub;
+    } catch {}
+    if (!authId) throw new Error('No se pudo identificar al usuario.');
+    console.log('[ImageGallery] uploadDoc: sesión OK, user:', authId);
 
-  const handleUpdate = async () => {
-    if (pendingCount === 0) {
-      showAlert('info', 'Sin cambios', 'No hay documentos nuevos por confirmar.');
-      return;
-    }
+    const authHeaders = {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${token}`,
+    };
 
-    const userId = user?.uid || user?.id;
-    if (!userId) {
-      showAlert('error', 'Error', 'No se pudo identificar al usuario autenticado.');
-      return;
-    }
+    // 3. Leer imagen como base64 y decodificar a binario
+    const base64 = await FileSystem.readAsStringAsync(localUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    if (!base64) throw new Error('No se pudo leer la imagen seleccionada');
 
-    showAlert('confirm', 'Confirmar actualización', `Vas a reemplazar ${pendingCount} documento(s). ¿Deseas continuar?`, [
-      { text: 'Cancelar', style: 'cancel', onPress: () => setAlertVisible(false) },
+    // 4. Subir el binario al bucket privado user-documents.
+    //    Antes se guardaba el base64 completo (varios MB) en la columna de la DB.
+    //    Ahora subimos a Storage y guardamos solo la URL (string corto).
+    const storagePath = `${authId}/${dbField}.jpg`;
+    console.log('[ImageGallery] uploadDoc: subiendo a Storage ->', storagePath);
+    const uploadResponse = await fetchWithTimeout(
+      `${SUPABASE_URL}/storage/v1/object/user-documents/${storagePath}`,
       {
-        text: 'Confirmar',
-        onPress: async () => {
-          setAlertVisible(false);
-          try {
-            setLoadingUpload(true);
-            const updated: Partial<Record<DocKey, string | null>> = {};
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'image/jpeg', 'x-upsert': 'true' },
+        body: decode(base64),
+      }
+    );
 
-            const entries = Object.entries(pendingUris) as Array<[DocKey, string]>;
-            for (const [docKey, uri] of entries) {
-              const remoteUrl = await uploadDoc(userId, docKey, uri);
-              updated[docKey] = remoteUrl;
-            }
+    console.log('[ImageGallery] uploadDoc: respuesta Storage', uploadResponse.status);
+    if (!uploadResponse.ok) {
+      const errText = await uploadResponse.text().catch(() => '');
+      throw new Error(`Error al subir imagen (${uploadResponse.status}): ${errText.substring(0, 200)}`);
+    }
 
-            setSavedUris((prev) => ({
-              ...prev,
-              ...updated,
-            }));
+    // 5. Bucket privado: generar URL firmada de larga duración vía REST.
+    //    El path es estable (upsert), así que la misma URL sigue sirviendo la última versión.
+    const TEN_YEARS = 60 * 60 * 24 * 365 * 10;
+    const signResponse = await fetchWithTimeout(
+      `${SUPABASE_URL}/storage/v1/object/sign/user-documents/${storagePath}`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiresIn: TEN_YEARS }),
+      }
+    );
+    if (!signResponse.ok) {
+      const errText = await signResponse.text().catch(() => '');
+      throw new Error(`No se pudo generar el enlace (${signResponse.status}): ${errText.substring(0, 200)}`);
+    }
+    const signJson = await signResponse.json();
+    // signJson.signedURL es relativo: "/object/sign/user-documents/...?token=..."
+    const signedPath: string | undefined = signJson?.signedURL || signJson?.signedUrl;
+    if (!signedPath) throw new Error('El servidor no devolvió un enlace firmado.');
+    const docUrl = `${SUPABASE_URL}/storage/v1${signedPath}`;
+    console.log('[ImageGallery] uploadDoc: URL firmada OK, guardando en DB...');
 
-            setPendingUris({});
-            showAlert('success', 'Listo', 'Los documentos se actualizaron correctamente.');
-          } catch (error) {
-            console.error("Error updating docs:", error);
-            showAlert('error', 'Error', 'No se pudieron actualizar los documentos. Intenta nuevamente.');
-          } finally {
-            setLoadingUpload(false);
-          }
-        },
-      },
-    ]);
+    // 6. Guardar la URL en la columna de users vía REST (PATCH con JWT del usuario)
+    const patchResponse = await fetchWithTimeout(
+      `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${authId}`,
+      {
+        method: 'PATCH',
+        headers: { ...authHeaders, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify({ [dbField]: docUrl }),
+      }
+    );
+    if (!patchResponse.ok) {
+      const errText = await patchResponse.text().catch(() => '');
+      throw new Error(`Error al guardar (${patchResponse.status}): ${errText.substring(0, 200)}`);
+    }
+    const patched = await patchResponse.json();
+    if (!Array.isArray(patched) || patched.length === 0) {
+      throw new Error('No se actualizó ninguna fila (revisa que tu usuario exista y las políticas RLS de la tabla users).');
+    }
+    console.log('[ImageGallery] uploadDoc: DB actualizada, filas:', patched.length);
+
+    return docUrl;
   };
+
+  const PROFILE_FIELD_MAP: Record<DocKey, string> = {
+    verifyIdImage: 'verify_id_image',
+    verifyIdImageBk: 'verify_id_image_bk',
+    SOATImage: 'soat_image',
+    cardPropImage: 'card_prop_image',
+    cardPropImageBK: 'card_prop_image_bk',
+    licenseImage: 'license_image',
+    licenseImageBack: 'license_image_back',
+  };
+
+  const uploadDocDirectly = async (userId: string, docKey: DocKey, localUri: string) => {
+    // Muestra la imagen local inmediatamente (antes de terminar el upload)
+    setSavedUris((prev) => ({ ...prev, [docKey]: localUri }));
+
+    try {
+      setLoadingUpload(true);
+
+      const dataUrl = await uploadDoc(userId, docKey, localUri);
+
+      if (!dataUrl) throw new Error('No se recibió respuesta del servidor');
+
+      // Reemplaza el URI local con el dataUrl guardado en DB
+      setSavedUris((prev) => ({ ...prev, [docKey]: dataUrl }));
+      dispatch(updateUserProfile({ [PROFILE_FIELD_MAP[docKey]]: dataUrl } as any));
+
+      showAlert('success', 'Listo', 'Documento guardado correctamente.');
+    } catch (error: any) {
+      console.error('[ImageGallery] uploadDocDirectly error:', error?.message || error);
+      // Revierte la preview optimista al valor anterior
+      const prevVal = (profile as any)?.[PROFILE_FIELD_MAP[docKey]] ?? null;
+      setSavedUris((prev) => ({ ...prev, [docKey]: prevVal }));
+      showAlert('error', 'Error', error?.message || 'No se pudo guardar el documento. Intenta nuevamente.');
+    } finally {
+      setLoadingUpload(false);
+    }
+  };
+
 
   return (
     <View style={styles.container}>
@@ -313,7 +447,7 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
             }
           }}
         >
-          <AntDesign name="arrowleft" size={22} color="#E9F6FF" />
+          <AntDesign name="arrow-left" size={22} color="#E9F6FF" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Documentos</Text>
         <View style={styles.headerIconWrap}>
@@ -322,9 +456,33 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.subtitle}>Revisa la imagen actual y confirma cualquier cambio antes de guardar.</Text>
+        {isCustomer && !docs[0]?.currentUri && (
+          <View style={styles.customerUploadSection}>
+            <Ionicons name="id-card-outline" size={48} color="#00E5FF" />
+            <Text style={styles.customerUploadTitle}>Sube tu cédula</Text>
+            <Text style={styles.customerUploadSubtitle}>
+              Necesitamos una copia de tu cédula (frente) para verificar tu identidad.
+            </Text>
+            <TouchableOpacity
+              style={styles.customerUploadBtn}
+              onPress={() => openSourcePicker(docs[0])}
+              disabled={loadingUpload}
+            >
+              <Ionicons name="cloud-upload-outline" size={20} color="#04202C" />
+              <Text style={styles.customerUploadBtnText}>
+                {loadingUpload ? "Subiendo..." : "Subir cédula una vez"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-        {docs.map((doc) => (
+        {!isCustomer && (
+          <Text style={styles.subtitle}>
+            Revisa la imagen actual y confirma cualquier cambio antes de guardar.
+          </Text>
+        )}
+
+        {(!isCustomer || docs[0]?.currentUri) && docs.map((doc) => (
           <View key={doc.key} style={styles.docCard}>
             <View style={styles.docTop}>
               <View style={[styles.docIcon, { borderColor: `${doc.accent}66` }]}>
@@ -333,47 +491,60 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
               <View style={styles.docInfo}>
                 <Text style={styles.docTitle}>{doc.label}</Text>
                 <Text style={styles.docStatus}>
-                  {doc.nextUri ? "Cambio pendiente de confirmar" : doc.currentUri ? "Imagen guardada" : "Sin imagen"}
+                  {doc.locked
+                    ? "Solo editable desde el dashboard"
+                    : doc.currentUri
+                      ? "Imagen guardada"
+                      : "Sin imagen"}
                 </Text>
               </View>
-              <TouchableOpacity style={styles.changeBtn} onPress={() => openSourcePicker(doc)}>
-                <Ionicons name="camera-outline" size={18} color="#00E5FF" />
-              </TouchableOpacity>
+              {doc.locked ? (
+                <View style={[styles.changeBtn, styles.lockedBtn]}>
+                  <Ionicons name="lock-closed" size={16} color="#7BA8BC" />
+                </View>
+              ) : (
+                <TouchableOpacity style={styles.changeBtn} onPress={() => openSourcePicker(doc)}>
+                  <Ionicons name="camera-outline" size={18} color="#00E5FF" />
+                </TouchableOpacity>
+              )}
             </View>
 
-            <View style={styles.previewRow}>
-              <TouchableOpacity style={styles.previewCard} onPress={() => showImagePreview(doc.currentUri)} activeOpacity={0.9}>
-                <Text style={styles.previewLabel}>Actual</Text>
+            {doc.locked ? (
+              <TouchableOpacity
+                style={styles.lockedPreviewCard}
+                onPress={() => showImagePreview(doc.currentUri)}
+                activeOpacity={0.9}
+              >
+                <Image source={{ uri: doc.currentUri as string }} style={styles.lockedPreviewImage} />
+                <View style={styles.lockedBadge}>
+                  <Ionicons name="lock-closed" size={12} color="#E9F6FF" />
+                  <Text style={styles.lockedBadgeText}>No editable</Text>
+                </View>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={styles.previewCardFull}
+                onPress={() => showImagePreview(doc.currentUri)}
+                activeOpacity={0.9}
+              >
                 {doc.currentUri ? (
                   <Image source={{ uri: doc.currentUri }} style={styles.previewImage} />
                 ) : (
                   <View style={styles.previewEmpty}>
-                    <Ionicons name="image-outline" size={20} color="#6F96A9" />
+                    <Ionicons name="image-outline" size={24} color="#6F96A9" />
                     <Text style={styles.previewEmptyText}>Sin imagen</Text>
                   </View>
                 )}
               </TouchableOpacity>
-
-              <TouchableOpacity style={styles.previewCard} onPress={() => showImagePreview(doc.nextUri || null)} activeOpacity={0.9}>
-                <Text style={styles.previewLabel}>Nueva</Text>
-                {doc.nextUri ? (
-                  <Image source={{ uri: doc.nextUri }} style={styles.previewImage} />
-                ) : (
-                  <View style={styles.previewEmpty}>
-                    <Ionicons name="swap-horizontal-outline" size={20} color="#6F96A9" />
-                    <Text style={styles.previewEmptyText}>Sin cambio</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            </View>
+            )}
           </View>
         ))}
 
-        <TouchableOpacity style={[styles.updateBtn, loadingUpload && styles.updateBtnDisabled]} onPress={handleUpdate} disabled={loadingUpload}>
-          <Text style={styles.updateBtnText}>
-            {loadingUpload ? "Actualizando..." : `Actualizar Ahora${pendingCount > 0 ? ` (${pendingCount})` : ""}`}
-          </Text>
-        </TouchableOpacity>
+        {loadingUpload ? (
+          <View style={styles.updateBtn}>
+            <Text style={styles.updateBtnText}>Guardando...</Text>
+          </View>
+        ) : null}
       </ScrollView>
 
       <Modal transparent animationType="slide" visible={sourceModalVisible} onRequestClose={() => setSourceModalVisible(false)}>
@@ -543,6 +714,49 @@ const styles = StyleSheet.create({
     paddingBottom: 30,
     gap: 12,
   },
+  customerUploadSection: {
+    borderRadius: 18,
+    backgroundColor: "rgba(10,46,61,0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(0,229,255,0.14)",
+    padding: 24,
+    alignItems: "center",
+    gap: 16,
+    marginTop: 12,
+  },
+  customerUploadTitle: {
+    color: "#E9F6FF",
+    fontSize: 22,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  customerUploadSubtitle: {
+    color: "#9EC2D4",
+    fontSize: 13,
+    textAlign: "center",
+    lineHeight: 19,
+  },
+  customerUploadBtn: {
+    marginTop: 8,
+    borderRadius: 14,
+    backgroundColor: "#00E5FF",
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 10,
+    shadowColor: "#00E5FF",
+    shadowOpacity: 0.32,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  customerUploadBtnText: {
+    color: "#04202C",
+    fontSize: 15,
+    fontWeight: "800",
+  },
   subtitle: {
     color: "#9EC2D4",
     fontSize: 12,
@@ -594,6 +808,42 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  lockedBtn: {
+    borderColor: "rgba(123,168,188,0.3)",
+    backgroundColor: "rgba(123,168,188,0.08)",
+  },
+  lockedPreviewCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,229,255,0.18)",
+    backgroundColor: "rgba(6, 25, 36, 0.8)",
+    overflow: "hidden",
+    position: "relative",
+  },
+  lockedPreviewImage: {
+    width: "100%",
+    height: 200,
+    resizeMode: "cover",
+  },
+  lockedBadge: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+    backgroundColor: "rgba(4, 20, 30, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(123,168,188,0.35)",
+  },
+  lockedBadgeText: {
+    color: "#E9F6FF",
+    fontSize: 11,
+    fontWeight: "700",
+  },
   previewRow: {
     flexDirection: "row",
     gap: 10,
@@ -607,6 +857,16 @@ const styles = StyleSheet.create({
     padding: 8,
     gap: 8,
   },
+  previewCardFull: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(0,229,255,0.18)",
+    backgroundColor: "rgba(6, 25, 36, 0.8)",
+    overflow: "hidden",
+    minHeight: 110,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   previewLabel: {
     color: "#A7C5D4",
     fontSize: 11,
@@ -616,7 +876,7 @@ const styles = StyleSheet.create({
   },
   previewImage: {
     width: "100%",
-    height: 92,
+    height: 130,
     borderRadius: 10,
     resizeMode: "cover",
   },
@@ -816,6 +1076,3 @@ const styles = StyleSheet.create({
 });
 
 export default ImageGalleryComponent;
-
-
-

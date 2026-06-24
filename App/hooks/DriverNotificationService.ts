@@ -27,6 +27,7 @@ async function getNotifications() {
 
 const DRIVER_NOTIFICATION_ID = 'driver-active-notification';
 const DRIVER_CHANNEL_ID = 'driver-active';
+const NEW_BOOKING_CHANNEL_ID = 'driver-new-booking';
 
 /* ── Setup the persistent notification channel (Android only, call once) ── */
 export async function setupDriverNotificationChannel() {
@@ -41,6 +42,36 @@ export async function setupDriverNotificationChannel() {
     lockscreenVisibility: N.AndroidNotificationVisibility.PUBLIC,
     showBadge: false,
     enableVibrate: false,
+  });
+  await N.setNotificationChannelAsync(NEW_BOOKING_CHANNEL_ID, {
+    name: 'Nuevos servicios',
+    importance: N.AndroidImportance.HIGH,         // High = banner + sound + heads-up
+    description: 'Avisa cuando llega un nuevo servicio disponible',
+    lightColor: '#00E5FF',
+    lockscreenVisibility: N.AndroidNotificationVisibility.PUBLIC,
+    showBadge: true,
+    enableVibrate: true,
+    vibrationPattern: [0, 250, 200, 250],
+  });
+}
+
+/* ── Notify the driver about a brand-new booking that just appeared ── */
+export async function notifyNewBooking(
+  title: string,
+  body: string,
+  data?: Record<string, unknown>,
+) {
+  const N = await getNotifications();
+  if (!N) return;
+  await N.scheduleNotificationAsync({
+    content: {
+      title,
+      body,
+      data: { type: 'new-booking', ...(data || {}) },
+      sound: true,
+      ...(Platform.OS === 'android' ? { channelId: NEW_BOOKING_CHANNEL_ID } : {}),
+    },
+    trigger: null,
   });
 }
 

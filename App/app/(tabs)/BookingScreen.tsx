@@ -1,5 +1,8 @@
 import { RootState } from '../../common/store';
-import { supabase } from '../../config/SupabaseConfig';
+import { supabase, SUPABASE_URL, getSupabaseAuthHeaders } from '../../config/SupabaseConfig';
+
+const MAX_ACTIVE_IMMEDIATE_TRIPS = 2;
+const ACTIVE_IMMEDIATE_STATUSES = ['PENDING', 'ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED', 'NEW'];
 import { roundPrice } from '../../hooks/roundPrice';
 import { FareCalculator } from '../../common/actions/FareCalculator';
 import { OtpService } from '../../common/services/OtpService';
@@ -401,9 +404,16 @@ const BookingScreen = () => {
             service: car.description || "",
             carImage: car.image || "",
             base_fare: parseFloat(car.base_price) || 0,
+            base_fare_inter: parseFloat(car.base_price_inter) || 0,
             rate_per_unit_distance: parseFloat(car.price_per_km) || 0,
+            rate_per_unit_distance_inter: parseFloat(car.price_per_km_inter) || 0,
             rate_per_hour: parseFloat(car.rate_per_hour) || 0,
+            rate_per_hour_inter: parseFloat(car.rate_per_hour_inter) || 0,
+            valor_hora: parseFloat(car.valor_hora) || 0,
             min_fare: parseFloat(car.min_fare) || 0,
+            min_fare_inter: parseFloat(car.min_fare_inter) || 0,
+            delta_aeropuerto: parseFloat(car.delta_aeropuerto) || 0,
+            delta_aeropuerto_prog: parseFloat(car.delta_aeropuerto_prog) || 0,
             convenience_fees: parseFloat(car.convenience_fee) || 0,
             convenience_fee_type: car.convenience_fee_type || "flat",
             estimatedPrice: parseFloat(car.base_price) || 15000,
@@ -431,11 +441,19 @@ const BookingScreen = () => {
           service: carType.description || "",
           carImage: carType.image || "",
           base_fare: parseFloat(carType.base_price) || 0,
+          base_fare_inter: parseFloat(carType.base_price_inter) || 0,
           rate_per_unit_distance: parseFloat(carType.price_per_km) || 0,
+          rate_per_unit_distance_inter: parseFloat(carType.price_per_km_inter) || 0,
           rate_per_hour: parseFloat(carType.rate_per_hour) || 0,
+          rate_per_hour_inter: parseFloat(carType.rate_per_hour_inter) || 0,
+          valor_hora: parseFloat(carType.valor_hora) || 0,
           min_fare: parseFloat(carType.min_fare) || 0,
+          min_fare_inter: parseFloat(carType.min_fare_inter) || 0,
+          delta_aeropuerto: parseFloat(carType.delta_aeropuerto) || 0,
+          delta_aeropuerto_prog: parseFloat(carType.delta_aeropuerto_prog) || 0,
           convenience_fees: parseFloat(carType.convenience_fee) || 0,
           convenience_fee_type: carType.convenience_fee_type || "flat",
+          umbral_intermunicipal_km: parseFloat(carType.umbral_intermunicipal_km) || 29,
           estimatedPrice: parseFloat(carType.base_price) || 15000,
         }));
 
@@ -465,70 +483,50 @@ const BookingScreen = () => {
     }
   };
 
-  const handleSelectVehicle = async (vehicle: any) => {
-    console.log("\n🚗 ═══════════════════════════════════════════════════════════");
-    console.log("🚗 ✅ VEHÍCULO SELECCIONADO");
-    console.log("🚗 Nombre:", vehicle.name || vehicle.carType);
-    console.log("🚗 Tarifa base:", vehicle.base_fare);
-    console.log("🚗 ═══════════════════════════════════════════════════════════\n");
+  const handleSelectVehicle = (vehicle: any) => {
     setSelectedVehicle(vehicle);
-    const rateDetails = {
-      rate_per_unit_distance: vehicle.rate_per_unit_distance,
-      rate_per_hour: vehicle.rate_per_hour,
-      base_fare: vehicle.base_fare,
-      min_fare: vehicle.min_fare,
-      convenienceFee: vehicle.convenience_fees,
-      convenience_fee_type: vehicle.convenience_fee_type,
-    };
-  
-    let calculatedFareDetails;
-    try {
-      const response = await fetch('https://us-central1-treasupdate.cloudfunctions.net/calculatePrice2', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          bookingData: {
-            roundedDistance: typeof distance === 'string' ? parseFloat(distance) : distance,
-            durationMinutes: typeof duration === 'string' ? parseFloat(duration) : duration,
-            carType: rateDetails,
-          },
-          tolls: [],
-          isScheduled,
-          settings: {
-            decimal: 2,
-            distanceIntermunicipal: 50,
-          },
-          addressOrigin: "Origen",
-          addressDestination: "Destino",
-          selectedPaymentMethod: selectedPaymentType,
-          selectedUser: null,
-          authState: null,
-          filteredUsers: [],
-        }),
-      });
-      calculatedFareDetails = await response.json();
-      //console.log(parseFloat(distance), "-----distance2----");
-      const distancia = typeof duration === 'string' ? parseFloat(duration) : duration;
-      //console.log(distancia, "Duration2");
-      //console.log(fareDetails, "fareee");
-      setFareDetails(calculatedFareDetails);
-    } catch (error) {
-      console.error("Error al calcular el precio:", error);
-      calculatedFareDetails = null;
-    }
-  
+
+    const distKm   = typeof distance === 'string' ? parseFloat(distance) : distance;
+    const durMin   = typeof duration === 'string' ? parseFloat(duration) : duration;
+    const isAirport = origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
+    const isIntermunicipal = distKm > (vehicle.umbral_intermunicipal_km || 29);
+
+    const { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
+      distKm,
+      durMin * 60,
+      vehicle,
+      null,
+      2,
+      { isAirport, isScheduled, isIntermunicipal }
+    );
+
+    setFareDetails({
+      estimateFare: grandTotal,
+      clientFare:   clientTotal,
+      totalCost,
+      convenienceFees: convenience_fees,
+      driverShare: totalCost,
+    });
+
     setIsVehicleModalVisible(false);
   };
   
 
   const getVehiclePrice = (option: any) => {
-    const extra = (isScheduled ? 7000 : 0) +
-      (origin?.title?.includes("Aero") || destination?.title?.includes("Aero") ? 7000 : 0);
+    const distKm = typeof distance === 'number' ? distance : parseFloat(distance as any) || 0;
+    const durMin = typeof duration === 'number' ? duration : parseFloat(duration as any) || 0;
+    const isAirport = origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
+    const isIntermunicipal = distKm > (option.umbral_intermunicipal_km || 29);
     const mult = tripType === "Ida y Vuelta" ? 2 : 1;
-    const base = (option.estimatedPrice || 0) * mult;
-    return roundPrice(base + extra);
+    const { grandTotal } = FareCalculator(
+      distKm * mult,
+      durMin * 60 * mult,
+      option,
+      null,
+      2,
+      { isAirport, isScheduled, isIntermunicipal }
+    );
+    return grandTotal;
   };
 
   const renderTaxiOptions = () => {
@@ -670,12 +668,18 @@ const BookingScreen = () => {
       return null;
     }
 
-    let { totalCost, grandTotal, convenience_fees } = FareCalculator(
+    const isAirport =
+      origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
+    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || 29);
+    const tollsCost = tolls.reduce((acc: number, toll: any) => acc + toll.PriceToll, 0);
+
+    let { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
       roundedDistance,
       durationMinutes * 60,
       carType,
       {},
-      2
+      2,
+      { isAirport, isScheduled, isIntermunicipal, tollsTotal: tollsCost }
     );
 
     if (isNaN(totalCost) || isNaN(grandTotal) || isNaN(convenience_fees)) {
@@ -687,20 +691,14 @@ const BookingScreen = () => {
       return null;
     }
 
-    const tollsCost = tolls.reduce((acc: number, toll: any) => acc + toll.PriceToll, 0);
-    grandTotal += tollsCost * 2;
-
-    if (isScheduled) {
-      grandTotal += 4000;
-    }
-
     return {
-      totalCost: totalCost,
+      totalCost,
       estimateFare: grandTotal,
+      clientFare: clientTotal,
       estimateTime: durationMinutes,
       convenienceFees: convenience_fees,
-      driverShare: grandTotal - convenience_fees,
-      tollsCost: tollsCost,
+      driverShare: totalCost,
+      tollsCost,
     };
   };
 
@@ -762,26 +760,60 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
     console.log("\n════════════════════════════════════════════════════════════");
     console.log("📱 [BOOKING START] ¡¡¡ BOTÓN PRESIONADO !!!");
     console.log("════════════════════════════════════════════════════════════");
-    
+
     if (isButtonDisabled) {
       console.log("❌ Botón deshabilitado");
       return;
     }
     setIsButtonDisabled(true);
-    
+
     console.log("✅ Validando datos:");
     console.log("   User:", user?.id ? "✅" : "❌");
     console.log("   Vehicle:", selectedVehicle?.name ? "✅ " + selectedVehicle.name : "❌");
     console.log("   Origin:", origin?.title ? "✅ " + origin.title : "❌");
     console.log("   Destination:", destination?.title ? "✅ " + destination.title : "❌");
     console.log("   Payment:", selectedPaymentType ? "✅ " + selectedPaymentType : "❌");
-    
+
     if (!user || !selectedVehicle || !origin || !destination || !selectedPaymentType) {
       console.log("❌ VALIDACIÓN FALLIDA - Campos faltantes");
       setIsButtonDisabled(false);
       return;
     }
-    
+
+    // 🛡️ Límite de 2 viajes inmediatos activos por cliente
+    if (!isScheduled) {
+      try {
+        const headers = await getSupabaseAuthHeaders();
+        const statuses = ACTIVE_IMMEDIATE_STATUSES.map((s) => `"${s}"`).join(',');
+        const url = `${SUPABASE_URL}/rest/v1/bookings?customer=eq.${user.id}&status=in.(${statuses})&select=id`;
+        const resp = await fetch(url, { headers });
+        if (resp.ok) {
+          const rows = await resp.json();
+          const activeCount = Array.isArray(rows) ? rows.length : 0;
+          console.log(`🛡️ [LIMIT CHECK] Viajes inmediatos activos: ${activeCount}/${MAX_ACTIVE_IMMEDIATE_TRIPS}`);
+          if (activeCount >= MAX_ACTIVE_IMMEDIATE_TRIPS) {
+            setAlertType('warning');
+            setAlertTitle('Límite de viajes alcanzado');
+            setAlertMessage(
+              `Solo puedes tener ${MAX_ACTIVE_IMMEDIATE_TRIPS} viajes inmediatos activos al mismo tiempo. ` +
+              `Actualmente tienes ${activeCount}. Finaliza o cancela uno para solicitar otro.`
+            );
+            setAlertButtons([
+              { text: 'Ver mis viajes', onPress: () => { setAlertVisible(false); navigation.navigate('Notifications'); } },
+              { text: 'Entendido', onPress: () => setAlertVisible(false) },
+            ]);
+            setAlertVisible(true);
+            setIsButtonDisabled(false);
+            return;
+          }
+        } else {
+          console.warn('⚠️ [LIMIT CHECK] No se pudo validar el límite, continuando:', resp.status);
+        }
+      } catch (e: any) {
+        console.warn('⚠️ [LIMIT CHECK] Error al validar límite, continuando:', e?.message || e);
+      }
+    }
+
     console.log("\n✅✅✅ TODOS LOS CAMPOS VALIDADOS ✅✅✅");
     
     try {
@@ -1241,9 +1273,11 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
                     }
                     const baseFare = fareDetails ? fareDetails.estimateFare : 0;
                     const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
-                    const extra = (isScheduled ? 7000 : 0) + (origin.title?.includes('Aero') || destination.title?.includes('Aero') ? 7000 : 0);
-                    const driverP = roundPrice(baseFare * mult + extra);
-                    const clientP = roundPrice(baseFare * mult + extra + 7000);
+                    const isAirportNav = origin.title?.includes('Aero') || destination.title?.includes('Aero');
+                    const deltaAerop = isAirportNav ? (selectedVehicle?.delta_aeropuerto || 0) : 0;
+                    const deltaProg = isScheduled ? (selectedVehicle?.delta_aeropuerto_prog || 0) : 0;
+                    const driverP = roundPrice(baseFare * mult + deltaAerop + deltaProg);
+                    const clientP = Math.ceil(driverP / 0.8 / 100) * 100;
                     navigation.navigate('CreateReservation', {
                       origin, destination, distance, duration,
                       driverPrice: driverP, clientPrice: clientP,

@@ -30,8 +30,7 @@ import { settings } from "@/scripts/settings";
 import { fetchPromos, editPromo } from "@/common/actions/promoactions";
 import { Directions } from "react-native-gesture-handler";
 import { RootState } from "@/common/store";
-import { onValue, ref } from "firebase/database";
-import { database } from "@/config/SupabaseConfig";
+import supabase from "@/config/SupabaseConfig";
 import { useColorScheme } from 'react-native'; 
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 const hasNotch =
@@ -86,21 +85,28 @@ export default function PaymentScreen(props) {
   }, [dispatch]);
 
   useEffect(() => {
-    const unsubscribe = navigation.addListener("focus", () => {
-      if (booking?.id) {
-        const bookingRef = ref(database, `bookings/${booking.id}`);
+    if (!booking?.id) return;
 
-        onValue(bookingRef, (snapshot) => {
-          const updatedBooking = snapshot.val();
-          if (updatedBooking) {
-            setBooking(updatedBooking);
-          }
-        });
-      }
-    });
+    // Carga inicial del booking desde Supabase
+    supabase
+      .from('bookings')
+      .select('*')
+      .eq('id', booking.id)
+      .single()
+      .then(({ data }) => { if (data) setBooking(data); });
 
-    return unsubscribe;
-  }, [navigation, booking?.id]);
+    // Escucha cambios en tiempo real con Supabase Realtime
+    const channel = supabase
+      .channel(`booking-payment-${booking.id}`)
+      .on(
+        'postgres_changes' as any,
+        { event: 'UPDATE', schema: 'public', table: 'bookings', filter: `id=eq.${booking.id}` },
+        (payload: any) => { if (payload.new) setBooking(payload.new); }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [booking?.id]);
 
   const [payDetails, setPayDetails] = useState({
     amount:
@@ -353,6 +359,39 @@ export default function PaymentScreen(props) {
       }
     }
   };
+  // Para el conductor: antes de completar un pago en efectivo debe confirmar
+  // que efectivamente recibió el dinero. Si no lo recibió, se le redirige a la
+  // pantalla de Quejas y Reclamos para reportar el incidente.
+  const handleCashButton = () => {
+    if (user && user.usertype === "driver" && booking.payment_mode === "cash") {
+      showAlert(
+        'confirm',
+        'Confirmar pago en efectivo',
+        '¿Confirmas que recibiste el pago en efectivo del cliente?',
+        [
+          {
+            text: 'No recibí el pago',
+            style: 'destructive',
+            onPress: () => {
+              setAlertVisible(false);
+              props.navigation.navigate('Complain', { booking });
+            },
+          },
+          {
+            text: 'Sí, recibí el pago',
+            style: 'default',
+            onPress: () => {
+              setAlertVisible(false);
+              doPayment('cash');
+            },
+          },
+        ]
+      );
+      return;
+    }
+    doPayment(booking.payment_mode);
+  };
+
   const selectCoupon = (item, index) => {
     var toDay = new Date().getTime();
     var expDate = item.promo_validity;
@@ -866,7 +905,7 @@ export default function PaymentScreen(props) {
             <TouchableOpacity
               style={styles.buttonWrapper}
               onPress={() => {
-                doPayment(booking.payment_mode); // Enviar el modo de pago correspondiente
+                handleCashButton(); // Confirma recepción del efectivo (conductor) o procesa el pago
               }}
             >
               <View style={styles.cardPayBtnInnner}>

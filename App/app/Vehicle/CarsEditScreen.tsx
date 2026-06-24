@@ -1,6 +1,7 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -17,17 +18,30 @@ import * as ImagePicker from "expo-image-picker";
 import axios from "axios";
 import LottieView from "lottie-react-native";
 import { Ionicons } from "@expo/vector-icons";
-import RNPickerSelect from "react-native-picker-select";
 import { useSelector } from "react-redux";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { RootState } from "@/common/store";
 import { Database } from "@/config/database.types";
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 
 const BG_IMAGE = require("../../assets/images/bg.png");
 const DEFAULT_CAR_IMAGE = require("../../assets/images/TREAS-X.png");
+
+const CATEGORY_IMAGES: Record<string, any> = {
+  "T+Plus Taxi": require("../../assets/images/categoryTaxi.png"),
+  "T+Plus Van": require("../../assets/images/categoryVan.png"),
+  "T+Plus Particular": require("../../assets/images/categoryParticular.png"),
+  "T+Plus Especial": require("../../assets/images/categoryEspecial.png"),
+};
+
+const getCategoryImage = (carType?: string) => {
+  if (carType && CATEGORY_IMAGES[carType]) {
+    return CATEGORY_IMAGES[carType];
+  }
+  return DEFAULT_CAR_IMAGE;
+};
 
 const PLATE_CHECK_URL = `${SUPABASE_URL}/rest/v1/cars`;
 const PLATE_DEBOUNCE_MS = 600;
@@ -51,6 +65,8 @@ type VehicleFormData = {
   vehicleMetalup: string;
   vehicleDoors: string;
 };
+
+type SelectOption = { label: string; value: string };
 
 const INITIAL_VEHICLE_DATA: VehicleFormData = {
   vehicleNumber: "",
@@ -167,7 +183,7 @@ const extractVehicleInfoFromText = (
     upperText.includes(" GAS ") ? "Gas" :
     "";
   const formMatch = ["AUTOMOVIL", "CAMIONETA", "VAN", "MICROBUS", "CAMPERO"].find((item) => upperText.includes(item)) || "";
-  const bodyworkMatch = ["VAN", "4X4", "CERRADA", "COUPÃ‰", "DOBLE CABINA", "HATCH BACK", "MINIVAN", "CROSSOVER", "SEDÃN", "STATION WAGON"]
+  const bodyworkMatch = ["VAN", "4X4", "CERRADA", "COUPE", "DOBLE CABINA", "HATCH BACK", "MINIVAN", "CROSSOVER", "SEDAN", "STATION WAGON"]
     .find((item) => upperText.includes(item.toUpperCase())) || "";
   const matchedBrand = brands.find((brand) => upperText.includes(brand.value.toUpperCase()));
 
@@ -194,10 +210,15 @@ const CarsEditScreen = ({ navigation }: any) => {
   const [pickerTarget, setPickerTarget] = useState<PickerTarget>(null);
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [imageUriVehicle, setImageUriVehicle] = useState<string | null>(null);
+  const [imageBase64Vehicle, setImageBase64Vehicle] = useState<string | null>(null);
   const [log, setLog] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [loaded, setLoaded] = useState<boolean>(false);
   const [vehicleData, setVehicleData] = useState<VehicleFormData>(INITIAL_VEHICLE_DATA);
+  const [selectModalVisible, setSelectModalVisible] = useState(false);
+  const [selectModalTitle, setSelectModalTitle] = useState("");
+  const [activeSelectField, setActiveSelectField] = useState<keyof VehicleFormData | null>(null);
+  const [activeSelectOptions, setActiveSelectOptions] = useState<SelectOption[]>([]);
   const [plateExists, setPlateExists] = useState(false);
   const [plateMsg, setPlateMsg] = useState("");
   const [plateChecking, setPlateChecking] = useState(false);
@@ -219,12 +240,12 @@ const CarsEditScreen = ({ navigation }: any) => {
 
   const vehicleTypes = ["Automovil", "Camioneta", "VAN", "Microbus", "Campero"];
   const serviceTypes = [
-    { description: "T+Plus Taxi", value: "T+Plus Taxi" },
-    { description: "T+Plus Van (Van Pax 11)", value: "T+Plus Van" },
-    { description: "T+Plus Particular", value: "T+Plus Particular" },
-    { description: "T+Plus Especial", value: "T+Plus Especial" },
+    { description: "TaxiPlus (Vehículo tipo Taxi)", value: "T+Plus Taxi" },
+    { description: "VanPlus (Van Pax 11 Servicio Especial)", value: "T+Plus Van" },
+    { description: "XPlus (Vehículo Particular Sedan o Hatchback 2006 en adelante)", value: "T+Plus Particular" },
+    { description: "ConfortPlus (Camioneta o Automóvil Servicio de Especial)", value: "T+Plus Especial" },
   ];
-  const bodyworkTypes = ["VAN", "4x4", "Cerrada", "COUPÃ‰", "Doble Cabina", "Hatch Back", "MiniVan", "CROSSOVER", "SedÃ¡n", "Station Wagon"];
+  const bodyworkTypes = ["VAN", "4x4", "Cerrada", "Coupe", "Doble Cabina", "Hatch Back", "MiniVan", "CROSSOVER", "Sedan", "Station Wagon"];
   const marcasDeVehiculos = [
     { label: "Brilliance", value: "Brilliance" },
     { label: "Byd", value: "Byd" },
@@ -248,7 +269,7 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "Citroen", value: "Citroen" },
     { label: "Dfsk", value: "Dfsk" },
     { label: "Dodge", value: "Dodge" },
-    { label: "BYD ELÃ‰CTRICO", value: "BYD ELÃ‰CTRICO" },
+    { label: "BYD ELA‰CTRICO", value: "BYD ELA‰CTRICO" },
     { label: "FAW", value: "FAW" },
     { label: "Fiat", value: "Fiat" },
     { label: "Ford", value: "Ford" },
@@ -318,7 +339,6 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "Otra", value: "Otra" },
   ];
   const CilindrajesDeVehiculos = [
-    { label: "Tipo de Cilindraje", value: "" },
     { label: "Menos de 1.0L", value: "Menos de 1.0L" },
     { label: "1.0L - 1.4L", value: "1.0L - 1.4L" },
     { label: "1.5L - 1.9L", value: "1.5L - 1.9L" },
@@ -328,10 +348,9 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "3.5L - 3.9L", value: "3.5L - 3.9L" },
     { label: "4.0L - 4.4L", value: "4.0L - 4.4L" },
     { label: "4.5L - 4.9L", value: "4.5L - 4.9L" },
-    { label: "MÃ¡s de 5.0L", value: "MÃ¡s de 5.0L" },
+    { label: "MA¡s de 5.0L", value: "MA¡s de 5.0L" },
   ];
   const TipoCombustible = [
-    { label: "Tipo de Combustible", value: "" },
     { label: "GASOLINA", value: "Gasolina" },
     { label: "DIESEL", value: "Diesel" },
     { label: "Electrico", value: "ELECTRICO" },
@@ -340,7 +359,6 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "Gasol/Elect", value: "GasolElect" },
   ];
   const ModelosDeVehiculos = [
-    { label: "Modelo del VehÃ­culo", value: "" },
     { label: "2006", value: "2006" },
     { label: "2007", value: "2007" },
     { label: "2008", value: "2008" },
@@ -360,6 +378,9 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "2022", value: "2022" },
     { label: "2023", value: "2023" },
     { label: "2024", value: "2024" },
+    { label: "2025", value: "2025" },
+    { label: "2026", value: "2026" },
+    { label: "2027", value: "2027" },
   ];
 
   // â”€â”€ Resolver driver_id al montar y contar vehÃ­culos â”€â”€
@@ -390,7 +411,7 @@ const CarsEditScreen = ({ navigation }: any) => {
         const cars = await countRes.json();
         if (!cancelled) setDriverVehicleCount(Array.isArray(cars) ? cars.length : 0);
       } catch (e) {
-        console.warn("Error al contar vehÃ­culos:", e);
+        console.warn("Error al contar vehiculos:", e);
       }
     })();
     return () => { cancelled = true; };
@@ -441,7 +462,7 @@ const CarsEditScreen = ({ navigation }: any) => {
         const alreadyMine = rows.some((r: any) => r.driver_id === currentDriverId);
         if (alreadyMine) {
           setPlateExists(true);
-          setPlateMsg("Ya tienes esta placa registrada en tus vehÃ­culos");
+          setPlateMsg("Ya tienes esta placa registrada en tus vehiculos");
           return;
         }
 
@@ -449,7 +470,7 @@ const CarsEditScreen = ({ navigation }: any) => {
         const uniqueDrivers = new Set(rows.map((r: any) => r.driver_id));
         if (uniqueDrivers.size >= 3) {
           setPlateExists(true);
-          setPlateMsg("Esta placa ya alcanzÃ³ el mÃ¡ximo de 3 conductores");
+          setPlateMsg("Esta placa ya alcanza el maximo de 3 conductores");
           return;
         }
 
@@ -485,13 +506,13 @@ const CarsEditScreen = ({ navigation }: any) => {
 
     const plate = (vehicleData.vehicleNumber || "").trim().toUpperCase();
     if (plate && !/^[A-Z0-9-]{5,8}$/.test(plate)) {
-      errors.vehicleNumber = "Placa invÃ¡lida (5-8 caracteres alfanumÃ©ricos)";
+      errors.vehicleNumber = "Placa invalida (5-8 caracteres alfanumericos)";
     }
 
     const doorsRaw = (vehicleData.vehicleDoors || "").trim();
     if (doorsRaw) {
       if (!/^\d+$/.test(doorsRaw)) {
-        errors.vehicleDoors = "Debe ser un nÃºmero entero";
+        errors.vehicleDoors = "Debe ser un numero entero";
       } else {
         const doors = Number.parseInt(doorsRaw, 10);
         if (doors < 1 || doors > 7) {
@@ -503,7 +524,7 @@ const CarsEditScreen = ({ navigation }: any) => {
     const passengersRaw = (vehicleData.vehiclePassengers || "").trim();
     if (passengersRaw) {
       if (!/^\d+$/.test(passengersRaw)) {
-        errors.vehiclePassengers = "Debe ser un nÃºmero entero";
+        errors.vehiclePassengers = "Debe ser un numero entero";
       } else {
         const passengers = Number.parseInt(passengersRaw, 10);
         if (passengers < 1 || passengers > 12) {
@@ -535,6 +556,24 @@ const CarsEditScreen = ({ navigation }: any) => {
     }
 
     return value;
+  };
+
+  const openSelectModal = (
+    field: keyof VehicleFormData,
+    label: string,
+    options: SelectOption[]
+  ) => {
+    setActiveSelectField(field);
+    setSelectModalTitle(label);
+    setActiveSelectOptions(options.filter((item) => (item.value || "").trim() !== ""));
+    setSelectModalVisible(true);
+  };
+
+  const closeSelectModal = () => {
+    setSelectModalVisible(false);
+    setActiveSelectField(null);
+    setActiveSelectOptions([]);
+    setSelectModalTitle("");
   };
 
   const updateField = (field: keyof VehicleFormData, value: string) => {
@@ -633,7 +672,7 @@ const CarsEditScreen = ({ navigation }: any) => {
           showAlert(
             'warning',
             'Permiso requerido',
-            'Necesitamos acceso a tu cámara para tomar la foto. Actívalo en Configuración > Aplicaciones.'
+            'Necesitamos acceso a tu camara para tomar la foto. Activalo en Configuracion > Aplicaciones.'
           );
           return;
         }
@@ -643,7 +682,7 @@ const CarsEditScreen = ({ navigation }: any) => {
           showAlert(
             'warning',
             'Permiso requerido',
-            'Necesitamos acceso a tu galería para cargar la imagen. Actívalo en Configuración > Aplicaciones.'
+            'Necesitamos acceso a tu galeria para cargar la imagen. Activalo en Configuracion > Aplicaciones.'
           );
           return;
         }
@@ -654,6 +693,7 @@ const CarsEditScreen = ({ navigation }: any) => {
         allowsEditing: true,
         aspect: pickerTarget === "vehicle" ? ([1, 1] as [number, number]) : ([5, 3] as [number, number]),
         quality: 0.85,
+        base64: true,
       };
 
       const result = fromCamera
@@ -665,17 +705,20 @@ const CarsEditScreen = ({ navigation }: any) => {
         return;
       }
 
-      const uri = result.assets[0].uri;
+      const asset = result.assets[0];
+      const uri = asset.uri;
+      const base64 = asset.base64 || null;
 
       if (pickerTarget === "vehicle") {
         setImageUriVehicle(uri);
+        setImageBase64Vehicle(base64);
       } else {
         setImageUri(uri);
         await processImage(uri);
       }
     } catch (err) {
       console.warn("Error al seleccionar imagen:", err);
-      showAlert('error', 'Error', 'No se pudo abrir la cámara o galería. Inténtalo de nuevo.');
+      showAlert('error', 'Error', 'No se pudo abrir la camara o galeria. Intentalo de nuevo.');
     } finally {
       setPickerTarget(null);
     }
@@ -690,63 +733,93 @@ const CarsEditScreen = ({ navigation }: any) => {
   };
 
   const resolveDriverId = async (): Promise<string> => {
-    if (isUuid(authUser?.id)) {
-      return authUser.id;
+    if (resolvedDriverIdRef.current) {
+      return resolvedDriverIdRef.current;
     }
 
-    if (isUuid(authUser?.user_id)) {
-      return authUser.user_id;
-    }
+    const candidateIds = [authUser?.auth_id, authUser?.id, authUser?.user_id]
+      .map((value) => String(value || "").trim())
+      .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index);
 
-    const authId = authUser?.auth_id || authUser?.id;
-
-    if (!authId) {
+    if (candidateIds.length === 0) {
       throw new Error("No se pudo resolver el usuario autenticado.");
     }
 
-    // REST directo â€” el cliente Supabase JS cuelga
-    const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=id&limit=1`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    const headers = {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+    };
 
-    const data = await response.json();
-    if (Array.isArray(data) && data.length > 0 && data[0].id) {
-      return data[0].id;
+    const uuidCandidates = candidateIds.filter((c) => isUuid(c));
+    const allPromises: Promise<{ driverId?: string; error?: Error }>[] = [];
+
+    for (const candidateId of uuidCandidates) {
+      allPromises.push(
+        fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`, {
+          method: "GET",
+          headers,
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (Array.isArray(data) && data.length > 0 && data[0].id) {
+              return { driverId: data[0].id };
+            }
+            return {};
+          })
+          .catch((err) => ({ error: err }))
+      );
+
+      allPromises.push(
+        fetch(`${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`, {
+          method: "GET",
+          headers,
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (Array.isArray(data) && data.length > 0 && data[0].id) {
+              return { driverId: data[0].id };
+            }
+            return {};
+          })
+          .catch((err) => ({ error: err }))
+      );
     }
 
-    throw new Error("No se encontrÃ³ el perfil de conductor.");
+    const results = await Promise.all(allPromises);
+    for (const result of results) {
+      if (result.driverId) {
+        return result.driverId;
+      }
+    }
+
+    throw new Error("No se encontrA³ el perfil de conductor.");
   };
 
   const handleAddCar = async () => {
     if (!isFormComplete || hasValidationErrors || plateExists) {
       if (driverVehicleCount !== null && driverVehicleCount >= 2) {
-        showAlert('warning', 'Límite alcanzado', 'Ya tienes el máximo de 2 vehículos registrados. Elimina uno para agregar otro.');
+        showAlert('warning', 'Limite alcanzado', 'Ya tienes el maximo de 2 vehiculos registrados. Elimina uno para agregar otro.');
         return;
       }
       setLog("Revisa los campos marcados antes de guardar.");
-      showAlert('warning', 'Campos inválidos', 'Corrige los campos marcados para continuar.');
+      showAlert('warning', 'Campos invalidos', 'Corrige los campos marcados para continuar.');
       return;
     }
 
     setLoading(true);
-    setLog("[1/5] Iniciando guardado del vehÃ­culo...");
+    setLog("[1/5] Iniciando guardado del vehiculo...");
 
     let debugStep = "inicio";
 
     try {
       debugStep = "resolver_driver_id";
-      setLog("[2/5] Validando conductor en Supabase...");
+      setLog("[2/5] Validando conductor en Base de Datos...");
 
       const driverId = await withTimeout(
         resolveDriverId(),
-        20000,
-        "La validaciÃ³n del conductor tardÃ³ demasiado. Verifica tu conexiÃ³n e intenta nuevamente."
+        30000,
+        "La validacion del conductor tarda demasiado. Verifica tu conexion e intenta nuevamente."
       );
 
       const capacity = Number.parseInt(vehicleData.vehiclePassengers || "4", 10);
@@ -762,28 +835,9 @@ const CarsEditScreen = ({ navigation }: any) => {
       carPayload.transmission = "MECANICO";
       carPayload.capacity = Number.isFinite(capacity) && capacity > 0 ? capacity : 4;
       carPayload.is_active = false;
-      // Guardar imagen en base64 en features para insert rÃ¡pido
-      let imageBase64 = null;
-      if (imageUriVehicle) {
-        try {
-          const response = await withTimeout(
-            fetch(imageUriVehicle),
-            12000,
-            "La lectura de la imagen tardÃ³ demasiado."
-          );
-          if (response.ok) {
-            const blob = await response.blob();
-            const reader = new FileReader();
-            imageBase64 = await new Promise((resolve, reject) => {
-              reader.onloadend = () => resolve(reader.result?.toString().split(',')[1] || null);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-          }
-        } catch (e) {
-          imageBase64 = null;
-        }
-      }
+      // El base64 ya lo entrega expo-image-picker (base64: true) — evita fetch(file://)
+      // que es inestable en Android release con Hermes.
+      const imageBase64: string | null = imageBase64Vehicle;
       const features = {
         vehicleNoMotor: vehicleData.vehicleNoMotor,
         vehicleNoChasis: vehicleData.vehicleNoChasis,
@@ -801,13 +855,14 @@ const CarsEditScreen = ({ navigation }: any) => {
       }
 
       debugStep = "insert_cars";
-      setLog("[3/5] Insertando vehÃ­culo...");
+      setLog("[3/5] Insertando vehA­culo...");
 
-      // REST directo â€” el cliente Supabase JS cuelga
+      // REST directo â€” el cliente Supabase JS cuelga.
+      // IMPORTANTE: usar JWT del usuario, no el anon key. La tabla `cars` tiene RLS
+      // que exige auth.uid() para INSERT/UPDATE; con el anon key falla con 42501.
+      const authHeaders = await getSupabaseAuthHeaders(true);
       const restHeaders = {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
+        ...authHeaders,
         'Prefer': 'return=representation',
       };
 
@@ -822,7 +877,7 @@ const CarsEditScreen = ({ navigation }: any) => {
               body: JSON.stringify(carPayload),
             }),
             60000,
-            "La creaciÃ³n del vehÃ­culo tardÃ³ demasiado. IntÃ©ntalo nuevamente."
+            "La creación del vehículo tarda demasiado. Inténtalo nuevamente."
           );
           const insertData = await insertResp.json();
 
@@ -855,21 +910,17 @@ const CarsEditScreen = ({ navigation }: any) => {
       if (!createdCarId && imageUriVehicle) {
         try {
           debugStep = "buscar_id_vehiculo";
-          setLog("[4/5] Confirmando ID del vehÃ­culo reciÃ©n creado...");
+          setLog("[4/5] Confirmando ID del vehA­culo reciA©n creado...");
 
           const plate = encodeURIComponent((vehicleData.vehicleNumber || "").toUpperCase().trim());
           const findUrl = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&plate=eq.${plate}&order=created_at.desc&limit=1&select=id`;
           const findResp = await withTimeout(
             fetch(findUrl, {
               method: 'GET',
-              headers: {
-                'apikey': SUPABASE_ANON_KEY,
-                'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-                'Content-Type': 'application/json',
-              },
+              headers: authHeaders,
             }),
             12000,
-            "No se pudo confirmar el id del vehÃ­culo creado."
+            "No se pudo confirmar el id del vehiculo creado."
           );
           const findData = await findResp.json();
 
@@ -878,31 +929,33 @@ const CarsEditScreen = ({ navigation }: any) => {
           }
         } catch (findIdError) {
           setLog(`[ERROR] Buscar id vehÃ­culo: ${formatDebugError(findIdError)}`);
-          console.warn("No se pudo obtener el id reciÃ©n creado:", formatDebugError(findIdError));
+          console.warn("No se pudo obtener el id reciA©n creado:", formatDebugError(findIdError));
         }
       }
 
-      if (imageUriVehicle && createdCarId) {
+      if (imageBase64Vehicle && createdCarId) {
         try {
           debugStep = "leer_imagen_local";
-          setLog("[5/5] Subiendo imagen del vehÃ­culo...");
+          setLog("[5/5] Subiendo imagen del vehA­culo...");
 
-          const imgResponse = await withTimeout(
-            fetch(imageUriVehicle),
-            12000,
-            "La lectura de la imagen tardÃ³ demasiado."
-          );
-
-          if (!imgResponse.ok) {
-            setLog("[ERROR] No se pudo leer la imagen seleccionada.");
-            throw new Error("No se pudo leer la imagen seleccionada.");
+          // Decodificar base64 a bytes sin pasar por fetch(file://) — esto fallaba
+          // silenciosamente en builds de release Android (Hermes), subiendo 0 bytes.
+          let imageBytes: Uint8Array;
+          try {
+            const binary = global.atob(imageBase64Vehicle);
+            imageBytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              imageBytes[i] = binary.charCodeAt(i);
+            }
+          } catch (decodeErr) {
+            setLog("[ERROR] No se pudo decodificar la imagen seleccionada.");
+            throw new Error("No se pudo decodificar la imagen seleccionada.");
           }
 
-          const imageBlob = await withTimeout(
-            imgResponse.blob(),
-            12000,
-            "La conversiÃ³n de imagen tardÃ³ demasiado."
-          );
+          if (imageBytes.byteLength === 0) {
+            setLog("[ERROR] La imagen seleccionada está vacía.");
+            throw new Error("La imagen seleccionada está vacía.");
+          }
 
           debugStep = "subir_imagen_storage";
           const storagePath = `${createdCarId}/car_image.jpg`;
@@ -917,15 +970,14 @@ const CarsEditScreen = ({ navigation }: any) => {
                 fetch(`${SUPABASE_URL}/storage/v1/object/vehicle-images/${storagePath}`, {
                   method: 'POST',
                   headers: {
-                    'apikey': SUPABASE_ANON_KEY,
-                    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+                    ...authHeaders,
                     'Content-Type': 'image/jpeg',
                     'x-upsert': 'true',
                   },
-                  body: imageBlob,
+                  body: imageBytes as unknown as BodyInit,
                 }),
                 15000,
-                "La carga de imagen tardÃ³ demasiado."
+                "La carga de imagen tarda demasiado."
               );
 
               if (storageResp.ok) {
@@ -953,7 +1005,7 @@ const CarsEditScreen = ({ navigation }: any) => {
                 body: JSON.stringify({ car_image: uploadUrl, updated_at: new Date().toISOString() }),
               }),
               10000,
-              "La actualizaciÃ³n de la imagen tardÃ³ demasiado."
+              "La actualización de la imagen tarda demasiado."
             );
 
             if (!updateResp.ok) {
@@ -972,18 +1024,18 @@ const CarsEditScreen = ({ navigation }: any) => {
       }
 
       const successMessage = createdCarId
-        ? `VehÃ­culo creado correctamente. ID: ${createdCarId}`
-        : "VehÃ­culo creado correctamente.";
+        ? `Vehículo creado correctamente. ID: ${createdCarId}`
+        : "Vehículo creado correctamente.";
       setLog(successMessage);
-      showAlert('success', 'Vehículo guardado', successMessage, [
+      showAlert('success', 'Vehiculo guardado', successMessage, [
         { text: 'Continuar', onPress: () => { setAlertVisible(false); navigation.goBack(); } },
       ]);
     } catch (error) {
       const debugMessage = formatDebugError(error);
       setLog(`[ERROR] Guardado vehÃ­culo: ${debugMessage}`);
-      console.warn(`Error al crear el vehÃ­culo en etapa [${debugStep}]:`, debugMessage);
+      console.warn(`Error al crear el veh­culo en etapa [${debugStep}]:`, debugMessage);
       const message = `Fallo en etapa: ${debugStep}. ${debugMessage}`;
-      showAlert('error', 'Error al guardar vehículo', message);
+      showAlert('error', 'Error al guardar vehiculo', message);
     } finally {
       setLoading(false);
     }
@@ -1037,23 +1089,50 @@ const CarsEditScreen = ({ navigation }: any) => {
     field: keyof VehicleFormData,
     placeholder: string,
     items: Array<{ label: string; value: string }>
-  ) => (
+  ) => {
+    const hasValue = Boolean((vehicleData[field] || "").trim());
+    const sanitizedItems = items.filter((item) => (item.value || "").trim() !== "");
+    const selectedLabel =
+      sanitizedItems.find((item) => item.value === vehicleData[field])?.label || "";
+
+    const leftIconName: keyof typeof Ionicons.glyphMap =
+      field === "vehicleMake" ? "car-sport-outline" :
+      field === "vehicleModel" ? "calendar-outline" :
+      field === "vehicleForm" ? "layers-outline" :
+      field === "carType" ? "briefcase-outline" :
+      field === "vehicleCylinders" ? "speedometer-outline" :
+      field === "vehicleFuel" ? "flame-outline" :
+      field === "vehicleMetalup" ? "cube-outline" :
+      "list-outline";
+
+    return (
     <View style={styles.fieldCard} key={field}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <View style={styles.fieldShell}>
-        <RNPickerSelect
-          value={vehicleData[field]}
-          onValueChange={(value) => updateField(field, value || "")}
-          items={items}
-          placeholder={{ label: placeholder, value: "" }}
-          useNativeAndroidPickerStyle={false}
-          Icon={() => <Ionicons name="chevron-down" size={18} color="#00E5FF" />}
-          style={pickerSelectStyles}
+      <TouchableOpacity
+        activeOpacity={0.86}
+        onPress={() => openSelectModal(field, label, sanitizedItems)}
+        style={[styles.fieldShell, styles.selectShell, hasValue && styles.selectShellActive]}
+      >
+        <Ionicons
+          name={leftIconName}
+          size={16}
+          color={hasValue ? "#00E5FF" : "rgba(255,255,255,0.46)"}
+          style={styles.selectLeftIcon}
         />
-      </View>
+        <Text style={[styles.selectValueText, !hasValue && styles.selectPlaceholderText]}>
+          {hasValue ? selectedLabel : placeholder}
+        </Text>
+        <Ionicons
+          name="chevron-down"
+          size={18}
+          color={hasValue ? "#00E5FF" : "rgba(255,255,255,0.5)"}
+          style={styles.selectRightIcon}
+        />
+      </TouchableOpacity>
       {fieldErrors[field] ? <Text style={styles.fieldErrorText}>{fieldErrors[field]}</Text> : null}
     </View>
-  );
+    );
+  };
 
   return (
     <View style={styles.root}>
@@ -1099,8 +1178,8 @@ const CarsEditScreen = ({ navigation }: any) => {
             <View style={styles.limitBanner}>
               <Ionicons name="warning" size={20} color="#E91E63" />
               <View style={{ flex: 1 }}>
-                <Text style={styles.limitBannerTitle}>LÃ­mite alcanzado</Text>
-                <Text style={styles.limitBannerText}>Ya tienes {driverVehicleCount} vehÃ­culos registrados (mÃ¡ximo 2). Elimina uno para agregar otro.</Text>
+                <Text style={styles.limitBannerTitle}>Limite alcanzado</Text>
+                <Text style={styles.limitBannerText}>Ya tienes {driverVehicleCount} vehi­culos registrados (ma¡ximo 2). Elimina uno para agregar otro.</Text>
               </View>
             </View>
           )}
@@ -1108,7 +1187,7 @@ const CarsEditScreen = ({ navigation }: any) => {
           {driverVehicleCount !== null && driverVehicleCount < 2 && (
             <View style={styles.infoBanner}>
               <Ionicons name="car-sport" size={18} color="#00E5FF" />
-              <Text style={styles.infoBannerText}>Tienes {driverVehicleCount}/2 vehÃ­culos registrados</Text>
+              <Text style={styles.infoBannerText}>Tienes {driverVehicleCount}/2 vehiculos registrados</Text>
             </View>
           )}
 
@@ -1120,7 +1199,7 @@ const CarsEditScreen = ({ navigation }: any) => {
             >
               <View style={styles.avatarInner}>
                 <Image
-                  source={imageUriVehicle ? { uri: imageUriVehicle } : DEFAULT_CAR_IMAGE}
+                  source={imageUriVehicle ? { uri: imageUriVehicle } : getCategoryImage(vehicleData.carType)}
                   style={styles.avatarImage}
                 />
                 <View style={styles.avatarCameraBtn}>
@@ -1130,20 +1209,20 @@ const CarsEditScreen = ({ navigation }: any) => {
             </TouchableOpacity>
 
             <Text style={styles.avatarTitle}>Foto del Vehiculo</Text>
-            <Text style={styles.avatarSubtext}>Toca la imagen para cargar la foto principal que verÃ¡ el conductor.</Text>
+            <Text style={styles.avatarSubtext}>Toca la imagen para cargar la foto principal que vera el conductor.</Text>
           </View>
 
           <View style={styles.utilityCard}>
             <View style={styles.utilityCopy}>
               <Text style={styles.utilityTag}>Lectura inteligente</Text>
               <Text style={styles.utilityTitle}>Tarjeta de propiedad</Text>
-              <Text style={styles.utilityText}>Puedes tomar una foto o cargarla desde la galerÃ­a para autocompletar varios campos.</Text>
+              <Text style={styles.utilityText}>Puedes tomar una foto o cargarla desde la galeria para autocompletar varios campos.</Text>
             </View>
 
             <TouchableOpacity
               style={styles.utilityButton}
               activeOpacity={0.9}
-              onPress={() => showAlert('info', 'Próximamente', 'Esta función aún no está disponible.')}
+              onPress={() => showAlert('info', 'Proximamente', 'Esta funcion aun no esta disponible.')}
             >
               <Ionicons name="scan" size={16} color="#051A26" />
               <Text style={styles.utilityButtonText}>Leer tarjeta</Text>
@@ -1175,7 +1254,7 @@ const CarsEditScreen = ({ navigation }: any) => {
             {renderSelectField("Clase de Vehiculo", "vehicleForm", "Selecciona una clase", vehicleTypes.map((type) => ({ label: type, value: type })))}
             {renderSelectField("Tipo de Servicio", "carType", "Selecciona un servicio", serviceTypes.map((type) => ({ label: type.description, value: type.value })))}
             {renderSelectField("Cilindraje del Vehiculo", "vehicleCylinders", "Selecciona el cilindraje", CilindrajesDeVehiculos)}
-            {renderSelectField("Tipo de Combustible", "vehicleFuel", "Selecciona el combustible", TipoCombustible)}
+            {renderSelectField("Tipo de Combustible", "vehicleFuel", "Selecciona", TipoCombustible)}
           </View>
 
           <View style={styles.sectionCard}>
@@ -1238,6 +1317,51 @@ const CarsEditScreen = ({ navigation }: any) => {
         </View>
       </Modal>
 
+      <Modal
+        visible={selectModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeSelectModal}
+      >
+        <View style={styles.selectModalBackdrop}>
+          <View style={[styles.selectModalCard, { paddingBottom: Math.max(insets.bottom, 14) + 10 }]}> 
+            <View style={styles.selectModalHeader}>
+              <Text style={styles.selectModalTitle}>{selectModalTitle}</Text>
+              <TouchableOpacity onPress={closeSelectModal} style={styles.selectModalCloseBtn}>
+                <Ionicons name="close" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={activeSelectOptions}
+              keyExtractor={(item) => `${item.value}`}
+              style={styles.selectModalList}
+              contentContainerStyle={styles.selectModalListContent}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                const active = activeSelectField ? vehicleData[activeSelectField] === item.value : false;
+                return (
+                  <TouchableOpacity
+                    activeOpacity={0.86}
+                    style={[styles.selectOptionRow, active && styles.selectOptionRowActive]}
+                    onPress={() => {
+                      if (activeSelectField) {
+                        updateField(activeSelectField, item.value || "");
+                      }
+                      closeSelectModal();
+                    }}
+                  >
+                    <Text style={[styles.selectOptionText, active && styles.selectOptionTextActive]}>{item.label}</Text>
+                    {active ? <Ionicons name="checkmark-circle" size={18} color="#00E5FF" /> : null}
+                  </TouchableOpacity>
+                );
+              }}
+              ListEmptyComponent={<Text style={styles.selectEmptyText}>No hay opciones disponibles.</Text>}
+            />
+          </View>
+        </View>
+      </Modal>
+
       {loading ? (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color="#00E5FF" />
@@ -1269,30 +1393,6 @@ const CarsEditScreen = ({ navigation }: any) => {
       />
     </View>
   );
-};
-
-const pickerSelectStyles = {
-  inputIOS: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    paddingVertical: 14,
-    paddingHorizontal: 0,
-    paddingRight: 28,
-  },
-  inputAndroid: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    paddingVertical: 12,
-    paddingHorizontal: 0,
-    paddingRight: 28,
-  },
-  iconContainer: {
-    top: 14,
-    right: 0,
-  },
-  placeholder: {
-    color: "rgba(255,255,255,0.36)",
-  },
 };
 
 const styles = StyleSheet.create({
@@ -1576,6 +1676,37 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.08)",
     justifyContent: "center",
   },
+  selectShell: {
+    backgroundColor: "rgba(0,229,255,0.05)",
+    borderColor: "rgba(0,229,255,0.18)",
+  },
+  selectShellActive: {
+    borderColor: "rgba(0,229,255,0.42)",
+    backgroundColor: "rgba(0,229,255,0.09)",
+  },
+  selectLeftIcon: {
+    position: "absolute",
+    left: 14,
+    top: 18,
+    zIndex: 2,
+  },
+  selectRightIcon: {
+    position: "absolute",
+    right: 14,
+    top: 17,
+  },
+  selectValueText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
+    paddingVertical: 14,
+    paddingLeft: 30,
+    paddingRight: 34,
+  },
+  selectPlaceholderText: {
+    color: "rgba(255,255,255,0.46)",
+    fontWeight: "600",
+  },
   textInput: {
     color: "#FFFFFF",
     fontSize: 15,
@@ -1693,6 +1824,85 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.7)",
     fontSize: 14,
     fontWeight: "700",
+  },
+  selectModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.58)",
+    justifyContent: "flex-end",
+  },
+  selectModalCard: {
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    backgroundColor: "#0A2E3D",
+    borderTopWidth: 1,
+    borderColor: "rgba(0,229,255,0.22)",
+    maxHeight: "72%",
+  },
+  selectModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.09)",
+  },
+  selectModalTitle: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  selectModalCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  selectModalList: {
+    width: "100%",
+  },
+  selectModalListContent: {
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  selectOptionRow: {
+    minHeight: 48,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  selectOptionRowActive: {
+    backgroundColor: "rgba(0,229,255,0.12)",
+    borderColor: "rgba(0,229,255,0.45)",
+  },
+  selectOptionText: {
+    color: "rgba(255,255,255,0.86)",
+    fontSize: 14,
+    fontWeight: "600",
+    flex: 1,
+    paddingRight: 10,
+  },
+  selectOptionTextActive: {
+    color: "#D9FCFF",
+    fontWeight: "800",
+  },
+  selectEmptyText: {
+    color: "rgba(255,255,255,0.56)",
+    textAlign: "center",
+    paddingVertical: 18,
+    fontSize: 13,
   },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,

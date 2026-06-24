@@ -83,6 +83,9 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# generated API docs (regenerar con `npm run docs`)
+docs/api/
+
 # @end expo-cli
 
 

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { View, ActivityIndicator, Text } from "react-native";
 import { useSelector, useDispatch } from "react-redux";
 import { useNavigation } from "@react-navigation/native";
+import { differenceInDays } from "date-fns";
 import { RootState, AppDispatch } from "@/common/store";
 import { fetchMemberships, selectMembershipLoading } from "@/common/reducers/membershipSlice";
 
@@ -17,11 +18,11 @@ const SubscriptionScreen = () => {
   const activeMembership = memberships.find((membership) => membership.status === "ACTIVA");
 
   useEffect(() => {
-    if (user?.uid && !hasFetched) {
-      console.log("Cargando membresías para el usuario:", user.uid);
-      dispatch(fetchMemberships(user.uid)).then(() => setHasFetched(true));
+    if (user?.id && !hasFetched) {
+      console.log("Cargando membresías para el usuario:", user.id);
+      dispatch(fetchMemberships(user.id)).then(() => setHasFetched(true));
     }
-  }, [dispatch, user?.uid, hasFetched]);
+  }, [dispatch, user?.id, hasFetched]);
 
   useEffect(() => {
     if (hasFetched && !isLoading) {
@@ -79,5 +80,10 @@ const styles = {
 export default SubscriptionScreen;
 
 function calculateDaysLeft(fecha_terminada: any) {
-  throw new Error("Function not implemented.");
+  if (!fecha_terminada) return 0;
+  try {
+    return Math.max(differenceInDays(new Date(fecha_terminada), new Date()), 0);
+  } catch {
+    return 0;
+  }
 }

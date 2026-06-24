@@ -20,6 +20,9 @@ export interface UserProfile {
   approved: boolean;
   blocked: boolean;
   referral_id: string | null;
+  referred_by_code: string | null;
+  document_type: string | null;
+  document_number: string | null;
   city: string | null;
   driver_active_status: boolean;
   license_number: string | null;

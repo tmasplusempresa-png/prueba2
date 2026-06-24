@@ -19,7 +19,10 @@ import {
   Animated,
   Switch,
   ScrollView,
+  AppState,
+  TextInput,
 } from "react-native";
+import StarRating from "react-native-star-rating-widget";
 import Mapbox, { MapboxStyles } from '@/config/MapboxConfig';
 import {
   Entypo,
@@ -41,7 +44,6 @@ import supabase from "@/config/SupabaseConfig";
 import OtpModal from "@/components/OtpModal";
 import { RootState } from "@/common/store";
 // import loadCar from "./../../assets/video/g4.gif"; // TODO: Verify if file exists
-import { debounce, result } from "lodash";
 import {
   startBooking,
   endBooking,
@@ -49,10 +51,12 @@ import {
   updateLocation,
   reportIncident,
 } from "@/common/store/bookingsSlice";
+import { useDriverTracking } from "@/hooks/useDriverTracking";
 import CountdownModal from "@/components/CountdownModal";
 import { roundPrice } from "@/hooks/roundPrice";
 import originIcon from "../../assets/images/rsz_2red_pin.png";
 import destinationIcon from "../../assets/images/green_pin.png";
+import driverCarIcon from "../../assets/images/track_Car.png";
 import { colors } from "@/scripts/theme";
 import { MAIN_COLOR } from "@/common/other/sharedFunctions";
 import moment from "moment";
@@ -69,9 +73,16 @@ import MapSensor from "../(tabs)/mapaSensors";
 import AntDesign from "@expo/vector-icons/AntDesign";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import ServiceParameterSelector from '@/components/ServiceParameterSelector';
+import {
+  scheduleActiveTripNotification,
+  cancelActiveTripNotification,
+  stopBackgroundLocationUpdatesAsync,
+  isActiveTripStatus,
+  notifyTripStateChange,
+} from '@/common/services/ActiveTripNotificationService';
+import { calculateDistance, getEstimatedTime } from '@/common/services/DriverTrackingService';
 
 const { width, height } = Dimensions.get("window");
-const GOOGLE_MAPS_APIKEY_PROD = API_KEY; // Reemplaza con tu API Key de Google Maps
 const MAPBOX_ACCESS_TOKEN = getMapboxAccessToken();
 
 const BookingCabScreen = () => {
@@ -84,12 +95,17 @@ const BookingCabScreen = () => {
   const user: any = useSelector((state: RootState) => state.auth.user);
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
+  const previousStatusRef = useRef(route.params?.booking?.status); // 🆕 Track previous status for transitions
   const [searchModalVisible, setSearchModalVisible] = useState(false);
   const bottomSheetModalRef = useRef<BottomSheetModal>(null);
   const snapPoints = useMemo(() => ["60%", "70%"], []);
   const [driverLocation, setDriverLocation] = useState<{latitude: number; longitude: number} | null>(null);
   const [otpModalVisible, setOtpModalVisible] = useState(false);
-  const [estimatedTime, setEstimatedTime] = useState(null);
+  const [estimatedTime, setEstimatedTime] = useState<string | null>(null);
+  const [estimatedDistance, setEstimatedDistance] = useState<string | null>(null);
+  const [distanceToDriver, setDistanceToDriver] = useState<number | null>(null);
+  const [etaToPickup, setEtaToPickup] = useState<number | null>(null);
+  const [routeToPickup, setRouteToPickup] = useState<any>(null);
   const [isDriverArrived, setIsDriverArrived] = useState(false);
   const navigation = useNavigation();
   const [isButtonDisabled, setIsButtonDisabled] = useState(true); // Estado para habilitar/deshabilitar el bot�n
@@ -117,6 +133,30 @@ const BookingCabScreen = () => {
   });
   const [successModalVisible, setSuccessModalVisible] = useState(false);
 
+  useEffect(() => {
+    const manageActiveTripNotification = async () => {
+      if (isActiveTripStatus(currentBooking?.status)) {
+        await scheduleActiveTripNotification(currentBooking, user?.usertype === 'driver' ? 'driver' : 'customer');
+        
+        // 🆕 Notify on state change
+        if (previousStatusRef.current !== currentBooking?.status) {
+          const role = user?.usertype === 'driver' ? 'driver' : 'customer';
+          console.log(`🔔 [NOTIFICACIÓN ${role.toUpperCase()}] Estado cambió: ${previousStatusRef.current} → ${currentBooking?.status}`);
+          await notifyTripStateChange(currentBooking, role, previousStatusRef.current);
+          previousStatusRef.current = currentBooking?.status;
+        }
+      } else {
+        await cancelActiveTripNotification();
+        await stopBackgroundLocationUpdatesAsync();
+      }
+    };
+
+    manageActiveTripNotification();
+    return () => {
+      cancelActiveTripNotification();
+    };
+  }, [currentBooking?.status, currentBooking?.id, user?.usertype]);
+
   const [unreadMessages, setUnreadMessages] = useState(false);
   const settings = useSelector(selectSettings);
   const [isIncidentModalVisible, setIsIncidentModalVisible] = useState(false);
@@ -125,16 +165,20 @@ const BookingCabScreen = () => {
   const [fadeAnim] = useState(new Animated.Value(0)); // Animaci�n de fade
   const [isConfirmationModalVisible, setIsConfirmationModalVisible] =
     useState(false);
+  const [customerRating, setCustomerRating] = useState(0);
+  const [customerReview, setCustomerReview] = useState("");
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
   const [alertMessage, setAlertMessage] = useState('');
   const [alertButtons, setAlertButtons] = useState<AlertButton[]>([]);
-  const showAlert = (type: 'success' | 'error' | 'warning' | 'info' | 'confirm', title: string, message: string, buttons?: AlertButton[]) => {
+  const onAlertDismissRef = useRef<(() => void) | null>(null);
+  const showAlert = (type: 'success' | 'error' | 'warning' | 'info' | 'confirm', title: string, message: string, buttons?: AlertButton[], onDismiss?: () => void) => {
     setAlertType(type);
     setAlertTitle(title);
     setAlertMessage(message);
     setAlertButtons(buttons || [{ text: 'OK', onPress: () => setAlertVisible(false) }]);
+    onAlertDismissRef.current = onDismiss ?? null;
     setAlertVisible(true);
   };
   const incidentOptions = [
@@ -216,25 +260,17 @@ const BookingCabScreen = () => {
     return () => { supabase.removeChannel(channel); };
   }, [currentBooking?.id]);
 
-  useEffect(() => {
-    if (
-      currentBooking &&
-      (currentBooking.status === "ACCEPTED" ||
-        currentBooking.status === "ARRIVED" ||
-        currentBooking.status === "STARTED") &&
-      user &&
-      user?.usertype === "driver"
-    ) {
-      const intervalId = setInterval(() => {
-        //console.log(user);
+  const isTrackingActive =
+    user?.usertype === "driver" &&
+    (currentBooking?.status === "ACCEPTED" ||
+      currentBooking?.status === "ARRIVED" ||
+      currentBooking?.status === "STARTED");
 
-        dispatch(
-          updateLocation({ booking: currentBooking, driverProfile: user })
-        );
-      }, 15000); // 15000 milisegundos = 15 segundos
-      return () => clearInterval(intervalId);
-    }
-  }, [dispatch, currentBooking, user]);
+  useDriverTracking(
+    currentBooking?.id ?? null,
+    user?.id ?? user?.uid ?? null,
+    isTrackingActive
+  );
 
   useEffect(() => {
     if (currentBooking?.status === "ARRIVED") {
@@ -305,7 +341,7 @@ const BookingCabScreen = () => {
   useEffect(() => {
     if (!currentBooking?.id) return;
     const channel = supabase
-      .channel(`booking-${currentBooking.id}`)
+      .channel(`booking-cab-${currentBooking.id}-${Date.now()}`)
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
@@ -335,42 +371,150 @@ const BookingCabScreen = () => {
     return () => { supabase.removeChannel(channel); };
   }, [currentBooking?.id]);
 
-  // Handle booking status transitions
+  // Refresh booking status when the app comes to foreground (catches missed realtime updates)
   useEffect(() => {
-    if (
-      currentBooking?.status === "CANCELLED" ||
-      currentBooking?.status === "PENDING"
-    ) {
+    if (!currentBooking?.id) return;
+    const subscription = AppState.addEventListener('change', async (nextState) => {
+      if (nextState === 'active') {
+        const { data } = await supabase
+          .from('bookings')
+          .select('status, cancelled_by')
+          .eq('id', currentBooking.id)
+          .single();
+        const row = data as any;
+        if (row && row.status !== currentBooking.status) {
+          setCurrentBooking((prev: any) => ({ ...prev, status: row.status, cancelled_by: row.cancelled_by }));
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, [currentBooking?.id]);
+
+  // Handle booking status transitions
+  const exitFlowRanRef = useRef(false);
+  useEffect(() => {
+    if (currentBooking?.status === "CANCELLED") {
+      if (exitFlowRanRef.current) return;
+      exitFlowRanRef.current = true;
+
+      const exitFlow = () => {
+        navigation.navigate('HomeScreen' as never);
+      };
+      const cancelledByCustomer =
+        (currentBooking as any)?.cancelled_by === "customer";
+      const isDriver = user?.usertype === "driver";
+      if (isDriver && cancelledByCustomer) {
+        const customerName = currentBooking?.customer_name || "El cliente";
+        const reference = (currentBooking as any)?.reference;
+        const refLine = reference ? `\nReserva: ${reference}` : "";
+        showAlert(
+          "warning",
+          "Viaje cancelado por el cliente",
+          `${customerName} canceló el viaje.${refLine}\n\nSe cerrará esta pantalla.`,
+          [{ text: "Entendido", onPress: () => { setAlertVisible(false); exitFlow(); } }],
+          exitFlow,
+        );
+      } else {
+        exitFlow();
+      }
+    } else if (currentBooking?.status === "PENDING") {
       navigation.goBack();
     } else if (currentBooking?.status === "REACHED") {
       navigation.navigate("Payment", { booking: { ...currentBooking } });
     }
   }, [currentBooking?.status]);
 
-  // Supabase realtime subscription for driver tracking
+  // Supabase realtime subscription for driver tracking (booking_tracking table)
   useEffect(() => {
-    if (currentBooking?.status !== "ACCEPTED" || !currentBooking?.id) return;
-    const channel = supabase
-      .channel(`tracking-${currentBooking.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'tracking',
-        filter: `booking_id=eq.${currentBooking.id}`,
-      }, (payload) => {
-        if (payload.new?.lat && payload.new?.lng) {
-          setDriverLocation({
-            latitude: payload.new.lat,
-            longitude: payload.new.lng,
-          });
+    if (!currentBooking?.id) return;
+    if (currentBooking?.status !== 'ACCEPTED' && currentBooking?.status !== 'ARRIVED' && currentBooking?.status !== 'STARTED') return;
+
+    const setupTracking = async () => {
+      try {
+        // Seed with the latest known point so the marker appears immediately
+        const { data: latest, error: latestError } = await supabase
+          .from('booking_tracking')
+          .select('lat, lng, created_at')
+          .eq('booking_id', currentBooking.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestError) {
+          console.warn('[tracking] Initial fetch error:', latestError.message);
+        } else if (latest?.lat != null && latest?.lng != null) {
+          console.log('[tracking] Seeded with latest point:', latest);
+          setDriverLocation({ latitude: Number(latest.lat), longitude: Number(latest.lng) });
         }
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [currentBooking?.status, currentBooking?.id]);
+      } catch (err) {
+        console.error('[tracking] Seed error:', err);
+      }
+    };
+
+    setupTracking();
+
+    console.log('[tracking][customer] subscribing', { bookingId: currentBooking.id, status: currentBooking.status });
+    const channel = supabase
+      .channel(`booking_tracking_${currentBooking.id}_${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'booking_tracking',
+          filter: `booking_id=eq.${currentBooking.id}`,
+        },
+        (payload) => {
+          const row = payload.new as any;
+          console.log('[tracking][customer] new point received:', row);
+          if (row?.lat != null && row?.lng != null) {
+            const newLocation = {
+              latitude: Number(row.lat),
+              longitude: Number(row.lng),
+            };
+            setDriverLocation(newLocation);
+
+            // Calculate distance from customer to driver (if customer view)
+            if (user?.usertype === 'customer' && user?.location?.lat && user?.location?.lng) {
+              const dist = calculateDistance(
+                user.location.lat,
+                user.location.lng,
+                newLocation.latitude,
+                newLocation.longitude
+              );
+              setDistanceToDriver(dist);
+              console.log('[tracking] Distance to driver:', dist, 'km');
+            }
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('[tracking][customer] channel status:', status);
+      });
+
+    return () => {
+      console.log('[tracking] Unsubscribing');
+      supabase.removeChannel(channel);
+    };
+  }, [currentBooking?.status, currentBooking?.id, user?.location?.lat, user?.location?.lng, user?.usertype]);
 
   useEffect(() => {
-    if (cameraRef.current && driverLocation) {
+    if (!cameraRef.current || !driverLocation) return;
+    const pickupLat = currentBooking?.pickup?.lat;
+    const pickupLng = currentBooking?.pickup?.lng;
+    const isCustomerTrackingDriver =
+      user?.usertype === 'customer' &&
+      currentBooking?.status === 'ACCEPTED' &&
+      typeof pickupLat === 'number' &&
+      typeof pickupLng === 'number';
+
+    if (isCustomerTrackingDriver) {
+      const lats = [driverLocation.latitude, pickupLat];
+      const lngs = [driverLocation.longitude, pickupLng];
+      const ne: [number, number] = [Math.max(...lngs), Math.max(...lats)];
+      const sw: [number, number] = [Math.min(...lngs), Math.min(...lats)];
+      cameraRef.current.fitBounds(ne, sw, [140, 60, 260, 60], 1000);
+    } else {
       cameraRef.current.setCamera({
         centerCoordinate: [driverLocation.longitude, driverLocation.latitude],
         pitch: 70,
@@ -378,10 +522,55 @@ const BookingCabScreen = () => {
         animationDuration: 1000,
       });
     }
-  }, [driverLocation]);
+  }, [driverLocation, currentBooking?.pickup?.lat, currentBooking?.pickup?.lng, currentBooking?.status, user?.usertype]);
+
+  // Calculate ETA and distance from driver to pickup
+  useEffect(() => {
+    if (!driverLocation || !currentBooking?.pickup) return;
+    if (user?.usertype !== 'customer' || currentBooking?.status !== 'ACCEPTED') return;
+
+    const calculateETA = async () => {
+      try {
+        const result = await getEstimatedTime(
+          driverLocation.latitude,
+          driverLocation.longitude,
+          currentBooking.pickup.lat,
+          currentBooking.pickup.lng,
+          MAPBOX_ACCESS_TOKEN
+        );
+
+        if (result) {
+          const distanceToPickup = result.distance;
+          const durationToPickup = result.duration;
+          
+          setEstimatedDistance(`${distanceToPickup.toFixed(1)} km`);
+          setEstimatedTime(`${durationToPickup} min${durationToPickup !== 1 ? 's' : ''}`);
+          setEtaToPickup(durationToPickup);
+          
+          console.log('[ETA] Distance:', distanceToPickup.toFixed(1), 'km, Duration:', durationToPickup, 'mins');
+        }
+      } catch (error) {
+        console.error('[ETA] Error calculating ETA:', error);
+      }
+    };
+
+    // Calculate ETA every 30 seconds or when driver location changes
+    const timer = setInterval(calculateETA, 30000);
+    calculateETA(); // Calculate immediately
+
+    return () => clearInterval(timer);
+  }, [driverLocation, currentBooking?.pickup, currentBooking?.status, user?.usertype]);
 
   const handleStartTrip = () => {
-    // Siempre pedir OTP al conductor - el cliente le da el c�digo
+    if (currentBooking?.status === "CANCELLED") {
+      return showAlert(
+        'warning',
+        'Viaje cancelado',
+        'El cliente canceló el viaje. No es posible iniciarlo.'
+      );
+    }
+    // OTP only for customers; drivers don't need to verify OTP
+    if (user?.usertype === 'driver') return;
     setOtpModalVisible(true);
 
     if (Platform.OS === "android") {
@@ -492,6 +681,14 @@ const BookingCabScreen = () => {
   const handleEndTrip = async () => {
     //  console.log("Current user object:", user); // Log the full user object
 
+    if (currentBooking?.status === "CANCELLED") {
+      return showAlert(
+        'warning',
+        'Viaje cancelado',
+        'El cliente canceló el viaje. No es posible finalizarlo.'
+      );
+    }
+
     if (!user.location || !user.location.lat || !user.location.lng) {
       showAlert(
         'error',
@@ -509,7 +706,21 @@ const BookingCabScreen = () => {
   }, []);
 
   const handleArrived = async () => {
-    //console.log("entro");
+    // Verify current status from DB to catch cancellations the realtime may have missed
+    const { data: latestRow } = await supabase
+      .from('bookings')
+      .select('status, cancelled_by')
+      .eq('id', currentBooking.id)
+      .single();
+    const latest = latestRow as any;
+    if (latest?.status === 'CANCELLED') {
+      setCurrentBooking((prev: any) => ({ ...prev, status: 'CANCELLED', cancelled_by: latest.cancelled_by }));
+      return showAlert(
+        'warning',
+        'Viaje cancelado',
+        'El cliente canceló el viaje. No es posible confirmar la llegada.'
+      );
+    }
     if (isButtonDisabled) {
       showAlert(
         'warning',
@@ -770,59 +981,53 @@ const BookingCabScreen = () => {
 
   // Suscripci�n al giroscopio para obtener el heading
 
-  let requestCount = 0; // Variable global para contar las peticiones
-
   useEffect(() => {
-    console.log("Se activa el debounce, pero a�n no se ejecuta la funci�n"); // Log antes de la funci�n debounce
+    if (!driverLocation || !currentBooking) return;
 
-    const debounceCalculateETA = debounce(async () => {
-      console.log("Se ejecuta la funci�n dentro de debounce"); // Log dentro de debounce
+    let destLat: number | undefined;
+    let destLng: number | undefined;
+    if (currentBooking.status === "ACCEPTED") {
+      destLat = currentBooking.pickup?.lat;
+      destLng = currentBooking.pickup?.lng;
+    } else if (currentBooking.status === "STARTED") {
+      destLat = currentBooking.drop?.lat;
+      destLng = currentBooking.drop?.lng;
+    }
+    if (typeof destLat !== 'number' || typeof destLng !== 'number') return;
 
-      if (driverLocation && currentBooking) {
-        let destination = "";
-        if (currentBooking.status === "ACCEPTED") {
-          destination = `${currentBooking.pickup.lat},${currentBooking.pickup.lng}`;
-        } else if (currentBooking.status === "STARTED") {
-          destination = `${currentBooking.drop.lat},${currentBooking.drop.lng}`;
-        }
-
-        const origin = `${driverLocation.latitude},${driverLocation.longitude}`;
-
-        // console.log("Origen (ubicaci�n actual del conductor):", origin);
-
-        const API_KEY = GOOGLE_MAPS_APIKEY_PROD;
-
-        try {
-          requestCount++;
-
-          console.log(
-            "N�mero de peticiones realizadas a la API hasta ahora:",
-            requestCount
-          );
-
-          const response = await axios.get(
-            `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&key=${API_KEY}`
-          );
-
-          if (response.data.routes.length > 0) {
-            const duration = response.data.routes[0].legs[0].duration.text;
-            setEstimatedTime(duration);
-          } else {
-            console.log(
-              "No se pudo calcular el tiempo estimado.",
-              response.data
-            );
-          }
-        } catch (error) {
-          if (axios.isAxiosError(error) && error.response) {
-            console.error("Respuesta de error de la API:", error.response.data);
-          }
+    let cancelled = false;
+    const fetchRoute = async () => {
+      try {
+        const origin = `${driverLocation.longitude},${driverLocation.latitude}`;
+        const destination = `${destLng},${destLat}`;
+        const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${origin};${destination}?geometries=geojson&overview=full&access_token=${MAPBOX_ACCESS_TOKEN}`;
+        const response = await axios.get(url);
+        if (cancelled) return;
+        const route = response.data?.routes?.[0];
+        if (!route) return;
+        setRouteToPickup({
+          type: 'Feature',
+          geometry: route.geometry,
+          properties: {},
+        });
+        const minutes = Math.max(1, Math.round(route.duration / 60));
+        setEstimatedTime(minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`);
+        const km = route.distance / 1000;
+        setEstimatedDistance(km < 1 ? `${Math.round(route.distance)} m` : `${km.toFixed(1)} km`);
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response) {
+          console.error("Mapbox Directions error:", error.response.data);
         }
       }
-    }, 60000); // Ajusta el tiempo de debounce seg�n sea necesario (en este caso 1 minuto)
+    };
 
-    debounceCalculateETA();
-  }, [driverLocation, currentBooking]);
+    fetchRoute();
+    const intervalId = setInterval(fetchRoute, 25000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [driverLocation, currentBooking?.status, currentBooking?.pickup?.lat, currentBooking?.pickup?.lng, currentBooking?.drop?.lat, currentBooking?.drop?.lng]);
 
   const determineTripType = (pickup: any, drop: any) => {
     if (
@@ -863,10 +1068,27 @@ const BookingCabScreen = () => {
   }, [currentBooking]);
   const handleOpenOnlineChat = () => {
     if (currentBooking.id) {
+      const role = user?.usertype === "driver" ? "driver" : "customer";
+      const myName =
+        role === "driver"
+          ? currentBooking.driver_name ||
+            [user?.firstName, user?.lastName].filter(Boolean).join(" ") ||
+            "Conductor"
+          : currentBooking.customer_name ||
+            [user?.firstName, user?.lastName].filter(Boolean).join(" ") ||
+            "Cliente";
       navigation.navigate("Chat", {
         bookingId: currentBooking.id,
-        customer_pushToken: currentBooking.customer_token,
-        driver_pushToken: currentBooking.driver_token,
+        myRole: role,
+        myName,
+        senderId:
+          role === "driver"
+            ? currentBooking.driver || user?.id || user?.uid
+            : currentBooking.customer || user?.id || user?.uid,
+        otherName:
+          role === "driver"
+            ? currentBooking.customer_name || "Cliente"
+            : currentBooking.driver_name || "Conductor",
       });
     } else {
       showAlert('error', 'Error', 'ID de reserva no disponible.');
@@ -881,7 +1103,7 @@ const BookingCabScreen = () => {
 
     const booking = currentBooking;
     console.log(booking);
-    navigation.navigate("Segurity", { booking });
+    navigation.navigate("Segurity", { booking, estimatedTime, estimatedDistance });
   };
   const handleReportIncident = () => {
     if (!currentBooking.id || !selectedIncident) {
@@ -1090,10 +1312,56 @@ const BookingCabScreen = () => {
     },
   ];
   const finalizarReserva = async (currentBooking: any, user: any) => {
+    if (customerRating < 1) {
+      showAlert(
+        'warning',
+        'Calificación requerida',
+        'Por favor califica al cliente con 1 a 5 estrellas antes de finalizar el viaje.'
+      );
+      return;
+    }
     setIsConfirmationModalVisible(false);
     try {
+      // Guardar calificación del cliente (por parte del conductor) en Supabase
+      try {
+        await supabase
+          .from('bookings')
+          .update({
+            customer_rating: customerRating,
+            customer_review: customerReview || null,
+          } as any)
+          .eq('id', currentBooking.id);
+
+        // Actualizar el promedio de calificación del cliente en users
+        const { data: pastBookings } = await supabase
+          .from('bookings')
+          .select('customer_rating')
+          .eq('customer', currentBooking.customer)
+          .not('customer_rating', 'is', null);
+        if (pastBookings?.length) {
+          const avg = (
+            pastBookings.reduce(
+              (s: number, b: any) => s + (b.customer_rating || 0),
+              0
+            ) / pastBookings.length
+          ).toFixed(1);
+          await supabase
+            .from('users')
+            .update({ rating: avg } as any)
+            .eq('id', currentBooking.customer);
+        }
+      } catch (e) {
+        console.error('Error al guardar calificación del cliente:', e);
+      }
+
+      const bookingWithRating = {
+        ...currentBooking,
+        customer_rating: customerRating,
+        customer_review: customerReview,
+      };
+
       const result = await dispatch(
-        endBooking({ booking: currentBooking, driverProfile: user })
+        endBooking({ booking: bookingWithRating, driverProfile: user })
       ).unwrap(); // Aseg�rate de que driverProfile se pase como user
 
       if (result && result.status === "REACHED") {
@@ -1244,6 +1512,33 @@ const BookingCabScreen = () => {
                 >
                   <View>
                     <Image source={destinationIcon} style={{ width: 26, height: 50 }} />
+                  </View>
+                </Mapbox.PointAnnotation>
+              )}
+
+              {routeToPickup && currentBooking?.status === 'ACCEPTED' && (
+                <Mapbox.ShapeSource id="driver-route-source" shape={routeToPickup}>
+                  <Mapbox.LineLayer
+                    id="driver-route-line"
+                    style={{
+                      lineColor: '#00E5FF',
+                      lineWidth: 5,
+                      lineCap: 'round',
+                      lineJoin: 'round',
+                      lineOpacity: 0.85,
+                    }}
+                  />
+                </Mapbox.ShapeSource>
+              )}
+
+              {driverLocation && currentBooking?.status === 'ACCEPTED' && (
+                <Mapbox.PointAnnotation
+                  id="driver-marker-customer"
+                  coordinate={[driverLocation.longitude, driverLocation.latitude]}
+                  title="Conductor"
+                >
+                  <View style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
+                    <Image source={driverCarIcon} style={{ width: 40, height: 40, resizeMode: 'contain' }} />
                   </View>
                 </Mapbox.PointAnnotation>
               )}
@@ -1438,6 +1733,23 @@ const BookingCabScreen = () => {
                 </View>
               )}
 
+              {/* === ETA TRACKING PILL === */}
+              {user?.usertype === 'customer' && currentBooking?.status === 'ACCEPTED' && driverLocation && (
+                <View style={styles.etaPill}>
+                  <View style={styles.etaPillIcon}>
+                    <FontAwesome5 name="car" size={18} color="#001824" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.etaPillLabel}>Tu conductor est� en camino</Text>
+                    <Text style={styles.etaPillValue}>
+                      {estimatedTime ? `Llega en ${estimatedTime}` : 'Calculando tiempo...'}
+                      {estimatedDistance ? `  �  ${estimatedDistance}` : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.etaPulse} />
+                </View>
+              )}
+
               {/* === OTP PROMINENTE PARA CLIENTE === */}
               {user?.usertype === 'customer' && currentBooking?.otp && (currentBooking?.status === 'ACCEPTED' || currentBooking?.status === 'ARRIVED') && (
                 <View style={styles.otpClientCard}>
@@ -1470,6 +1782,7 @@ const BookingCabScreen = () => {
                 currentBooking={currentBooking}
                 user={user}
                 estimatedTime={estimatedTime}
+                estimatedDistance={estimatedDistance}
                 onPresentModalPress={handlePresentModalPress}
                 onStartTrip={handleStartTrip}
                 handleArrived={handleArrived}
@@ -1488,7 +1801,7 @@ const BookingCabScreen = () => {
               />
             </>
           )}
-          {otpModalVisible && (
+          {otpModalVisible && user?.usertype !== 'driver' && (
             <OtpModal
               modalVisible={otpModalVisible}
               requestModalClose={() => setOtpModalVisible(false)}
@@ -1696,31 +2009,85 @@ const BookingCabScreen = () => {
           onRequestClose={() => setIsConfirmationModalVisible(false)}
         >
           <View style={styles.successModalContainer}>
-            <View style={styles.successModalView}>
-              <AntDesign name="info-circle" size={48} color="#fff" />
-              <Text style={styles.modalText}>
-                �Est�s seguro que deseas finalizar el viaje?
+            <View
+              style={[
+                styles.successModalView,
+                { paddingVertical: 20, paddingHorizontal: 20, width: "85%" },
+              ]}
+            >
+              <AntDesign name="star" size={42} color="#fff" />
+              <Text style={[styles.modalText, { textAlign: "center" }]}>
+                Califica al cliente antes de finalizar el viaje
               </Text>
+              <Text
+                style={{
+                  color: "#fff",
+                  fontSize: 13,
+                  textAlign: "center",
+                  marginBottom: 8,
+                }}
+              >
+                1 estrella = poco satisfecho · 5 estrellas = muy satisfecho
+              </Text>
+              <View style={{ alignItems: "center", marginVertical: 10 }}>
+                <StarRating
+                  maxStars={5}
+                  starSize={40}
+                  color="#FFD700"
+                  emptyColor="#ffffff"
+                  rating={customerRating}
+                  onChange={(rating: number) => setCustomerRating(rating)}
+                />
+                <Text style={{ color: "#fff", marginTop: 6 }}>
+                  {customerRating > 0
+                    ? `${customerRating} / 5`
+                    : "Selecciona una calificación"}
+                </Text>
+              </View>
+              <TextInput
+                style={{
+                  backgroundColor: "#fff",
+                  borderRadius: 8,
+                  width: "100%",
+                  minHeight: 60,
+                  padding: 8,
+                  textAlignVertical: "top",
+                  marginBottom: 12,
+                  color: "#000",
+                }}
+                placeholder="Observaciones (opcional)"
+                placeholderTextColor="#888"
+                multiline
+                value={customerReview}
+                onChangeText={setCustomerReview}
+              />
               <View
                 style={{
                   flexDirection: "row",
                   justifyContent: "space-between",
+                  width: "100%",
                 }}
               >
                 <TouchableOpacity
-                  style={[styles.modalButton, { backgroundColor: "#fff" }]}
+                  style={[
+                    styles.modalButton,
+                    {
+                      backgroundColor: customerRating > 0 ? "#fff" : "#cccccc",
+                      flex: 1,
+                      marginRight: 6,
+                    },
+                  ]}
+                  disabled={customerRating < 1}
                   onPress={() => {
-                    // Acci�n para el bot�n Aceptar
                     finalizarReserva(currentBooking, user);
-                    setModalVisible(false);
                   }}
                 >
-                  <Text style={styles.modalButtonText}>Aceptar</Text>
+                  <Text style={styles.modalButtonText}>Finalizar viaje</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
                     styles.modalButtonCancel,
-                    { backgroundColor: "#333" },
+                    { backgroundColor: "#333", flex: 1, marginLeft: 6 },
                   ]}
                   onPress={() => setIsConfirmationModalVisible(false)}
                 >
@@ -1740,7 +2107,12 @@ const BookingCabScreen = () => {
         title={alertTitle}
         message={alertMessage}
         buttons={alertButtons}
-        onDismiss={() => setAlertVisible(false)}
+        onDismiss={() => {
+          setAlertVisible(false);
+          const cb = onAlertDismissRef.current;
+          onAlertDismissRef.current = null;
+          cb?.();
+        }}
       />
       </View>
     </BottomSheetModalProvider>
@@ -2064,6 +2436,7 @@ const DetailsContainer = ({
   currentBooking,
   user,
   estimatedTime,
+  estimatedDistance,
   onPresentModalPress,
   onStartTrip,
   handleEndTrip,
@@ -2123,9 +2496,9 @@ const DetailsContainer = ({
         >
           {user?.usertype === "customer"
             ? estimatedTime
-              ? `Est�s a ${estimatedTime} de tu Conductor`
-              : "calculando..."
-            : `Est�s a ${estimatedTime || "calculando..."} de tu servicio`}
+              ? `Tu conductor llega en ${estimatedTime}${estimatedDistance ? ` � ${estimatedDistance}` : ''}`
+              : "Calculando tiempo y ruta..."
+            : `Est�s a ${estimatedTime || "calculando..."}${estimatedDistance ? ` � ${estimatedDistance}` : ''} de tu servicio`}
         </Text>
 
         <TouchableOpacity onPress={onPresentModalPress}>
@@ -3277,6 +3650,54 @@ const lightStyles = StyleSheet.create({
     fontWeight: '700',
     color: '#00E5FF',
   },
+  // ETA tracking pill (driver en route)
+  etaPill: {
+    position: 'absolute',
+    top: 70,
+    left: 70,
+    right: 70,
+    zIndex: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(5, 26, 38, 0.95)',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    gap: 10,
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 229, 255, 0.35)',
+  },
+  etaPillIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#00E5FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  etaPillLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#7FA3B8',
+    letterSpacing: 0.3,
+  },
+  etaPillValue: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    marginTop: 2,
+  },
+  etaPulse: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#00E5FF',
+  },
   // OTP client card
   otpClientCard: {
     position: 'absolute',
@@ -3977,6 +4398,11 @@ const darkStyles = StyleSheet.create({
   // Driver accepted / OTP cards
   acceptedCard: { position: 'absolute', top: height * 0.42, left: 16, right: 16, zIndex: 20, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 14, paddingVertical: 12, paddingHorizontal: 16, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 5 },
   acceptedText: { fontSize: 15, fontWeight: '700', color: '#00d4d7' },
+  etaPill: { position: 'absolute', top: 70, left: 70, right: 70, zIndex: 25, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 5, borderWidth: 1, borderColor: 'rgba(0, 244, 245, 0.35)' },
+  etaPillIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#00f4f5', alignItems: 'center', justifyContent: 'center' },
+  etaPillLabel: { fontSize: 11, fontWeight: '600', color: '#888', letterSpacing: 0.3 },
+  etaPillValue: { fontSize: 14, fontWeight: '800', color: '#fff', marginTop: 2 },
+  etaPulse: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#00f4f5' },
   otpClientCard: { position: 'absolute', top: height * 0.35, left: 24, right: 24, zIndex: 20, backgroundColor: '#1a1a1a', borderRadius: 16, paddingVertical: 18, paddingHorizontal: 20, alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 6 },
   otpClientLabel: { fontSize: 13, color: '#888', marginBottom: 6 },
   otpClientCode: { fontSize: 36, fontWeight: '900', color: '#00f4f5', letterSpacing: 8 },
