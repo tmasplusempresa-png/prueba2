@@ -1,6 +1,8 @@
 import { GetTripDistance } from "../other/GeoFunctions";
 import { settings } from '@/scripts/settings';
 import { FareCalculator } from "../actions/FareCalculator";
+import { isNearAirport } from "../utils/airports";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
 
@@ -88,10 +90,16 @@ export const addActualsToBooking = async (booking: any) => {
     const res = await GetTripDistance(trackingVal);
     const distance = settings.convert_to_mile ? res.distance / 1.609344 : res.distance;
 
-    const isAirport =
-      (booking.pickupAddress || '').toLowerCase().includes('aero') ||
-      (booking.dropAddress || '').toLowerCase().includes('aero');
-    const isIntermunicipal = distance > 50;
+    // Detección por coords (Haversine + 40 aeropuertos Colombia).
+    // booking.pickup / booking.drop traen { lat, lng } desde el INSERT original.
+    const pickupLat = parseFloat(booking.pickup?.lat ?? booking.pickup_lat);
+    const pickupLng = parseFloat(booking.pickup?.lng ?? booking.pickup_lng);
+    const dropLat = parseFloat(booking.drop?.lat ?? booking.drop_lat);
+    const dropLng = parseFloat(booking.drop?.lng ?? booking.drop_lng);
+    const oAir = !isNaN(pickupLat) && !isNaN(pickupLng) ? isNearAirport(pickupLat, pickupLng) : null;
+    const dAir = !isNaN(dropLat) && !isNaN(dropLng) ? isNearAirport(dropLat, dropLng) : null;
+    const isAirport = !!(oAir || dAir);
+    const isIntermunicipal = distance > DEFAULT_UMBRAL_INTERMUNICIPAL_KM;
 
     const { totalCost, grandTotal, convenience_fees } = FareCalculator(
       distance,

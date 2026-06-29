@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import supabase from "@/config/SupabaseConfig";
 import { FareCalculator } from "@/common/actions/FareCalculator";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "@/constants/fare";
 
 const roundPrice = (price) => {
   const remainder = price % 100;
@@ -21,7 +22,7 @@ const roundPrice = (price) => {
   return price;
 };
 
-const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isScheduled }) => {
+const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isScheduled, isAirport = false }) => {
   const [taxiOptions, setTaxiOptions] = useState([]);
   const [selectedTaxi, setSelectedTaxi] = useState("Large Taxi");
   
@@ -63,7 +64,7 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
 
   const distKm  = parseFloat(distance) / 1000;
   const durMin  = parseFloat(duration) / 60;
-  const isIntermunicipal = distKm > vehicle.umbral_intermunicipal_km;
+  const isIntermunicipal = distKm > (vehicle.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
 
   const { grandTotal } = FareCalculator(
     distKm,
@@ -71,7 +72,7 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
     vehicle,
     null,
     2,
-    { isScheduled, isIntermunicipal }
+    { isScheduled, isIntermunicipal, isAirport }
   );
 
   return {
@@ -98,7 +99,7 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
     }
 
     const tollsCost = tolls.reduce((acc, toll) => acc + toll.PriceToll, 0);
-    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || 29);
+    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
 
     let { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
       roundedDistance,
@@ -106,7 +107,7 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
       carType,
       {},
       2,
-      { isScheduled, isIntermunicipal, tollsTotal: tollsCost }
+      { isScheduled, isIntermunicipal, tollsTotal: tollsCost, isAirport }
     );
 
     if (isNaN(totalCost) || isNaN(grandTotal) || isNaN(convenience_fees)) {

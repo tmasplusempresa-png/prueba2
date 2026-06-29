@@ -19,6 +19,8 @@ import { RootState } from '@/common/store';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { FareCalculator } from '@/common/actions/FareCalculator';
+import { isNearAirport } from '@/common/utils/airports';
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
 
 const { width: SW } = Dimensions.get('window');
 
@@ -362,10 +364,14 @@ const CreateReservationScreen = () => {
     if (!rates) return;
 
     const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
-    const isAirport = (origin?.title || '').toLowerCase().includes('aero') ||
-                      (destination?.title || '').toLowerCase().includes('aero');
+    // Detección automática aeropuerto por coords (Haversine + 40 aeropuertos Colombia).
+    const oAir = origin && (origin as any).latitude != null
+      ? isNearAirport((origin as any).latitude, (origin as any).longitude) : null;
+    const dAir = destination && (destination as any).latitude != null
+      ? isNearAirport((destination as any).latitude, (destination as any).longitude) : null;
+    const isAirport = !!(oAir || dAir);
     const isScheduled = serviceType === 'reservation';
-    const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || 29);
+    const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
 
     const { totalCost, clientTotal } = FareCalculator(
       distance * mult,

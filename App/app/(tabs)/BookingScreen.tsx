@@ -5,6 +5,8 @@ const MAX_ACTIVE_IMMEDIATE_TRIPS = 2;
 const ACTIVE_IMMEDIATE_STATUSES = ['PENDING', 'ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED', 'NEW'];
 import { roundPrice } from '../../hooks/roundPrice';
 import { FareCalculator } from '../../common/actions/FareCalculator';
+import { isNearAirport } from '../../common/utils/airports';
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '../../constants/fare';
 import { OtpService } from '../../common/services/OtpService';
 import { saveBooking } from '../../common/actions/saveBooking';
 import OtpModal from '../../components/OtpModal';
@@ -483,13 +485,23 @@ const BookingScreen = () => {
     }
   };
 
+  // Detección automática aeropuerto por coordenadas (Haversine + 40 aeropuertos Colombia).
+  // Sustituye el legacy `.includes("Aero")` (frágil, case-sensitive).
+  const detectAirport = (): boolean => {
+    const o = origin && (origin as any).latitude != null && (origin as any).longitude != null
+      ? isNearAirport((origin as any).latitude, (origin as any).longitude) : null;
+    const d = destination && (destination as any).latitude != null && (destination as any).longitude != null
+      ? isNearAirport((destination as any).latitude, (destination as any).longitude) : null;
+    return !!(o || d);
+  };
+
   const handleSelectVehicle = (vehicle: any) => {
     setSelectedVehicle(vehicle);
 
     const distKm   = typeof distance === 'string' ? parseFloat(distance) : distance;
     const durMin   = typeof duration === 'string' ? parseFloat(duration) : duration;
-    const isAirport = origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
-    const isIntermunicipal = distKm > (vehicle.umbral_intermunicipal_km || 29);
+    const isAirport = detectAirport();
+    const isIntermunicipal = distKm > (vehicle.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
 
     const { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
       distKm,
@@ -515,8 +527,8 @@ const BookingScreen = () => {
   const getVehiclePrice = (option: any) => {
     const distKm = typeof distance === 'number' ? distance : parseFloat(distance as any) || 0;
     const durMin = typeof duration === 'number' ? duration : parseFloat(duration as any) || 0;
-    const isAirport = origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
-    const isIntermunicipal = distKm > (option.umbral_intermunicipal_km || 29);
+    const isAirport = detectAirport();
+    const isIntermunicipal = distKm > (option.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
     const mult = tripType === "Ida y Vuelta" ? 2 : 1;
     const { grandTotal } = FareCalculator(
       distKm * mult,
@@ -668,9 +680,8 @@ const BookingScreen = () => {
       return null;
     }
 
-    const isAirport =
-      origin?.title?.includes("Aero") || destination?.title?.includes("Aero");
-    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || 29);
+    const isAirport = detectAirport();
+    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
     const tollsCost = tolls.reduce((acc: number, toll: any) => acc + toll.PriceToll, 0);
 
     let { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
@@ -833,14 +844,18 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       setShowOtpModal(true);
       console.log("📲 [OTP MODAL] Modal debería estar VISIBLE ahora en pantalla");
       
-      // Guardar booking temporal
+      // Guardar booking temporal.
+      // `fareDetails` viene de getPrice/handleSelectVehicle con FareCalculator
+      // (min_fare aplicado, margen 25%). Si no se calculó tarifa, usar 0.
+      const fd = fareDetails || { estimateFare: 0, clientFare: 0, totalCost: 0, convenienceFees: 0, driverShare: 0 };
+
       pendingBookingRef.current = {
         bookLater: isScheduled,
         bookingDate: new Date().getTime(),
         carImage: selectedVehicle?.carImage || "TREAS-X",
         carType: selectedVehicle?.name || "TREAS-X",
         commission_rate: selectedVehicle?.convenience_fees || "0",
-        convenience_fees: selectedVehicle?.convenience_fees || "0",
+        convenience_fees: fd.convenienceFees,
         tollsCost: "No contiene",
         drop: {
           lat: destination.latitude,
@@ -863,23 +878,28 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       customer_status: `${user.id || ""}_NEW`,
       customer_city: user.city || "",
       distance: distance || 0,
-      estimate: estimate,
+      estimate: fd.estimateFare,
       estimateDistance: distance || 0,
       estimateTime: duration || 0,
       otp: generatedOtp,
       payment_mode: selectedPaymentType || "cash",
-      driver_share: "Calculated Driver Share",
+      driver_share: fd.driverShare,
       reference: [...Array(6)].map(() => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[Math.floor(Math.random() * 26)]).join(""),
       driverEstimates: {},
       status: "NEW",
       tripType: tripType,
       tripUrban: "Urbano",
-      trip_cost: estimate,
+      trip_cost: fd.totalCost,
       tripdate: isScheduled ? date : new Date().getTime(),
       cost_corp: 0,
       company: "",
       observations: observations,
       requestedDrivers: selectedDriver ? { [selectedDriver.driver]: true } : {},
+      // Promo / descuento: antes no se persistían y la UI mentía al cliente.
+      discount: promoDiscount || 0,
+      promo_applied: !!selectedPromo,
+      promo_code: selectedPromo?.promo_code || null,
+      promo_details: selectedPromo || null,
     };
     
     console.log("✅ Booking temporal guardado en memoria");
@@ -1273,7 +1293,7 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
                     }
                     const baseFare = fareDetails ? fareDetails.estimateFare : 0;
                     const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
-                    const isAirportNav = origin.title?.includes('Aero') || destination.title?.includes('Aero');
+                    const isAirportNav = detectAirport();
                     const deltaAerop = isAirportNav ? (selectedVehicle?.delta_aeropuerto || 0) : 0;
                     const deltaProg = isScheduled ? (selectedVehicle?.delta_aeropuerto_prog || 0) : 0;
                     const driverP = roundPrice(baseFare * mult + deltaAerop + deltaProg);
