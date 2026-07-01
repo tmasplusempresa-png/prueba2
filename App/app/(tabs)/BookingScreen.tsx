@@ -878,7 +878,10 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       customer_status: `${user.id || ""}_NEW`,
       customer_city: user.city || "",
       distance: distance || 0,
-      estimate: fd.estimateFare,
+      // estimate = máximo esperado del rango (valorCliente). El cobro inicial
+      // (trip_cost/driver_share) es el mínimo (totalConductor). Sistema puede
+      // ajustar al finalizar el servicio real dentro del rango [min, max].
+      estimate: fd.clientFare,
       estimateDistance: distance || 0,
       estimateTime: duration || 0,
       otp: generatedOtp,
@@ -1197,6 +1200,12 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
                           <Text style={styles.priceAdjustBtnText}>+500</Text>
                         </TouchableOpacity>
                       </View>
+                      {fareDetails && (
+                        <Text style={{ fontSize: 11, color: '#999', textAlign: 'center', marginTop: 6, fontStyle: 'italic' }}>
+                          Cobro inicial estimado. Puede ajustarse al finalizar el servicio.
+                          {'\n'}Rango: ${roundPrice(fareDetails.totalCost).toLocaleString()} – ${roundPrice(fareDetails.clientFare).toLocaleString()}
+                        </Text>
+                      )}
                       {priceAdjustment !== 0 && !priceConfirmed && (
                         <TouchableOpacity
                           style={styles.confirmAdjustBtn}
