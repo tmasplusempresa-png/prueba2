@@ -1,14 +1,13 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, RefreshControl, Platform, Animated,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
-import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { RootState } from '@/common/store';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
@@ -41,7 +40,6 @@ type Reservation = {
   car_type: string;
 };
 
-type TabKey = 'activas' | 'completas' | 'canceladas';
 type TypeFilter = 'todos' | 'inmediatos' | 'reservas';
 
 const formatDate = (ts: string) => {
@@ -51,15 +49,22 @@ const formatDate = (ts: string) => {
   return `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 };
 
-const formatTime = (ts: string) => {
-  const d = new Date(ts);
-  let h = d.getHours();
-  const m = d.getMinutes().toString().padStart(2, '0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  if (h > 12) h -= 12;
-  if (h === 0) h = 12;
-  return `${h}:${m} ${ampm}`;
+const isSameDay = (a: Date, b: Date) =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+
+const startOfWeek = (d: Date) => {
+  const x = new Date(d);
+  const day = x.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  x.setDate(x.getDate() + diff);
+  x.setHours(0, 0, 0, 0);
+  return x;
 };
+
+const fmtMoney = (n: number) => `$ ${Math.round(n).toLocaleString('es-CO')}`;
+
 
 const FloatingEmptyIcon = ({ name }: { name: React.ComponentProps<typeof Ionicons>['name'] }) => {
   const translateY = useRef(new Animated.Value(0)).current;
@@ -83,44 +88,39 @@ const FloatingEmptyIcon = ({ name }: { name: React.ComponentProps<typeof Ionicon
 const DriverActivityScreen = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const user = useSelector((s: RootState) => s.auth.user) as any;
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
 
-  const [tab, setTab] = useState<TabKey>('activas');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('todos');
-  const [activas, setActivas] = useState<Reservation[]>([]);
   const [completas, setCompletas] = useState<Reservation[]>([]);
-  const [canceladas, setCanceladas] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
-  const driverId = user?.auth_id || user?.id;
+  const [dayFilter, setDayFilter] = useState<Date | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
 
   const fetchReservations = useCallback(async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
 
-      // Fetch ACCEPTED bookings (activas) - both immediate and reservation
-      const activasUrl = `${SUPABASE_URL}/rest/v1/bookings?status=in.(ACCEPTED,STARTED,ARRIVED)&driver_id=eq.${driverId}&order=created_at.desc`;
-      const activasRes = await fetch(activasUrl, { headers });
-      if (activasRes.ok) setActivas(await activasRes.json() || []);
-
-      // Fetch COMPLETE bookings - both types
-      const completasUrl = `${SUPABASE_URL}/rest/v1/bookings?status=eq.COMPLETE&driver_id=eq.${driverId}&order=created_at.desc&limit=30`;
+      // Fetch ALL COMPLETE bookings (no driver_id filter - filter on client side if needed)
+      const completasUrl = `${SUPABASE_URL}/rest/v1/bookings?status=eq.COMPLETE&order=created_at.desc&limit=200`;
+      console.log('📡 [DriverActivity] Fetching all completed trips');
       const completasRes = await fetch(completasUrl, { headers });
-      if (completasRes.ok) setCompletas(await completasRes.json() || []);
-
-      // Fetch CANCELLED bookings - both types
-      const canceladasUrl = `${SUPABASE_URL}/rest/v1/bookings?status=eq.CANCELLED&driver_id=eq.${driverId}&order=created_at.desc&limit=30`;
-      const canceladasRes = await fetch(canceladasUrl, { headers });
-      if (canceladasRes.ok) setCanceladas(await canceladasRes.json() || []);
+      console.log('📡 [DriverActivity] Response Status:', completasRes.status);
+      if (completasRes.ok) {
+        const data = await completasRes.json();
+        console.log('📡 [DriverActivity] Total completed trips:', data?.length || 0);
+        setCompletas(data || []);
+      } else {
+        const errorText = await completasRes.text();
+        console.error('📡 [DriverActivity] Error:', errorText);
+      }
     } catch (e) {
       console.error('DriverActivity fetch error:', e);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [driverId]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -135,131 +135,56 @@ const DriverActivityScreen = () => {
     return () => clearInterval(interval);
   }, [fetchReservations]);
 
-  const rawData = tab === 'activas' ? activas : tab === 'completas' ? completas : canceladas;
-  const currentData = typeFilter === 'todos' ? rawData
-    : typeFilter === 'inmediatos' ? rawData.filter(b => b.booking_type === 'immediate')
-    : rawData.filter(b => b.booking_type === 'reservation');
+  const typeFiltered = useMemo(() => (
+    typeFilter === 'todos' ? completas
+      : typeFilter === 'inmediatos' ? completas.filter((b: Reservation) => b.booking_type === 'immediate')
+      : completas.filter((b: Reservation) => b.booking_type === 'reservation')
+  ), [completas, typeFilter]);
 
-  const handleStartReservation = (reservation: Reservation) => {
-    if (reservation.booking_type === 'immediate') {
-      nav.navigate('Booking', { booking: reservation });
-    } else {
-      nav.navigate('ReservationTrip', { reservation });
+  const earnings = useMemo(() => {
+    const now = new Date();
+    const weekStart = startOfWeek(now);
+    const day = { total: 0, count: 0 };
+    const week = { total: 0, count: 0 };
+    const month = { total: 0, count: 0 };
+    for (const b of typeFiltered) {
+      const ts = b.booking_date ? new Date(b.booking_date) : null;
+      if (!ts || isNaN(ts.getTime())) continue;
+      const amount = Number(b.estimate || b.price || 0);
+      if (isSameDay(ts, now)) { day.total += amount; day.count += 1; }
+      if (ts >= weekStart && ts <= now) { week.total += amount; week.count += 1; }
+      if (ts.getMonth() === now.getMonth() && ts.getFullYear() === now.getFullYear()) {
+        month.total += amount; month.count += 1;
+      }
+    }
+    return { day, week, month };
+  }, [typeFiltered]);
+
+  const currentData = useMemo(() => {
+    if (!dayFilter) return typeFiltered;
+    return typeFiltered.filter((b: Reservation) => {
+      const ts = b.booking_date ? new Date(b.booking_date) : null;
+      return !!ts && !isNaN(ts.getTime()) && isSameDay(ts, dayFilter);
+    });
+  }, [typeFiltered, dayFilter]);
+
+  const dayFilterTotal = useMemo(() => {
+    if (!dayFilter) return 0;
+    return currentData.reduce((sum, b) => sum + Number(b.estimate || b.price || 0), 0);
+  }, [currentData, dayFilter]);
+
+  const onPickerChange = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    if (Platform.OS === 'android') setShowPicker(false);
+    if (event.type === 'set' && selectedDate) {
+      setDayFilter(selectedDate);
+      if (Platform.OS === 'ios') setShowPicker(false);
+    } else if (event.type === 'dismissed') {
+      setShowPicker(false);
     }
   };
 
   const handleViewDetail = (reservation: Reservation) => {
     nav.navigate('ReservationDetail', { reservation });
-  };
-
-  const renderActivaItem = ({ item, index }: { item: Reservation; index: number }) => {
-    const isToday = item.booking_date ? new Date(item.booking_date).toDateString() === new Date().toDateString() : true;
-    const bookingTime = item.booking_date ? new Date(item.booking_date).getTime() : 0;
-    const now = Date.now();
-    const canStart = item.booking_type === 'immediate' || (bookingTime - now) < 60 * 60 * 1000; // Immediate always, reservations within 1 hour
-
-    return (
-      <Animatable.View animation="fadeInUp" duration={400} delay={index * 50} useNativeDriver>
-        <View style={st.card}>
-          <View style={st.cardGlow} />
-
-          {/* Header */}
-          <View style={st.cardHeader}>
-            <View style={st.refBadge}>
-              <Text style={st.refTxt}>{item.reference}</Text>
-            </View>
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              <View style={[st.statusBadge, { backgroundColor: item.booking_type === 'immediate' ? 'rgba(255,179,0,0.15)' : 'rgba(0,229,255,0.15)' }]}>
-                <Text style={[st.statusTxt, { color: item.booking_type === 'immediate' ? '#FFB300' : '#00E5FF' }]}>
-                  {item.booking_type === 'immediate' ? 'INMEDIATO' : 'RESERVA'}
-                </Text>
-              </View>
-              <View style={[st.statusBadge, item.status === 'STARTED' ? st.statusStarted : st.statusAccepted]}>
-                <Text style={st.statusTxt}>
-                  {item.status === 'STARTED' ? 'EN CURSO' : item.status === 'ARRIVED' ? 'LLEGASTE' : 'ACEPTADA'}
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Client */}
-          <View style={st.clientRow}>
-            <Ionicons name="person" size={16} color="#00E5FF" />
-            <Text style={st.clientName}>{item.customer_name}</Text>
-            {isToday && <View style={st.todayBadge}><Text style={st.todayTxt}>HOY</Text></View>}
-          </View>
-
-          {/* Date & Time */}
-          <View style={st.dtRow}>
-            <View style={st.dtItem}>
-              <Ionicons name="calendar-outline" size={14} color="#00E5FF" />
-              <Text style={st.dtTxt}>{formatDate(item.booking_date)}</Text>
-            </View>
-            <View style={st.dtItem}>
-              <Ionicons name="time-outline" size={14} color="#00E5FF" />
-              <Text style={st.dtTxt}>{formatTime(item.booking_date)}</Text>
-            </View>
-          </View>
-
-          {/* Route */}
-          <View style={st.routeBlock}>
-            <View style={st.routeRow}>
-              <View style={st.dotGreen} />
-              <Text style={st.routeAddr} numberOfLines={1}>{item.pickup_address}</Text>
-            </View>
-            <View style={st.routeLine} />
-            <View style={st.routeRow}>
-              <View style={st.dotRed} />
-              <Text style={st.routeAddr} numberOfLines={1}>{item.drop_address}</Text>
-            </View>
-          </View>
-
-          {/* Stats */}
-          <View style={st.statsRow}>
-            <View style={st.stat}>
-              <Text style={st.statLabel}>Valor</Text>
-              <Text style={st.statValue}>$ {(item.estimate || item.price)?.toLocaleString('es-CO')}</Text>
-            </View>
-            <View style={st.stat}>
-              <Text style={st.statLabel}>Dist.</Text>
-              <Text style={st.statValue}>{item.distance?.toFixed?.(1) ?? item.distance} km</Text>
-            </View>
-            <View style={st.stat}>
-              <Text style={st.statLabel}>Tiempo</Text>
-              <Text style={st.statValue}>{item.duration} min</Text>
-            </View>
-          </View>
-
-          {/* Action buttons */}
-          <View style={st.actionsRow}>
-            <TouchableOpacity
-              style={st.detailBtn}
-              onPress={() => handleViewDetail(item)}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="document-text-outline" size={16} color="#00E5FF" />
-              <Text style={st.detailBtnTxt}>Detalles</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[st.startBtn, !canStart && st.startBtnDisabled]}
-              onPress={() => canStart && handleStartReservation(item)}
-              disabled={!canStart}
-              activeOpacity={0.82}
-            >
-              <Ionicons name="navigate" size={18} color={canStart ? '#051A26' : 'rgba(255,255,255,0.3)'} />
-              <Text style={[st.startBtnTxt, !canStart && st.startBtnTxtDisabled]}>
-                {item.status === 'STARTED' ? 'Continuar' : item.status === 'ARRIVED' ? 'Continuar' : item.booking_type === 'immediate' ? 'Ver Viaje' : 'Iniciar Reserva'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {!canStart && (
-            <Text style={st.notYetTxt}>Disponible 1 hora antes de la reserva</Text>
-          )}
-        </View>
-      </Animatable.View>
-    );
   };
 
   const renderCompletaItem = ({ item, index }: { item: Reservation; index: number }) => (
@@ -280,24 +205,6 @@ const DriverActivityScreen = () => {
     </Animatable.View>
   );
 
-  const renderCanceladaItem = ({ item, index }: { item: Reservation; index: number }) => (
-    <Animatable.View animation="fadeInUp" duration={400} delay={index * 50} useNativeDriver>
-      <TouchableOpacity style={st.miniCard} onPress={() => handleViewDetail(item)} activeOpacity={0.8}>
-        <View style={st.miniLeft}>
-          <Ionicons name="close-circle" size={20} color="#E91E63" />
-          <View style={st.miniInfo}>
-            <Text style={st.miniRef}>{item.reference}</Text>
-            <Text style={st.miniClient} numberOfLines={1}>{item.customer_name}</Text>
-          </View>
-        </View>
-        <View style={st.miniRight}>
-          <Text style={st.miniDate}>{formatDate(item.booking_date)}</Text>
-          <Text style={st.miniPrice}>$ {(item.estimate || item.price)?.toLocaleString('es-CO')}</Text>
-        </View>
-      </TouchableOpacity>
-    </Animatable.View>
-  );
-
   const EmptyState = ({ icon, text }: { icon: string; text: string }) => (
     <View style={st.emptyWrap}>
       <FloatingEmptyIcon name={icon as any} />
@@ -305,11 +212,6 @@ const DriverActivityScreen = () => {
     </View>
   );
 
-  const TABS: { key: TabKey; label: string; count: number }[] = [
-    { key: 'activas', label: 'Activas', count: activas.length },
-    { key: 'completas', label: 'Completas', count: completas.length },
-    { key: 'canceladas', label: 'Canceladas', count: canceladas.length },
-  ];
 
   return (
     <View style={st.root}>
@@ -352,24 +254,82 @@ const DriverActivityScreen = () => {
         ))}
       </View>
 
-      {/* Tab bar */}
+      {/* Earnings summary */}
+      <Animatable.View animation="fadeInUp" duration={400} useNativeDriver style={st.earningsCard}>
+        <View style={st.earningsHeader}>
+          <Ionicons name="wallet-outline" size={16} color="#00E5FF" />
+          <Text style={st.earningsTitle}>Balance de ganancias</Text>
+        </View>
+        <View style={st.earningsRow}>
+          <View style={st.earnBlock}>
+            <Text style={st.earnLabel}>Hoy</Text>
+            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.day.total)}</Text>
+            <Text style={st.earnCount}>{earnings.day.count} viaje{earnings.day.count === 1 ? '' : 's'}</Text>
+          </View>
+          <View style={st.earnDivider} />
+          <View style={st.earnBlock}>
+            <Text style={st.earnLabel}>Semana</Text>
+            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.week.total)}</Text>
+            <Text style={st.earnCount}>{earnings.week.count} viaje{earnings.week.count === 1 ? '' : 's'}</Text>
+          </View>
+          <View style={st.earnDivider} />
+          <View style={st.earnBlock}>
+            <Text style={st.earnLabel}>Mes</Text>
+            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.month.total)}</Text>
+            <Text style={st.earnCount}>{earnings.month.count} viaje{earnings.month.count === 1 ? '' : 's'}</Text>
+          </View>
+        </View>
+      </Animatable.View>
+
+      {/* Day search + Completadas tab */}
       <View style={st.tabBar}>
-        {TABS.map(t => (
-          <TouchableOpacity
-            key={t.key}
-            style={[st.tabItem, tab === t.key && st.tabItemActive]}
-            onPress={() => setTab(t.key)}
-            activeOpacity={0.75}
-          >
-            <Text style={[st.tabLabel, tab === t.key && st.tabLabelActive]}>{t.label}</Text>
-            {t.count > 0 && (
-              <View style={[st.tabBadge, tab === t.key && st.tabBadgeActive]}>
-                <Text style={st.tabBadgeTxt}>{t.count}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-        ))}
+        <View style={[st.tabItem, st.tabItemActive]}>
+          <Text style={[st.tabLabel, st.tabLabelActive]}>Completadas</Text>
+          {currentData.length > 0 && (
+            <View style={[st.tabBadge, st.tabBadgeActive]}>
+              <Text style={st.tabBadgeTxt}>{currentData.length}</Text>
+            </View>
+          )}
+        </View>
+        <TouchableOpacity
+          style={st.daySearchBtn}
+          onPress={() => setShowPicker(true)}
+          activeOpacity={0.75}
+        >
+          <Ionicons name="search-outline" size={14} color="#00E5FF" />
+          <Text style={st.daySearchTxt} numberOfLines={1}>
+            {dayFilter ? formatDate(dayFilter.toISOString()) : 'Buscar por día'}
+          </Text>
+          {dayFilter && (
+            <TouchableOpacity
+              style={st.clearDayBtn}
+              onPress={() => setDayFilter(null)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="close" size={14} color="rgba(255,255,255,0.7)" />
+            </TouchableOpacity>
+          )}
+        </TouchableOpacity>
       </View>
+
+      {dayFilter && (
+        <View style={st.dayTotalRow}>
+          <Ionicons name="calendar-outline" size={14} color="#00E5FF" />
+          <Text style={st.dayTotalTxt}>
+            Total del día: <Text style={st.dayTotalAmount}>{fmtMoney(dayFilterTotal)}</Text>
+          </Text>
+        </View>
+      )}
+
+      {showPicker && (
+        <DateTimePicker
+          value={dayFilter || new Date()}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'inline' : 'default'}
+          maximumDate={new Date()}
+          onChange={onPickerChange}
+        />
+      )}
 
       {/* Content */}
       {loading ? (
@@ -381,21 +341,13 @@ const DriverActivityScreen = () => {
         <FlatList
           data={currentData}
           keyExtractor={item => item.id}
-          renderItem={
-            tab === 'activas' ? renderActivaItem :
-            tab === 'completas' ? renderCompletaItem :
-            renderCanceladaItem
-          }
+          renderItem={renderCompletaItem}
           contentContainerStyle={[st.list, { paddingBottom: insets.bottom + 30 }]}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <EmptyState
-              icon={tab === 'activas' ? 'car-outline' : tab === 'completas' ? 'checkmark-circle-outline' : 'close-circle-outline'}
-              text={
-                tab === 'activas' ? 'No tienes reservas activas.\nAcepta reservas desde "Reservas Disponibles".'
-                : tab === 'completas' ? 'No hay reservas completadas aún.'
-                : 'No hay reservas canceladas.'
-              }
+              icon="checkmark-circle-outline"
+              text="No hay reservas completadas aún."
             />
           }
           refreshControl={
@@ -448,14 +400,47 @@ const st = StyleSheet.create({
   },
   typeFilterLabel: { fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.5)' },
   typeFilterLabelActive: { color: '#051A26', fontWeight: '700' },
+  /* Earnings */
+  earningsCard: {
+    marginHorizontal: 20, marginTop: 12, padding: 14, borderRadius: 16,
+    backgroundColor: 'rgba(10,46,61,0.55)',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.18)',
+  },
+  earningsHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
+  earningsTitle: { fontSize: 13, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.3 },
+  earningsRow: { flexDirection: 'row', alignItems: 'stretch' },
+  earnBlock: { flex: 1, alignItems: 'center', paddingHorizontal: 4 },
+  earnDivider: { width: 1, backgroundColor: 'rgba(0,229,255,0.12)' },
+  earnLabel: { fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
+  earnAmount: { fontSize: 15, fontWeight: '800', color: '#FFF', letterSpacing: -0.3 },
+  earnCount: { fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 2 },
+  /* Day search */
+  daySearchBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 8, marginLeft: 8,
+    borderRadius: 12, backgroundColor: 'rgba(0,229,255,0.08)',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)', maxWidth: 200,
+  },
+  daySearchTxt: { fontSize: 12, fontWeight: '600', color: '#00E5FF', flexShrink: 1 },
+  clearDayBtn: {
+    width: 18, height: 18, borderRadius: 9, marginLeft: 2,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  dayTotalRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 22, paddingBottom: 6,
+  },
+  dayTotalTxt: { fontSize: 12, color: 'rgba(255,255,255,0.65)' },
+  dayTotalAmount: { color: '#00E676', fontWeight: '700' },
   /* Tab bar */
   tabBar: {
-    flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 10,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 10,
     backgroundColor: 'rgba(5,26,38,0.9)',
   },
   tabItem: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 8, borderRadius: 12, marginHorizontal: 4,
+    paddingVertical: 8, borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.04)',
   },
   tabItemActive: {

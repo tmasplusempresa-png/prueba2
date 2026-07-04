@@ -1,20 +1,5 @@
 import supabase from '@/config/SupabaseConfig';
 
-const QUERY_TIMEOUT = 5000; // 5 segundos como en la lógica que sí funcionaba
-
-const runWithTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error('Query timeout')), timeoutMs);
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-};
-
 /**
  * Servicio de validación contra Supabase
  * Verifica existencia de email y teléfono en BD
@@ -28,68 +13,30 @@ export const ValidationService = {
   async checkEmailExists(email: string): Promise<{ exists: boolean; error?: string }> {
     const trimmedEmail = email.toLowerCase().trim();
     const startTime = Date.now();
-    
+
     console.log('🔍 [ValidationService] Verificando email:', trimmedEmail);
-    
+
     try {
-      // Buscar en tabla 'users' con timeout usando Promise.race
-      const queryPromise = supabase
-        .from('users')
-        .select('id', { count: 'exact' })
-        .eq('email', trimmedEmail);
-      
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Query timeout')), QUERY_TIMEOUT)
-      );
-      
-      const { data: usersData, error: usersError, count } = await Promise.race([
-        queryPromise,
-        timeoutPromise
-      ]) as any;
-      
+      const { data, error } = await supabase.rpc('check_email_exists', {
+        check_email: trimmedEmail,
+      } as any);
+
       const duration = Date.now() - startTime;
-      
-      if (usersError) {
-        console.warn('⚠️ [ValidationService] Error en búsqueda users:', usersError?.message);
+
+      if (error) {
+        console.error('⚠️ [ValidationService] Error en RPC check_email_exists:', error?.message);
+        return { exists: false, error: error?.message };
       }
-      
-      const userCount = typeof count === 'number' ? count : Array.isArray(usersData) ? usersData.length : 0;
-      if (userCount > 0) {
-        console.log(`✅ [ValidationService] Email existe en users (${duration}ms) count=${userCount}`);
-        return { exists: true };
-      }
-      
-      // Intentar búsqueda en auth.users usando RPC si existe
-      try {
-        const rpcQueryPromise = supabase.rpc('check_email_exists', {
-          check_email: trimmedEmail,
-        } as any);
-        
-        const rpcTimeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('RPC timeout')), QUERY_TIMEOUT)
-        );
-        
-        const { data: rpcData, error: rpcError } = await Promise.race([
-          rpcQueryPromise,
-          rpcTimeoutPromise
-        ]) as any;
-        
-        if (rpcData === true) {
-          console.log(`✅ [ValidationService] Email existe en auth.users (${Date.now() - startTime}ms)`);
-          return { exists: true };
-        }
-      } catch (rpcError: any) {
-        console.warn('⚠️ [ValidationService] RPC check_email_exists no disponible:', rpcError?.message);
-      }
-      
-      console.log(`✓ [ValidationService] Email disponible (${duration}ms)`);
-      return { exists: false };
-    } catch (error: any) {
+
+      const exists = data === true;
+      console.log(`${exists ? '✅' : '✓'} [ValidationService] Email ${exists ? 'existe' : 'disponible'} (${duration}ms)`);
+      return { exists };
+    } catch (err: any) {
       const duration = Date.now() - startTime;
-      console.error(`❌ [ValidationService] Error verificando email (${duration}ms):`, error?.message);
-      return { 
-        exists: false, 
-        error: error?.message || 'Error checking email' 
+      console.error(`❌ [ValidationService] Error verificando email (${duration}ms):`, err?.message);
+      return {
+        exists: false,
+        error: err?.message || 'Error checking email'
       };
     }
   },

@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   View,
   TextInput,
@@ -12,50 +12,71 @@ import {
   TouchableWithoutFeedback,
   Platform,
   Keyboard,
+  ActivityIndicator,
+  useColorScheme,
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRoute } from '@react-navigation/native';
-import { getDatabase, ref, push, onValue } from 'firebase/database';
-import { getAuth } from 'firebase/auth';
 import { useSelector } from 'react-redux';
 import { RootState } from '@/common/store';
 import AntDesign from 'react-native-vector-icons/AntDesign';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { useColorScheme } from 'react-native';
-// Importamos la imagen del administrador
-import adminIcon from '../../assets/images/logo1024x1024.png'; // Ajusta la ruta según sea necesario
+import {
+  fetchMessages,
+  sendMessage as sendChatMessage,
+  ChatMessage,
+  ChatRole,
+} from '@/common/services/chatService';
+// Imagen del administrador para mensajes del sistema
+import adminIcon from '../../assets/images/logo1024x1024.png';
 
 type Props = NativeStackScreenProps<any>;
 
+const POLL_INTERVAL_MS = 3000;
+
 const ChatScreen = ({ navigation }: Props) => {
   const [newMessage, setNewMessage] = useState('');
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
   const route = useRoute();
-  const { bookingId, customer_pushToken, driver_pushToken } = route.params;
-  const db = getDatabase();
-  const auth = getAuth();
-  const user = useSelector((state: RootState) => state.auth.user);
+  const params = (route.params as any) || {};
+  const { bookingId } = params;
+
+  const user = useSelector((state: RootState) => state.auth.user) as any;
   const colorScheme = useColorScheme();
   const flatListRef = useRef<FlatList>(null);
-  const styles = colorScheme === "dark" ? darkStyles : lightStyles; // Estilos dinámicos
+  const styles = colorScheme === 'dark' ? darkStyles : lightStyles;
+
+  // Rol e identidad del usuario actual. Cada pantalla de servicio sabe su rol
+  // y lo pasa por params; si no, se infiere del usuario en Redux.
+  const myRole: ChatRole =
+    params.myRole ||
+    user?.usertype ||
+    user?.user_type ||
+    'customer';
+  const myName: string =
+    params.myName ||
+    [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+    user?.first_name ||
+    'Usuario';
+  const senderId: string | null =
+    params.senderId || user?.id || user?.uid || null;
+  const otherName: string = params.otherName || (myRole === 'driver' ? 'Cliente' : 'Conductor');
+
+  // Carga inicial + polling para recibir mensajes nuevos en vivo.
+  const loadMessages = useCallback(async () => {
+    if (!bookingId) return;
+    const data = await fetchMessages(bookingId);
+    setMessages(data);
+    setLoading(false);
+  }, [bookingId]);
 
   useEffect(() => {
-    const messagesRef = ref(db, `chats/${bookingId}/messages`);
-    const unsubscribe = onValue(messagesRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const parsedMessages = Object.keys(data).map((key) => ({
-          id: key,
-          ...data[key],
-        }));
-        setMessages(parsedMessages);
-      } else {
-        setMessages([]);
-      }
-    });
-
-    return () => unsubscribe();
-  }, [bookingId]);
+    loadMessages();
+    const interval = setInterval(loadMessages, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [loadMessages]);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -64,50 +85,47 @@ const ChatScreen = ({ navigation }: Props) => {
   }, [messages]);
 
   const sendMessage = async () => {
-    if (newMessage.trim() === '') return;
+    const text = newMessage.trim();
+    if (text === '' || sending) return;
+    if (!bookingId) return;
 
-    const messageData = {
-      createdAt: new Date().toISOString(),
-      from: user.uid,
-      message: newMessage,
-      msgDate: new Date().toLocaleString(),
-      Source: user.usertype,
-      type: 'text',
-    };
-
-    const messagesRef = ref(db, `chats/${bookingId}/messages`);
-    await push(messagesRef, messageData);
+    setSending(true);
     setNewMessage('');
 
-    // Lógica de notificaciones (opcional)
-    const pushToken =
-      user.usertype === 'driver' ? customer_pushToken : driver_pushToken;
-    const notificationData = {
-      tokens: [pushToken],
-      title: `Nuevo mensaje de ${user.firstName}`,
-      body: newMessage,
+    // Optimista: mostramos el mensaje de inmediato.
+    const optimistic: ChatMessage = {
+      id: `local-${Date.now()}`,
+      booking_id: bookingId,
+      sender_id: senderId,
+      sender_role: myRole,
+      sender_name: myName,
+      message: text,
+      created_at: new Date().toISOString(),
     };
-    console.log(notificationData);
+    setMessages((prev) => [...prev, optimistic]);
 
-    try {
-      await fetch(
-        'https://us-central1-treasupdate.cloudfunctions.net/sendMassNotification',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(notificationData),
-        }
-      );
-    } catch (error) {
-      console.error('Error enviando notificación:', error);
+    const saved = await sendChatMessage({
+      bookingId,
+      senderId,
+      senderRole: myRole,
+      senderName: myName,
+      message: text,
+    });
+
+    if (!saved) {
+      // Falló el envío: revertimos el optimista y restauramos el texto.
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      setNewMessage(text);
+    } else {
+      // Reemplazamos el optimista por la fila real (refresco inmediato).
+      await loadMessages();
     }
+    setSending(false);
   };
 
-  const renderItem = ({ item }) => {
-    const isCurrentUser = item.from === user.uid;
-    const isAdminMessage = item.Source === 'admin';
+  const renderItem = ({ item }: { item: ChatMessage }) => {
+    const isCurrentUser = item.sender_role === myRole;
+    const isAdminMessage = (item.sender_role as string) === 'admin';
 
     const messageAlignment = isCurrentUser
       ? 'flex-end'
@@ -122,6 +140,17 @@ const ChatScreen = ({ navigation }: Props) => {
       : '#E5E5EA';
 
     const messageTextColor = isCurrentUser || isAdminMessage ? '#fff' : '#000';
+
+    const time = (() => {
+      try {
+        return new Date(item.created_at).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      } catch {
+        return '';
+      }
+    })();
 
     return (
       <View
@@ -139,7 +168,6 @@ const ChatScreen = ({ navigation }: Props) => {
             maxWidth: '70%',
           }}
         >
-          {/* Mostrar la imagen y el nombre si el mensaje es del administrador */}
           {isAdminMessage && (
             <View
               style={{
@@ -158,17 +186,8 @@ const ChatScreen = ({ navigation }: Props) => {
             </View>
           )}
 
-          {/* Contenido del mensaje */}
-          {item.type === 'text' ? (
-            <Text style={{ color: messageTextColor }}>{item.message}</Text>
-          ) : (
-            <Image
-              source={{ uri: item.message }}
-              style={{ width: 200, height: 150, borderRadius: 10 }}
-            />
-          )}
+          <Text style={{ color: messageTextColor }}>{item.message}</Text>
 
-          {/* Marca de tiempo */}
           <View
             style={{
               flexDirection: 'row',
@@ -181,8 +200,8 @@ const ChatScreen = ({ navigation }: Props) => {
                 ? 'Tú'
                 : isAdminMessage
                 ? 'Admin'
-                : ''}{' '}
-              {item.msgDate}
+                : item.sender_name || otherName}{' '}
+              {time}
             </Text>
           </View>
         </View>
@@ -190,9 +209,9 @@ const ChatScreen = ({ navigation }: Props) => {
     );
   };
 
-  // Mensajes predefinidos (opcional)
+  // Mensajes predefinidos según el rol del usuario
   const predefinedMessages =
-    user.usertype === 'driver'
+    myRole === 'driver'
       ? [
           'Estoy en camino.',
           'Llegaré en 5 minutos.',
@@ -200,101 +219,128 @@ const ChatScreen = ({ navigation }: Props) => {
           'Gracias por tu paciencia.',
           '¿Puedes darme más detalles?',
         ]
-      : user.usertype === 'customer'
-      ? [
-          'Hola, ¿cómo estás?',
-          '¿Necesitas ayuda?',
-          'Gracias por tu mensaje.',
-          'Estoy en camino.',
+      : [
+          'Hola, ¿cómo vas?',
+          'Te espero en la entrada.',
+          '¿Cuánto tiempo falta?',
+          'Gracias.',
           '¿Puedes darme más detalles?',
-        ]
-      : []; // Administrador no tiene mensajes predefinidos
+        ];
 
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={{ flex: 1 }}
-      keyboardVerticalOffset={90} // Ajuste importante para evitar que el input quede tapado en iOS
+      keyboardVerticalOffset={90}
     >
-    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-    <View style={{ flex: 1, backgroundColor: colorScheme === 'dark' ? '#000' : '#fff' }}>
-      <View
-        style={{
-          height: 60,
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: 15,
-          borderBottomWidth: 1,
-          borderBottomColor: '#ddd',
-          
-        }}
-      >
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <AntDesign name="arrowleft" size={24} color={colorScheme === 'dark' ? '#fff' : '#000'} />
-        </TouchableOpacity>
-        <Text style={{ fontSize: 18, fontWeight: 'bold', color: colorScheme === 'dark' ? '#fff' : '#000' }}>Chat</Text>
-        <TouchableOpacity>
-          <Ionicons name="settings" size={24} color={colorScheme === 'dark' ? '#fff' : '#000'} />
-        </TouchableOpacity>
-      </View>
-
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        contentContainerStyle={{ padding: 15 }}
-        style={{ flex: 1 }}
-      />
-
-      <View style={{ borderTopWidth: 1, borderTopColor: '#ddd' }}>
-        {predefinedMessages.length > 0 && (
-          <ScrollView
-            horizontal={true}
-            style={{ paddingHorizontal: 15, paddingVertical: 0 }}
-            contentContainerStyle={{ alignItems: 'center' }}
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={{ flex: 1, backgroundColor: colorScheme === 'dark' ? '#000' : '#fff' }}>
+          <View
+            style={{
+              height: 60,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingHorizontal: 15,
+              borderBottomWidth: 1,
+              borderBottomColor: '#ddd',
+            }}
           >
-            {predefinedMessages.map((msg, index) => (
-              <TouchableOpacity
-                key={index}
-                style={styles.predefinedButton}
-                onPress={() => setNewMessage(msg)}
-              >
-                <Text style={styles.predefinedText} numberOfLines={1}>
-                  {msg}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
+            <TouchableOpacity onPress={() => navigation.goBack()}>
+              <AntDesign
+                name="arrow-left"
+                size={24}
+                color={colorScheme === 'dark' ? '#fff' : '#000'}
+              />
+            </TouchableOpacity>
+            <Text
+              style={{
+                fontSize: 18,
+                fontWeight: 'bold',
+                color: colorScheme === 'dark' ? '#fff' : '#000',
+              }}
+            >
+              {otherName}
+            </Text>
+            <View style={{ width: 24 }} />
+          </View>
 
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            paddingHorizontal: 15,
-            paddingVertical: 5,
-           
-          }}
-        >
-          <TextInput
-            style={styles.input}
-            placeholder="Empieza a escribir..."
-            value={newMessage}
-            onChangeText={setNewMessage}
-          />
-          <TouchableOpacity onPress={sendMessage}>
-            <FontAwesome name="send" size={24} color="#00f4f5" />
-          </TouchableOpacity>
+          {loading ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+              <ActivityIndicator size="large" color="#00f4f5" />
+            </View>
+          ) : (
+            <FlatList
+              ref={flatListRef}
+              data={messages}
+              keyExtractor={(item) => item.id}
+              renderItem={renderItem}
+              contentContainerStyle={{ padding: 15, flexGrow: 1 }}
+              style={{ flex: 1 }}
+              ListEmptyComponent={
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 }}>
+                  <Ionicons name="chatbubbles-outline" size={48} color="#bbb" />
+                  <Text style={{ color: '#999', marginTop: 10, textAlign: 'center' }}>
+                    Aún no hay mensajes.{'\n'}Escribe para iniciar la conversación.
+                  </Text>
+                </View>
+              }
+            />
+          )}
+
+          <View style={{ borderTopWidth: 1, borderTopColor: '#ddd' }}>
+            {predefinedMessages.length > 0 && (
+              <ScrollView
+                horizontal={true}
+                showsHorizontalScrollIndicator={false}
+                style={{ paddingHorizontal: 15, paddingVertical: 0 }}
+                contentContainerStyle={{ alignItems: 'center' }}
+              >
+                {predefinedMessages.map((msg, index) => (
+                  <TouchableOpacity
+                    key={index}
+                    style={styles.predefinedButton}
+                    onPress={() => setNewMessage(msg)}
+                  >
+                    <Text style={styles.predefinedText} numberOfLines={1}>
+                      {msg}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingHorizontal: 15,
+                paddingVertical: 5,
+              }}
+            >
+              <TextInput
+                style={styles.input}
+                placeholder="Empieza a escribir..."
+                placeholderTextColor={colorScheme === 'dark' ? '#888' : '#aaa'}
+                value={newMessage}
+                onChangeText={setNewMessage}
+                onSubmitEditing={sendMessage}
+                returnKeyType="send"
+              />
+              <TouchableOpacity onPress={sendMessage} disabled={sending}>
+                {sending ? (
+                  <ActivityIndicator size="small" color="#00f4f5" />
+                ) : (
+                  <FontAwesome name="send" size={24} color="#00f4f5" />
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-      </View>
-    </View>
-    </TouchableWithoutFeedback>
-  </KeyboardAvoidingView>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 };
-
 
 const lightStyles = StyleSheet.create({
   predefinedButton: {
@@ -325,9 +371,10 @@ const lightStyles = StyleSheet.create({
     backgroundColor: '#f9f9f9',
   },
 });
+
 const darkStyles = StyleSheet.create({
   predefinedButton: {
-    backgroundColor: '#333', // Cambia el color de fondo para el modo oscuro
+    backgroundColor: '#333',
     paddingVertical: 5,
     paddingHorizontal: 15,
     borderRadius: 15,
@@ -338,7 +385,7 @@ const darkStyles = StyleSheet.create({
     marginTop: 10,
   },
   predefinedText: {
-    color: '#fff', // Cambia el color del texto para el modo oscuro
+    color: '#fff',
     fontSize: 14,
     flexShrink: 1,
     flexWrap: 'nowrap',
@@ -346,16 +393,14 @@ const darkStyles = StyleSheet.create({
   input: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#555', // Cambia el color del borde para el modo oscuro
+    borderColor: '#555',
     borderRadius: 25,
     paddingVertical: 10,
     paddingHorizontal: 20,
     marginRight: 10,
-    backgroundColor: '#222', // Cambia el color de fondo del input para el modo oscuro
-    color:'#fff'
+    backgroundColor: '#222',
+    color: '#fff',
   },
 });
 
 export default ChatScreen;
-
-

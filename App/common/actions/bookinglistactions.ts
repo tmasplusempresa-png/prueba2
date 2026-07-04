@@ -5,6 +5,21 @@ import { FETCH_BOOKINGS, FETCH_BOOKINGS_FAILED, FETCH_BOOKINGS_SUCCESS } from '.
 import { fetchBookingLocations } from './locationactions';
 
 import { ref, get, query, orderByChild, equalTo, getDatabase, update, push } from 'firebase/database';
+import supabase from '../../config/SupabaseConfig';
+
+const insertTrackingPoint = async (
+  bookingId: string,
+  driverId: string | undefined,
+  driverLocation: { lat: number; lng: number },
+) => {
+  const { error } = await supabase.from('booking_tracking' as any).insert({
+    booking_id: bookingId,
+    driver_id: driverId || null,
+    lat: driverLocation.lat,
+    lng: driverLocation.lng,
+  } as any);
+  if (error) console.error('booking_tracking insert error', error.message);
+};
 
 export const fetchBookings = () => async (dispatch) => {
   const userInfo = store.getState().auth.profile;
@@ -105,13 +120,8 @@ export const fetchBookings = () => async (dispatch) => {
       update(singleBookingRef(booking.id), booking);
   
       const driverLocation = store.getState().gpsdata.location;
-      
-      push(trackingRef(booking.id), {
-        at: new Date().getTime(),
-        status: 'STARTED',
-        lat: driverLocation.lat,
-        lng: driverLocation.lng
-      });
+
+      insertTrackingPoint(booking.id, booking.driver, driverLocation);
   
       if (booking.customer_token) {
         sendNotification(
@@ -128,13 +138,8 @@ export const fetchBookings = () => async (dispatch) => {
   
     if (booking.status == 'REACHED') {
       const driverLocation = store.getState().gpsdata.location;
-  
-      push(trackingRef(booking.id), {
-        at: new Date().getTime(),
-        status: 'REACHED',
-        lat: driverLocation.lat,
-        lng: driverLocation.lng
-      });
+
+      insertTrackingPoint(booking.id, booking.driver, driverLocation);
   
       let address = await saveAddresses(booking, driverLocation);
   

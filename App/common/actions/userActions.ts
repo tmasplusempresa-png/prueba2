@@ -121,24 +121,12 @@ export const updateUserProfileSupabase = async (
     console.log('[UserActions] Campos a actualizar:', updatedFields.join(', '));
     console.log('[UserActions] Data completa para Supabase:', JSON.stringify(dataToUpdate));
 
-    // Actualizar datos en Supabase - intenta por id, si falla intenta por auth_id
-    let response = await supabase
+    const response = await supabase
       .from('users')
       .update(dataToUpdate)
-      .eq('id', userId)
+      .eq('auth_id', userId)
       .select('*')
       .single();
-
-    // Si no encontró por id, intentar por auth_id
-    if (response.error || !response.data) {
-      console.log('[UserActions] No encontró por id, intentando por auth_id...');
-      response = await supabase
-        .from('users')
-        .update(dataToUpdate)
-        .eq('auth_id', userId)
-        .select('*')
-        .single();
-    }
 
     const { data, error, status, statusText } = response;
 

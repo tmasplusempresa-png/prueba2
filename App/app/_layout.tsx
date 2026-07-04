@@ -5,8 +5,14 @@ import Constants from 'expo-constants';
 import Navigation from './Navigation/Navigation';
 import { Provider } from 'react-redux';
 import store from '@/common/store';
-import supabase, { Auth, clearStoredSession } from '@/config/SupabaseConfig';
-import { login, logout } from '@/common/reducers/authReducer';
+import supabase, { Auth, clearStoredSession, isPasswordRecoveryInProgress } from '@/config/SupabaseConfig';
+import { login, logout, setProfile } from '@/common/reducers/authReducer';
+// Define la background location task antes de que el OS pueda despacharla.
+import '@/common/services/driverLocationTask';
+import { useGlobalDriverTracking } from '@/hooks/useGlobalDriverTracking';
+import { useWalletAndMembershipSync } from '@/hooks/useWalletAndMembershipSync';
+import CancellationNotifier from '@/components/CancellationNotifier';
+import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
 
 // Desactivar el escalado de fuente del sistema — la app usa su propio tamaño fijo
 if ((Text as any).defaultProps == null) (Text as any).defaultProps = {};
@@ -56,6 +62,24 @@ export default function RootLayout() {
   useEffect(() => {
     let isMounted = true;
 
+    const loadProfile = async (authUid: string) => {
+      try {
+        const { data } = await supabase
+          .from('users')
+          .select('*')
+          .eq('auth_id', authUid)
+          .single();
+        // Si el administrador bloqueó la cuenta, cerrar la sesión restaurada.
+        if (data && (data as any).blocked) {
+          await supabase.auth.signOut();
+          await clearStoredSession();
+          if (isMounted) store.dispatch(logout());
+          return;
+        }
+        if (data) store.dispatch(setProfile(data as any));
+      } catch {}
+    };
+
     const syncInitialSession = async () => {
       try {
         const session = await Auth.getCurrentSession();
@@ -64,6 +88,9 @@ export default function RootLayout() {
 
         if (session?.user) {
           store.dispatch(login(session.user));
+          // Carga el perfil para que profile.id (users.id) esté disponible
+          // en toda la app — necesario para filtrar bookings correctamente.
+          await loadProfile(session.user.id);
         } else {
           store.dispatch(logout());
         }
@@ -80,10 +107,16 @@ export default function RootLayout() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
+      // Durante el restablecimiento por deep link no tocamos el estado global de
+      // auth: la sesión es temporal y solo sirve para que ResetPassword pueda
+      // llamar a updateUser. Así el navegador no conmuta de stack ni desmonta
+      // la pantalla. (PASSWORD_RECOVERY también lo ignoramos por seguridad.)
+      if (event === 'PASSWORD_RECOVERY' || isPasswordRecoveryInProgress()) return;
       if (session?.user) {
         store.dispatch(login(session.user));
+        loadProfile(session.user.id);
       } else {
         store.dispatch(logout());
       }
@@ -98,8 +131,17 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <Provider store={store}>
+        <GlobalServices />
         <Navigation />
+        <CancellationNotifier />
+        <DriverLocationDisclosureGate />
       </Provider>
     </GestureHandlerRootView>
   );
+}
+
+function GlobalServices() {
+  useGlobalDriverTracking();
+  useWalletAndMembershipSync();
+  return null;
 }

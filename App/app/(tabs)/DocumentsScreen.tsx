@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
+  FlatList,
   Modal,
   Animated,
   Easing,
@@ -19,20 +20,21 @@ import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { Ionicons, AntDesign, MaterialIcons, Feather } from "@expo/vector-icons";
 import { useDispatch, useSelector } from "react-redux";
 import { RootState } from "@/common/store";
-import { Picker } from "@react-native-picker/picker";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { decode } from "base64-arraybuffer";
 import defaultProfileImage from "./../../assets/images/Avatar/1.png";
 import { getUserVerification } from "@/common/topus-integration";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from "axios";
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, supabase } from '@/config/SupabaseConfig';
 type Props = NativeStackScreenProps<any>;
 import {
   listenToSettingsChanges,
   selectSettings,
 } from "@/common/reducers/settingsSlice";
-import RNPickerSelect from "react-native-picker-select";
+import { setProfile } from "@/common/store/authSlice";
 
 const DocumentsScreen = ({ navigation }: Props) => {
   const colorScheme = useColorScheme();
@@ -60,6 +62,7 @@ const DocumentsScreen = ({ navigation }: Props) => {
   const [modalVisible, setModalVisible] = useState(false);
   const [successModalVisible, setSuccessModalVisible] = useState(false);
   const [editModalVisible, setEditModalVisible] = useState(false);
+  const [citySearch, setCitySearch] = useState("");
   const [editField, setEditField] = useState<{
     key: string;
     label: string;
@@ -90,16 +93,28 @@ const DocumentsScreen = ({ navigation }: Props) => {
   const editModalSlide = useRef(new Animated.Value(300)).current;
 
   const [cities] = useState([
-    "Bogotá",
-    "Medellín",
-    "Cali",
-    "Barranquilla",
-    "Cartagena",
-    "Cúcuta",
-    "Bucaramanga",
-    "Pereira",
-    "Santa Marta",
-    "Ibagué",
+    "Bogotá", "Medellín", "Cali", "Barranquilla", "Cartagena",
+    "Cúcuta", "Bucaramanga", "Pereira", "Santa Marta", "Ibagué",
+    "Pasto", "Manizales", "Neiva", "Villavicencio", "Armenia",
+    "Valledupar", "Montería", "Sincelejo", "Popayán", "Floridablanca",
+    "Palmira", "Bello", "Soledad", "Itagüí", "San Juan de Pasto",
+    "Santa Rosa de Cabal", "Tuluá", "Yopal", "Tumaco", "Florencia",
+    "Girardot", "Zipaquirá", "Buenaventura", "Riohacha", "Duitama",
+    "Quibdó", "Arauca", "Tunja", "Magangué", "Sogamoso",
+    "Girón", "Chía", "Facatativá", "Rionegro", "Piedecuesta",
+    "Ciénaga", "La Dorada", "Maicao", "Calarcá", "Fundación",
+    "La Ceja", "Chiquinquirá", "Sahagún", "Villa del Rosario",
+    "Montelíbano", "Arjona", "Turbo", "Tame", "El Banco",
+    "Sabanalarga", "Ipiales", "Túquerres", "Pitalito", "La Plata",
+    "Baranoa", "El Carmen de Bolívar", "San Jacinto", "Santo Tomás",
+    "Repelón", "Planeta Rica", "Ciénaga de Oro", "San Onofre",
+    "María la Baja", "Clemencia", "San Juan Nepomuceno", "El Guamo",
+    "Sampués", "San Carlos", "Morroa", "Corozal", "Turbaco",
+    "San Juan del Cesar", "Ayapel", "Cereté", "Sincé", "Chinú",
+    "Ovejas", "Tolú", "Tuchín", "Bosconia", "Aguachica",
+    "Gamarra", "San Alberto", "Curumaní", "Manaure", "Copey",
+    "San Diego", "La Paz", "Valencia", "San Martín", "San Andrés",
+    "Providencia", "San Vicente del Caguán", "Mocoa", "Puerto Asís",
   ]);
 
   // Fetch profile on mount - REST API directo
@@ -115,12 +130,23 @@ const DocumentsScreen = ({ navigation }: Props) => {
       setProfileLoading(true);
 
       try {
+        // Si el bucket/tabla requiere RLS authenticated, mandamos el JWT de la sesión.
+        let bearer = SUPABASE_ANON_KEY;
+        try {
+          const sessionStr = await AsyncStorage.getItem('tmasplus_auth_session');
+          if (sessionStr) {
+            const sessionData = JSON.parse(sessionStr);
+            const token = sessionData?.access_token || sessionData?.session?.access_token;
+            if (token) bearer = token;
+          }
+        } catch {}
+
         const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${authId},id.eq.${authId})&limit=1`;
         const response = await fetch(url, {
           method: 'GET',
           headers: {
             'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Authorization': `Bearer ${bearer}`,
             'Content-Type': 'application/json',
           },
           signal: controller.signal,
@@ -141,6 +167,7 @@ const DocumentsScreen = ({ navigation }: Props) => {
           setCity(p.city || '');
           setEmail(p.email || user?.email || '');
           setLicenseNumber(p.license_number || '');
+          dispatch(setProfile(p));
         } else {
           setEmail(user?.email || '');
         }
@@ -279,6 +306,7 @@ const DocumentsScreen = ({ navigation }: Props) => {
     }).start(() => {
       setEditModalVisible(false);
       setEditField(null);
+      setCitySearch("");
     });
   };
 
@@ -298,6 +326,76 @@ const DocumentsScreen = ({ navigation }: Props) => {
     closeEditModal();
   };
 
+  const resolveAuthIdFromSession = async (): Promise<string | null> => {
+    try {
+      const sessionStr = await AsyncStorage.getItem('tmasplus_auth_session');
+      if (sessionStr) {
+        const sessionData = JSON.parse(sessionStr);
+        const token = sessionData?.access_token || sessionData?.session?.access_token;
+        if (token) {
+          try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            if (payload?.sub) return payload.sub as string;
+          } catch {}
+        }
+      }
+    } catch {}
+    return user?.id || (profile as any)?.auth_id || null;
+  };
+
+  const uploadProfileImage = async (): Promise<string | null> => {
+    if (!imageUriVehicle) return null;
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token || !session?.user?.id) {
+        throw new Error('Sesión no encontrada. Inicia sesión nuevamente.');
+      }
+
+      const base64 = await FileSystem.readAsStringAsync(imageUriVehicle, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      if (!base64) throw new Error('No se pudo leer la imagen seleccionada');
+
+      const storagePath = `${session.user.id}/profile_image.jpg`;
+      const storageUrl = `${SUPABASE_URL}/storage/v1/object/user-profiles/${storagePath}`;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      let uploadResponse: Response;
+      try {
+        uploadResponse = await fetch(storageUrl, {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+            'Content-Type': 'image/jpeg',
+            'x-upsert': 'true',
+          },
+          body: decode(base64),
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      if (!uploadResponse.ok) {
+        const errText = await uploadResponse.text().catch(() => '');
+        throw new Error(`Error al subir imagen (${uploadResponse.status}): ${errText.substring(0, 200)}`);
+      }
+
+      const { data: pub } = supabase.storage
+        .from('user-profiles')
+        .getPublicUrl(storagePath);
+
+      return `${pub.publicUrl}?v=${Date.now()}`;
+    } catch (err: any) {
+      console.error('[DocumentsScreen] Error subiendo imagen:', err?.message);
+      showAlert('error', 'Error de imagen', err?.message || 'No se pudo subir la imagen');
+      return null;
+    }
+  };
+
   const handleUpdate = async () => {
     try {
       setLoading(true);
@@ -313,13 +411,24 @@ const DocumentsScreen = ({ navigation }: Props) => {
         updated_at: new Date().toISOString(),
       };
 
-      // Si hay imagen local seleccionada
+      // Si hay imagen local seleccionada, subirla a Storage primero
       if (imageUriVehicle) {
-        updatedData.profile_image = imageUriVehicle;
+        const uploadedImageUrl = await uploadProfileImage();
+        if (uploadedImageUrl) {
+          updatedData.profile_image = uploadedImageUrl;
+        } else {
+          // Si la subida falla, detener la actualización
+          setLoading(false);
+          return;
+        }
       }
 
-      // Eliminar campos vacíos
+      // Eliminar campos vacíos (excepto city que se permite null para limpiarla)
       Object.keys(updatedData).forEach(key => {
+        if (key === 'city') {
+          if (!updatedData[key]) updatedData[key] = null;
+          return;
+        }
         if (key !== 'updated_at' && (updatedData[key] === '' || updatedData[key] === null || updatedData[key] === undefined)) {
           delete updatedData[key];
         }
@@ -332,108 +441,60 @@ const DocumentsScreen = ({ navigation }: Props) => {
         return;
       }
 
-      const authId = user?.id;
+      const authId = await resolveAuthIdFromSession();
       if (!authId) {
-        showAlert('error', 'Error', 'No se encontró el ID del usuario.');
+        showAlert('error', 'Error', 'No se encontró el ID del usuario autenticado.');
         setLoading(false);
         return;
       }
 
-      console.log('[DocumentsScreen] Actualizando perfil:', fieldsToUpdate.join(', '));
-      console.log('[DocumentsScreen] Datos:', JSON.stringify(updatedData));
+      // Usar el SDK de supabase para que maneje el JWT automáticamente (RLS)
+      const { data: rows, error: updateError } = await supabase
+        .from('users')
+        .update(updatedData)
+        .eq('auth_id', authId)
+        .select();
 
-      // Obtener token de sesión del usuario desde AsyncStorage
-      let authToken = SUPABASE_ANON_KEY;
-      try {
-        const sessionStr = await AsyncStorage.getItem('tmasplus_auth_session');
-        if (sessionStr) {
-          const sessionData = JSON.parse(sessionStr);
-          const token = sessionData?.access_token || sessionData?.session?.access_token;
-          if (token) {
-            authToken = token;
-            console.log('[DocumentsScreen] Usando token de sesión del usuario');
-          }
-        }
-        if (authToken === SUPABASE_ANON_KEY) {
-          console.log('[DocumentsScreen] Sin sesión en storage, usando anon key');
-        }
-      } catch (e) {
-        console.log('[DocumentsScreen] Error leyendo sesión de storage');
-      }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-      // PATCH para actualizar por auth_id
-      const url = `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${authId}`;
-      const response = await fetch(url, {
-        method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation',
-        },
-        body: JSON.stringify(updatedData),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      const responseText = await response.text();
-      console.log('[DocumentsScreen] Update status:', response.status);
-      console.log('[DocumentsScreen] Update response body:', responseText.substring(0, 500));
-
-      let responseData: any;
-      try {
-        responseData = JSON.parse(responseText);
-      } catch {
-        responseData = responseText;
-      }
-
-      if (response.ok && Array.isArray(responseData) && responseData.length > 0) {
-        const p = responseData[0];
-        console.log('[DocumentsScreen] Datos confirmados del server:', p.first_name, p.last_name, p.city, p.mobile);
-        // Actualizar campos locales con los datos confirmados del servidor
-        setName(p.first_name || '');
-        setLastName(p.last_name || '');
-        setMobile(p.mobile || '');
-        setReferralId(p.referral_id || '');
-        setCity(p.city || '');
-        setEmail(p.email || '');
-        setLicenseNumber(p.license_number || '');
-        if (p.profile_image) {
-          setimageUriVehicle(null);
-        }
-
+      if (updateError) {
         setLoading(false);
+        console.error('[DocumentsScreen] Error update:', updateError.message);
+        showAlert('error', 'Error', `No se pudo actualizar: ${updateError.message}`);
+        return;
+      }
 
-        // Animación de éxito
-        setSuccessModalVisible(true);
+      if (!rows || rows.length === 0) {
+        setLoading(false);
+        console.error('[DocumentsScreen] 0 rows actualizadas');
+        showAlert('error', 'Error', 'No se encontró el perfil para actualizar.');
+        return;
+      }
+
+      const p = rows[0];
+      setName(p.first_name || '');
+      setLastName(p.last_name || '');
+      setMobile(p.mobile || '');
+      setReferralId(p.referral_id || '');
+      setCity(p.city || '');
+      setEmail(p.email || '');
+      setLicenseNumber(p.license_number || '');
+      dispatch(setProfile(p));
+      if (imageUriVehicle) setimageUriVehicle(null);
+
+      setLoading(false);
+      setSuccessModalVisible(true);
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: true,
+      }).start();
+      setTimeout(() => {
         Animated.timing(fadeAnim, {
-          toValue: 1,
+          toValue: 0,
           duration: 500,
           useNativeDriver: true,
-        }).start();
-        setTimeout(() => {
-          Animated.timing(fadeAnim, {
-            toValue: 0,
-            duration: 500,
-            useNativeDriver: true,
-          }).start(() => setSuccessModalVisible(false));
-        }, 2000);
-        showAlert('success', 'Perfil actualizado', `Se actualizaron: ${fieldsToUpdate.join(', ')}`);
-      } else if (response.ok && Array.isArray(responseData) && responseData.length === 0) {
-        // Response OK pero 0 rows afectadas = RLS bloqueó la escritura
-        setLoading(false);
-        console.error('[DocumentsScreen] 0 rows actualizadas - posible bloqueo RLS');
-        showAlert('error', 'Error de permisos', 'La base de datos no permitió la actualización. Esto puede ser un problema de permisos (RLS). Contacta soporte.');
-      } else {
-        setLoading(false);
-        const errorMsg = typeof responseData === 'object' ? (responseData?.message || responseData?.error || JSON.stringify(responseData)) : String(responseData);
-        console.error('[DocumentsScreen] Error update:', errorMsg);
-        showAlert('error', 'Error', `No se pudo actualizar: ${errorMsg}`);
-      }
+        }).start(() => setSuccessModalVisible(false));
+      }, 2000);
+      showAlert('success', 'Perfil actualizado', `Se actualizaron: ${fieldsToUpdate.join(', ')}`);
     } catch (err: any) {
       setLoading(false);
       console.error('[DocumentsScreen] handleUpdate error:', err?.message);
@@ -606,6 +667,18 @@ const DocumentsScreen = ({ navigation }: Props) => {
           </TouchableOpacity>
         </View>
 
+        {/* Ver Carnet (solo clientes) */}
+        {profile?.user_type === 'customer' && (
+          <TouchableOpacity
+            style={styles.carnetButton}
+            onPress={() => navigation.navigate("Carnet")}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="card-outline" size={22} color="#00E5FF" />
+            <Text style={styles.carnetButtonText}>Ver Carnet</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Editable Fields */}
         <View style={styles.infoContainer}>
           <Text style={styles.sectionTitle}>Información Personal</Text>
@@ -613,12 +686,8 @@ const DocumentsScreen = ({ navigation }: Props) => {
           <FieldRow icon="person-outline" label="Apellidos" value={lastName} fieldKey="last_name" />
           <FieldRow icon="call-outline" label="Celular" value={mobile} fieldKey="mobile" keyboard="phone-pad" />
           <FieldRow icon="mail-outline" label="Email" value={email} fieldKey="email" keyboard="email-address" />
+          <FieldRow icon="location-outline" label="Ciudad" value={city} fieldKey="city" isCityPicker={true} />
 
-          <View style={styles.sectionDivider} />
-          <Text style={styles.sectionTitle}>Ubicación y Licencia</Text>
-          <FieldRow icon="location-outline" label="Ciudad" value={city} fieldKey="city" isCityPicker />
-          <FieldRow icon="card-outline" label="Número de Licencia" value={licenseNumber} fieldKey="license_number" />
-          <FieldRow icon="people-outline" label="Código de Referido" value={referralId} fieldKey="referral_id" />
         </View>
       </ScrollView>
 
@@ -684,41 +753,41 @@ const DocumentsScreen = ({ navigation }: Props) => {
             </Text>
 
             {editField?.isCityPicker ? (
-              <View style={styles.editPickerContainer}>
-                {Platform.OS === "android" ? (
-                  <Picker
-                    selectedValue={editValue}
-                    style={styles.editPicker}
-                    onValueChange={(itemValue) => setEditValue(itemValue)}
-                  >
-                    {cities.map((cityName, index) => (
-                      <Picker.Item key={index} label={cityName} value={cityName} />
-                    ))}
-                  </Picker>
-                ) : (
-                  <RNPickerSelect
-                    onValueChange={(itemValue) => setEditValue(itemValue)}
-                    value={editValue}
-                    items={cities.map((cityName) => ({
-                      label: cityName,
-                      value: cityName,
-                    }))}
-                    placeholder={{ label: "Seleccione una ciudad", value: "" }}
-                    style={{
-                      inputIOS: {
-                        color: "#E9F6FF",
-                        fontSize: 16,
-                        paddingHorizontal: 14,
-                        paddingVertical: 12,
-                        borderColor: "rgba(0, 229, 255, 0.3)",
-                        borderWidth: 1,
-                        borderRadius: 14,
-                        backgroundColor: "rgba(7, 35, 48, 0.72)",
-                      },
+              <>
+                <TextInput
+                  style={styles.citySearchInput}
+                  value={citySearch}
+                  onChangeText={setCitySearch}
+                  placeholder="Buscar ciudad..."
+                  placeholderTextColor="#5C8A9D"
+                />
+                <View style={styles.editPickerContainer}>
+                  <FlatList
+                    data={cities.filter(c => c.toLowerCase().includes(citySearch.toLowerCase()))}
+                    keyExtractor={(item) => item}
+                    style={styles.editCityList}
+                    showsVerticalScrollIndicator={true}
+                    nestedScrollEnabled={true}
+                    renderItem={({ item }) => {
+                      const selected = editValue === item;
+                      return (
+                        <TouchableOpacity
+                          style={[styles.editCityItem, selected && styles.editCityItemSelected]}
+                          onPress={() => setEditValue(item)}
+                          activeOpacity={0.7}
+                        >
+                          <Text style={[styles.editCityText, selected && styles.editCityTextSelected]}>
+                            {item}
+                          </Text>
+                          {selected && (
+                            <Ionicons name="checkmark-circle" size={18} color="#00E5FF" />
+                          )}
+                        </TouchableOpacity>
+                      );
                     }}
                   />
-                )}
-              </View>
+                </View>
+              </>
             ) : (
               <TextInput
                 style={styles.editInput}
@@ -994,6 +1063,23 @@ const createStyles = (isDarkMode: boolean) =>
       fontWeight: "700",
       marginLeft: 8,
     },
+    carnetButton: {
+      backgroundColor: "rgba(0, 229, 255, 0.08)",
+      paddingVertical: 14,
+      borderRadius: 20,
+      alignItems: "center",
+      flexDirection: "row",
+      justifyContent: "center",
+      marginBottom: 22,
+      borderWidth: 1,
+      borderColor: "rgba(0, 229, 255, 0.4)",
+    },
+    carnetButtonText: {
+      color: "#00E5FF",
+      fontSize: 14,
+      fontWeight: "700",
+      marginLeft: 8,
+    },
     scrollContent: {
       paddingHorizontal: 20,
       paddingBottom: 28,
@@ -1175,6 +1261,17 @@ const createStyles = (isDarkMode: boolean) =>
       backgroundColor: "rgba(7, 35, 48, 0.72)",
       marginBottom: 20,
     },
+    citySearchInput: {
+      borderWidth: 1,
+      borderColor: "rgba(0, 229, 255, 0.3)",
+      borderRadius: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      fontSize: 15,
+      color: "#E9F6FF",
+      backgroundColor: "rgba(7, 35, 48, 0.72)",
+      marginBottom: 10,
+    },
     editPickerContainer: {
       borderWidth: 1,
       borderColor: "rgba(0, 229, 255, 0.3)",
@@ -1183,10 +1280,28 @@ const createStyles = (isDarkMode: boolean) =>
       backgroundColor: "rgba(7, 35, 48, 0.72)",
       overflow: "hidden",
     },
-    editPicker: {
-      width: "100%",
-      height: 50,
-      color: "#E9F6FF",
+    editCityList: {
+      height: 320,
+    },
+    editCityItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      height: 48,
+      paddingHorizontal: 16,
+      borderBottomWidth: 1,
+      borderBottomColor: "rgba(0, 229, 255, 0.08)",
+    },
+    editCityItemSelected: {
+      backgroundColor: "rgba(0, 229, 255, 0.1)",
+    },
+    editCityText: {
+      fontSize: 15,
+      color: "#8FB3C5",
+    },
+    editCityTextSelected: {
+      color: "#00E5FF",
+      fontWeight: "600",
     },
     editModalButtons: {
       flexDirection: "row",

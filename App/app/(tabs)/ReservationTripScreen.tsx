@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Image, Linking, Platform, Dimensions, Modal, Alert, TextInput,
+  ActivityIndicator, Image, Linking, Platform, Dimensions, Modal, TextInput,
 } from 'react-native';
 import * as Animatable from 'react-native-animatable';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
@@ -15,15 +15,19 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import supabase from '@/config/SupabaseConfig';
+import { activeTripBookings } from '@/hooks/useDriverCancellationWatcher';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 // Agora disabled for build - import { AGORA_APP_ID } from '@/config/AgoraConfig';
 import { updateDriverNotification, showDriverActiveNotification } from '@/hooks/DriverNotificationService';
 import DriverOtpVerificationModal from '@/components/DriverOtpVerificationModal';
+import { useDriverTracking } from '@/hooks/useDriverTracking';
 import { OtpService } from '@/common/services/OtpService';
 import { useOtpTimer } from '@/hooks/useOtpTimer';
 // import AgoraCallModal from '@/components/AgoraCallModal'; // COMENTADO PARA EXPO GO
 // import { useAgoraCall } from '@/hooks/useAgoraCall'; // COMENTADO PARA EXPO GO
 import { notifyIncomingCall } from '@/common/services/NotificationService';
+import { shareTrip } from '@/common/utils/tripShare';
+import StarRating from 'react-native-star-rating-widget';
 
 const { width, height } = Dimensions.get('window');
 const BG_IMAGE = require('../../assets/images/bg.png');
@@ -149,6 +153,12 @@ const ReservationTripScreen = () => {
   const [waitingForOtpTimer, setWaitingForOtpTimer] = useState(false);
   const [enteredOtp, setEnteredOtp] = useState(''); // 🆕 Input del driver
 
+  // ⭐ Customer rating (conductor → cliente) requerido antes de finalizar
+  const [ratingModalVisible, setRatingModalVisible] = useState(false);
+  const [customerRating, setCustomerRating] = useState(0);
+  const [customerReview, setCustomerReview] = useState('');
+  const [submittingRating, setSubmittingRating] = useState(false);
+
   // ⏱️ OTP Timer Hook - Persistent 3-minute countdown
   const otpTimer = useOtpTimer({
     bookingId: reservation?.id,
@@ -167,6 +177,13 @@ const ReservationTripScreen = () => {
       }
     },
   });
+
+  // Escribe la posición del conductor en booking_tracking para que el cliente la vea en tiempo real
+  useDriverTracking(
+    reservation?.id ?? null,
+    user?.id ?? user?.uid ?? null,
+    phase !== 'TRIP_COMPLETE'
+  );
 
   // Agora calls - COMENTADO PARA EXPO GO
   // const callManager = useAgoraCall({
@@ -250,6 +267,82 @@ const ReservationTripScreen = () => {
     })();
     return () => { sub?.remove(); };
   }, [pickupLat, pickupLng]);
+
+  // Mientras esta pantalla esté montada, "posee" su booking: el watcher global
+  // (useDriverCancellationWatcher) ignora este id para no duplicar el modal.
+  // Aquí mostramos el aviso y navegamos de vuelta; fuera de aquí lo hace el global.
+  useEffect(() => {
+    if (!reservation?.id) return;
+    const id = String(reservation.id);
+    activeTripBookings.add(id);
+    return () => { activeTripBookings.delete(id); };
+  }, [reservation?.id]);
+
+  // 🚫 Detectar cancelación (cliente o admin desde web) — poll + realtime
+  useEffect(() => {
+    if (!reservation?.id) return;
+    if (phase === 'TRIP_COMPLETE') return;
+    let cancelHandled = false;
+
+    const handleCancellation = (reason?: string | null, cancelledBy?: string | null) => {
+      if (cancelHandled) return;
+      cancelHandled = true;
+      const actor =
+        cancelledBy === 'admin'
+          ? 'El administrador'
+          : reservation.customer_name || 'El cliente';
+      const msg = `${actor} canceló el servicio.${reason ? `\nMotivo: ${reason}` : ''}`;
+      const goBack = () => {
+        setAlertVisible(false);
+        nav.goBack();
+      };
+      showAlert('warning', 'Servicio cancelado', msg, [
+        { text: 'Entendido', style: 'default', onPress: goBack },
+      ]);
+      // Failsafe: si el modal se cierra por dismiss o no se interactúa,
+      // navegar de vuelta de todos modos tras un breve margen.
+      setTimeout(goBack, 6000);
+    };
+
+    const checkCancellation = async () => {
+      if (cancelHandled) return;
+      try {
+        const { data, error } = await (supabase as any)
+          .from('bookings')
+          .select('status, cancelled_by, reason')
+          .eq('id', reservation.id)
+          .single();
+        if (error || !data) return;
+        if (data.status === 'CANCELLED') {
+          handleCancellation(data.reason, data.cancelled_by);
+        }
+      } catch (e) {
+        console.warn('checkCancellation error:', e);
+      }
+    };
+
+    checkCancellation();
+    const interval = setInterval(checkCancellation, 3000);
+
+    // Realtime: detecta cancelación al instante sin esperar el siguiente poll
+    const channel = (supabase as any)
+      .channel(`booking-cancel-${reservation.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'bookings', filter: `id=eq.${reservation.id}` },
+        (payload: any) => {
+          if (payload?.new?.status === 'CANCELLED') {
+            handleCancellation(payload.new.reason, payload.new.cancelled_by);
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(interval);
+      (supabase as any).removeChannel?.(channel);
+    };
+  }, [reservation?.id, reservation?.customer_name, phase, nav]);
 
   // Fetch route polyline
   const fetchRoute = useCallback(async (fromLat: number, fromLng: number, toLat: number, toLng: number) => {
@@ -445,6 +538,20 @@ const ReservationTripScreen = () => {
   useEffect(() => {
     const loadExistingOtp = async () => {
       try {
+        // Primero intentar usar OTP del objeto reservation (si vino en params)
+        if ((reservation as any)?.otp && !currentOtp) {
+          const otpString = String((reservation as any).otp).trim();
+          console.log('✅ [INIT] OTP desde reservation params:', otpString);
+          setCurrentOtp(otpString);
+
+          if ((reservation as any).otp_verified) {
+            setOtpVerified(true);
+            console.log('✅ [INIT] OTP ya verificado');
+          }
+          return;
+        }
+
+        // Si no está en params, cargar desde BD
         const { data, error } = await (supabase as any)
           .from('bookings')
           .select('otp, otp_verified, otp_timer_started_at, status')
@@ -454,23 +561,24 @@ const ReservationTripScreen = () => {
         if (error || !data) return;
 
         // Si hay OTP guardado
-        if (data.otp) {
-          console.log('✅ [RELOAD] OTP encontrado:', data.otp);
-          setCurrentOtp(data.otp);
-          
+        if (data.otp && !currentOtp) {
+          const otpString = String(data.otp).trim();
+          console.log('✅ [RELOAD] OTP encontrado:', otpString);
+          setCurrentOtp(otpString);
+
           // Si ya fue verificado
           if (data.otp_verified) {
             setOtpVerified(true);
             console.log('✅ [RELOAD] OTP ya verificado');
           }
-          
+
           // Si timer está activo, calcular si aún queda tiempo
           if (data.otp_timer_started_at) {
             const startTime = new Date(data.otp_timer_started_at).getTime();
             const elapsed = (Date.now() - startTime) / 1000;
             const remaining = Math.max(0, 180 - elapsed);
             console.log(`✅ [RELOAD] Timer activo, remaining: ${remaining.toFixed(1)}s`);
-            
+
             if (!data.otp_verified && remaining > 0) {
               // Aún queda tiempo en el countdown
               setWaitingForOtpTimer(true);
@@ -488,7 +596,7 @@ const ReservationTripScreen = () => {
     if (reservation?.id && phase === 'ARRIVED_AT_PICKUP') {
       loadExistingOtp();
     }
-  }, [reservation?.id, phase]);
+  }, [reservation?.id, phase, currentOtp]);
 
   // ⏲️ Driver Countdown - Calcula localmente desde otp_timer_started_at de Supabase
   // Si Supabase aún no devuelve el timestamp, usa localTimerStart como fallback
@@ -550,8 +658,9 @@ const ReservationTripScreen = () => {
           if (error || !data?.otp) return;
 
           if (!currentOtp) {
-            console.log('✅ Cargando OTP: ', data.otp);
-            setCurrentOtp(data.otp);
+            const otpString = String(data.otp).trim();
+            console.log('✅ Cargando OTP: ', otpString);
+            setCurrentOtp(otpString);
           }
         } catch (e) {
           console.error('Error fetching OTP:', e);
@@ -607,9 +716,13 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // End the trip
-  const handleEndTrip = async () => {
-    // If payment is NOT cash, driver must confirm transfer first
+  // End the trip — el conductor debe calificar al cliente antes de poder finalizar
+  const handleEndTrip = () => {
+    setRatingModalVisible(true);
+  };
+
+  // Continuar el flujo de pago/confirmación una vez calificado el cliente
+  const proceedAfterRating = () => {
     if (paymentMode !== 'cash') {
       showAlert('confirm',
         `Confirmar pago por ${paymentLabel}`,
@@ -640,6 +753,75 @@ const ReservationTripScreen = () => {
           },
         ],
       );
+    }
+  };
+
+  // Guardar la calificación del cliente y continuar con el flujo de finalización
+  const submitCustomerRating = async () => {
+    if (customerRating < 1) {
+      showAlert('warning', 'Calificación requerida', 'Califica al cliente con 1 a 5 estrellas antes de finalizar el viaje.');
+      return;
+    }
+    setSubmittingRating(true);
+    try {
+      const customerId = reservation.customer_id || reservation.customer;
+      const ratingValue = Math.round(customerRating);
+      const headers = await getSupabaseAuthHeaders(true);
+
+      // Update vía REST directo (evita cuelgue del cliente supabase-js)
+      const updateRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}`,
+        {
+          method: 'PATCH',
+          headers: { ...headers, Prefer: 'return=minimal' },
+          body: JSON.stringify({
+            customer_rating: ratingValue,
+            customer_review: customerReview?.trim() || null,
+          }),
+        },
+      );
+      if (!updateRes.ok) {
+        const text = await updateRes.text();
+        throw new Error(text || `HTTP ${updateRes.status}`);
+      }
+
+      // Recalcular promedio del cliente (no bloquea el flujo si falla)
+      if (customerId) {
+        try {
+          const pastRes = await fetch(
+            `${SUPABASE_URL}/rest/v1/bookings?customer_id=eq.${customerId}&customer_rating=not.is.null&select=customer_rating`,
+            { method: 'GET', headers },
+          );
+          if (pastRes.ok) {
+            const pastBookings: any[] = await pastRes.json();
+            if (pastBookings?.length) {
+              const avg = (
+                pastBookings.reduce((s: number, b: any) => s + (Number(b.customer_rating) || 0), 0) /
+                pastBookings.length
+              ).toFixed(1);
+              await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${customerId}`, {
+                method: 'PATCH',
+                headers: { ...headers, Prefer: 'return=minimal' },
+                body: JSON.stringify({ rating: Number(avg) }),
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('No se pudo recalcular el promedio del cliente:', e);
+        }
+      }
+
+      setRatingModalVisible(false);
+      proceedAfterRating();
+    } catch (e: any) {
+      console.error('Error guardando calificación del cliente:', e);
+      showAlert(
+        'error',
+        'Error',
+        e?.message ? `No se pudo guardar la calificación: ${e.message}` : 'No se pudo guardar la calificación. Intenta de nuevo.',
+      );
+    } finally {
+      setSubmittingRating(false);
     }
   };
 
@@ -837,27 +1019,53 @@ const ReservationTripScreen = () => {
 
       {/* Top bar */}
       <View style={[s.topBar, { paddingTop: Math.max(insets.top, 20) + 6 }]}>
-        <TouchableOpacity style={s.topBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
-          <Ionicons name="chevron-back" size={24} color="#FFF" />
-        </TouchableOpacity>
+        <View style={s.topBarRow}>
+          <TouchableOpacity style={s.topBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
+            <Ionicons name="chevron-back" size={24} color="#FFF" />
+          </TouchableOpacity>
 
-        <View style={s.topInfo}>
-          <View style={[s.phaseDot, { backgroundColor: currentConfig.color }]} />
-          <Text style={s.topTitle} numberOfLines={1}>{currentConfig.title}</Text>
+          <View style={s.topInfo}>
+            <View style={[s.phaseDot, { backgroundColor: currentConfig.color }]} />
+            <Text style={s.topTitle} numberOfLines={1}>{currentConfig.title}</Text>
+          </View>
+
+          <TouchableOpacity
+            style={s.topBtn}
+            onPress={async () => {
+              const estimatedDistance =
+                distanceToPickup !== null
+                  ? distanceToPickup < 1000
+                    ? `${Math.round(distanceToPickup)} m`
+                    : `${(distanceToPickup / 1000).toFixed(1)} km`
+                  : null;
+              await shareTrip('driver', reservation, user, { estimatedDistance });
+            }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="share-social" size={20} color="#00E5FF" />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={s.topBtn} onPress={() => {
+            mapRef.current?.fitToCoordinates(
+              [
+                ...(driverLocation ? [driverLocation] : []),
+                ...(pickupLat ? [{ latitude: pickupLat, longitude: pickupLng }] : []),
+                ...(dropLat && phase === 'TRIP_STARTED' ? [{ latitude: dropLat, longitude: dropLng }] : []),
+              ],
+              { edgePadding: { top: 120, right: 60, bottom: 280, left: 60 }, animated: true }
+            );
+          }} activeOpacity={0.75}>
+            <Ionicons name="scan" size={20} color="#00E5FF" />
+          </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={s.topBtn} onPress={() => {
-          mapRef.current?.fitToCoordinates(
-            [
-              ...(driverLocation ? [driverLocation] : []),
-              ...(pickupLat ? [{ latitude: pickupLat, longitude: pickupLng }] : []),
-              ...(dropLat && phase === 'TRIP_STARTED' ? [{ latitude: dropLat, longitude: dropLng }] : []),
-            ],
-            { edgePadding: { top: 120, right: 60, bottom: 280, left: 60 }, animated: true }
-          );
-        }} activeOpacity={0.75}>
-          <Ionicons name="scan" size={20} color="#00E5FF" />
-        </TouchableOpacity>
+        {!!reservation.reference && (
+          <View style={s.tripCodePill}>
+            <Ionicons name="barcode-outline" size={14} color="#00E5FF" />
+            <Text style={s.tripCodeLabel}>CÓDIGO DEL VIAJE</Text>
+            <Text style={s.tripCodeValue}>{reservation.reference}</Text>
+          </View>
+        )}
       </View>
 
       {/* Bottom panel */}
@@ -885,7 +1093,16 @@ const ReservationTripScreen = () => {
           </View>
 
           <View style={s.metaRow}>
-            <Text style={s.metaItem}>$ {(reservation.estimate || reservation.price)?.toLocaleString('es-CO')}</Text>
+            {/* 🆕 Precio más prominente - Dinámico según estado */}
+            <View style={s.priceHighlight}>
+              <Ionicons name="cash" size={16} color="#00E5FF" />
+              <Text style={s.priceHighlightText}>
+                {reservation.status === 'COMPLETE' 
+                  ? `$ ${(reservation.price || reservation.estimate || 0).toLocaleString('es-CO')}`
+                  : `$ ${(reservation.driver_share || reservation.price || reservation.estimate || 0).toLocaleString('es-CO')} - $ ${(reservation.price || reservation.estimate || 0).toLocaleString('es-CO')}`
+                }
+              </Text>
+            </View>
             <Text style={s.metaDivider}>•</Text>
             <Text style={s.metaItem}>{reservation.distance?.toFixed?.(1) ?? reservation.distance} km</Text>
             <Text style={s.metaDivider}>•</Text>
@@ -913,6 +1130,41 @@ const ReservationTripScreen = () => {
             <Text style={s.navBtnTxt}>Waze</Text>
           </TouchableOpacity>
         </View>
+
+        {/* 🆕 Tarjeta de Precio Prominente en Punto de Recogida */}
+        {phase === 'ARRIVED_AT_PICKUP' && (
+          <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
+            <View style={s.priceCard}>
+              <View style={s.priceCardHeader}>
+                <Ionicons name="cash" size={24} color="#00E5FF" />
+                <Text style={s.priceCardTitle}>
+                  {reservation.status === 'COMPLETE' ? '💰 Valor Final Liquidado' : '💰 Valor Estimado'}
+                </Text>
+              </View>
+              <Text style={s.priceCardAmount}>
+                {reservation.status === 'COMPLETE' 
+                  ? `$ ${(reservation.price || reservation.estimate || 0).toLocaleString('es-CO')}`
+                  : `$ ${(reservation.driver_share || reservation.price || reservation.estimate || 0).toLocaleString('es-CO')} - $ ${(reservation.price || reservation.estimate || 0).toLocaleString('es-CO')}`
+                }
+              </Text>
+              <View style={s.priceCardPayment}>
+                <Ionicons
+                  name={paymentMode === 'cash' ? 'cash-outline' : paymentMode === 'nequi' ? 'phone-portrait-outline' : 'wallet-outline'}
+                  size={16}
+                  color={paymentMode === 'cash' ? '#00E676' : '#00E5FF'}
+                />
+                <Text style={s.priceCardPaymentText}>
+                  {paymentMode === 'cash' ? '💵 Pago en Efectivo' : paymentMode === 'nequi' ? '📱 Pago por Nequi' : '💳 Pago por Daviplata'}
+                </Text>
+              </View>
+              {paymentMode !== 'cash' && (
+                <Text style={s.priceCardNote}>
+                  Recuerda confirmar la recepción del pago al finalizar el viaje
+                </Text>
+              )}
+            </View>
+          </Animatable.View>
+        )}
 
         {/* Phase action buttons */}
         {phase === 'NAVIGATING_TO_PICKUP' && (
@@ -983,7 +1235,7 @@ const ReservationTripScreen = () => {
                           justifyContent: 'center',
                           alignItems: 'center',
                         }}
-                        onPress={() => handleOTPMatch(enteredOtp.trim() === currentOtp?.trim())}
+                        onPress={() => handleOTPMatch(String(enteredOtp).trim() === String(currentOtp).trim())}
                         disabled={loading || enteredOtp.length === 0}
                       >
                         <Ionicons name="checkmark" size={20} color="#00204a" />
@@ -1131,6 +1383,82 @@ const ReservationTripScreen = () => {
         }}
       /> */}
 
+      {/* ⭐ Modal de calificación al cliente (obligatorio antes de finalizar) */}
+      <Modal
+        transparent
+        visible={ratingModalVisible}
+        animationType="fade"
+        onRequestClose={() => { if (!submittingRating) setRatingModalVisible(false); }}
+      >
+        <View style={s.ratingBackdrop}>
+          <View style={s.ratingModalCard}>
+            <View style={s.ratingHeader}>
+              <Ionicons name="star" size={28} color="#FFD700" />
+              <Text style={s.ratingTitle}>Califica al cliente</Text>
+            </View>
+            <Text style={s.ratingSubtitle}>
+              {reservation.customer_name || 'Cliente'}
+            </Text>
+            <Text style={s.ratingHint}>
+              1 estrella = poco satisfecho · 5 estrellas = muy satisfecho
+            </Text>
+
+            <View style={s.ratingStarsWrap}>
+              <StarRating
+                maxStars={5}
+                starSize={40}
+                color="#FFD700"
+                emptyColor="rgba(255,255,255,0.25)"
+                rating={customerRating}
+                onChange={(r: number) => setCustomerRating(Math.round(r))}
+              />
+              <Text style={s.ratingValue}>
+                {customerRating > 0 ? `${customerRating} / 5` : 'Selecciona una calificación'}
+              </Text>
+            </View>
+
+            <TextInput
+              style={s.ratingInput}
+              placeholder="Observaciones (opcional)"
+              placeholderTextColor="rgba(255,255,255,0.45)"
+              multiline
+              value={customerReview}
+              onChangeText={setCustomerReview}
+              editable={!submittingRating}
+            />
+
+            <TouchableOpacity
+              style={[
+                s.ratingSubmitBtn,
+                (customerRating < 1 || submittingRating) && s.ratingSubmitBtnDisabled,
+              ]}
+              onPress={submitCustomerRating}
+              disabled={customerRating < 1 || submittingRating}
+              activeOpacity={0.85}
+            >
+              {submittingRating ? (
+                <ActivityIndicator color="#051A26" size="small" />
+              ) : (
+                <>
+                  <Ionicons name="checkmark-circle" size={20} color="#051A26" />
+                  <Text style={s.ratingSubmitText}>
+                    {customerRating < 1 ? 'Selecciona una calificación' : 'Continuar y finalizar viaje'}
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={s.ratingCancelBtn}
+              onPress={() => setRatingModalVisible(false)}
+              disabled={submittingRating}
+            >
+              <Text style={s.ratingCancelText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <CustomAlert
         visible={alertVisible}
         type={alertType}
@@ -1162,9 +1490,11 @@ const s = StyleSheet.create({
   /* Top bar */
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingBottom: 12,
     backgroundColor: 'rgba(5,26,38,0.85)',
+  },
+  topBarRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
   },
   topBtn: {
     width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center',
@@ -1173,6 +1503,31 @@ const s = StyleSheet.create({
   topInfo: { flexDirection: 'row', alignItems: 'center', flex: 1, justifyContent: 'center' },
   phaseDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
   topTitle: { fontSize: 15, fontWeight: '700', color: '#FFF' },
+  tripCodePill: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.35)',
+    gap: 6,
+  },
+  tripCodeLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.7)',
+    letterSpacing: 0.5,
+  },
+  tripCodeValue: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#00E5FF',
+    letterSpacing: 2,
+  },
   /* Bottom panel */
   bottomPanel: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -1196,6 +1551,23 @@ const s = StyleSheet.create({
   metaRow: { flexDirection: 'row', alignItems: 'center' },
   metaItem: { fontSize: 12, color: '#00E5FF', fontWeight: '600' },
   metaDivider: { fontSize: 12, color: 'rgba(255,255,255,0.2)', marginHorizontal: 8 },
+  priceHighlight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,229,255,0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.3)',
+    gap: 4,
+  },
+  priceHighlightText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#00E5FF',
+    letterSpacing: 0.5,
+  },
   /* Nav buttons */
   navRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
   navBtn: {
@@ -1246,6 +1618,144 @@ const s = StyleSheet.create({
   markerLabel: {
     fontSize: 10, fontWeight: '700', color: '#FFF', marginTop: 2,
     backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+  },
+  /* 🆕 Price Card Styles */
+  priceCard: {
+    backgroundColor: 'rgba(0,229,255,0.08)',
+    borderWidth: 2,
+    borderColor: 'rgba(0,229,255,0.3)',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  priceCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  priceCardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#00E5FF',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  priceCardAmount: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#00E5FF',
+    marginBottom: 12,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  priceCardPayment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  priceCardPaymentText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  priceCardNote: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.6)',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  /* ⭐ Rating modal */
+  ratingBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  ratingModalCard: {
+    width: '100%',
+    backgroundColor: '#0B2230',
+    borderRadius: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  ratingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 6,
+  },
+  ratingTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#FFF',
+  },
+  ratingSubtitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#00E5FF',
+    marginBottom: 4,
+  },
+  ratingHint: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.6)',
+    marginBottom: 12,
+  },
+  ratingStarsWrap: {
+    alignItems: 'center',
+    marginVertical: 8,
+  },
+  ratingValue: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 6,
+    fontWeight: '600',
+  },
+  ratingInput: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    minHeight: 70,
+    padding: 12,
+    color: '#FFF',
+    textAlignVertical: 'top',
+    marginTop: 12,
+    marginBottom: 14,
+    fontSize: 14,
+  },
+  ratingSubmitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00E5FF',
+    paddingVertical: 14,
+    borderRadius: 14,
+    gap: 8,
+  },
+  ratingSubmitBtnDisabled: {
+    backgroundColor: 'rgba(0,229,255,0.35)',
+  },
+  ratingSubmitText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#051A26',
+  },
+  ratingCancelBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    marginTop: 8,
+  },
+  ratingCancelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
   },
 });
 

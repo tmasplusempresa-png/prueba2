@@ -83,12 +83,15 @@ export const saveBooking = async (bookingData: any) => {
       
       // Referencia (se genera automáticamente si no se proporciona)
       reference: bookingData.reference || null,
+
+      // Vencimiento de la solicitud: 5 minutos desde ahora
+      request_expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
     };
 
     console.log('🔄 [saveBooking] Datos transformados para Supabase:', supabaseBooking);
 
     // Insertar en Supabase
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('bookings')
       .insert([supabaseBooking])
       .select()

@@ -39,11 +39,25 @@ const VEHICLE_OPTIONS = [
   { id: 4, image: require("@/assets/images/TREAS-T.png"), label: "T+Plus Taxi", description: "Taxi" },
 ];
 
-const VEHICLE_PRICE_CONFIG: Record<number, { base: number; perKm: number; perMin: number }> = {
-  1: { base: 6500, perKm: 1700, perMin: 260 },
-  2: { base: 5600, perKm: 1450, perMin: 220 },
-  3: { base: 9000, perKm: 2100, perMin: 320 },
-  4: { base: 5000, perKm: 1300, perMin: 200 },
+// Mapeo de nombre DB → id local de VEHICLE_OPTIONS
+const VEHICLE_NAME_TO_ID: Record<string, number> = {
+  "T+Plus Especial": 1,
+  "T+Plus Particular": 2,
+  "T+Plus Van": 3,
+  "T+Plus Taxi": 4,
+};
+
+type VehiclePriceCfg = {
+  base: number; perKm: number; perMin: number; minFare: number;
+  deltaAeropuerto: number; deltaProgramado: number;
+};
+
+// Fallback mientras carga la DB (valores del Excel)
+const VEHICLE_PRICE_CONFIG_DEFAULT: Record<number, VehiclePriceCfg> = {
+  1: { base: 10800, perKm: 660, perMin: 600, minFare: 19200, deltaAeropuerto: 12000, deltaProgramado: 4800 },
+  2: { base: 4800,  perKm: 540, perMin: 460, minFare: 8400,  deltaAeropuerto: 12000, deltaProgramado: 4800 },
+  3: { base: 30000, perKm: 390, perMin: 1400, minFare: 54000, deltaAeropuerto: 12000, deltaProgramado: 4800 },
+  4: { base: 4920,  perKm: 540, perMin: 426, minFare: 8880,  deltaAeropuerto: 12000, deltaProgramado: 4800 },
 };
 
 const roundTo50 = (value: number) => {
@@ -130,6 +144,7 @@ const TripPreviewScreen = () => {
   const [routeDuration, setRouteDuration] = useState<string>("");
   const [routeDistanceKm, setRouteDistanceKm] = useState<number>(0);
   const [routeDurationMin, setRouteDurationMin] = useState<number>(0);
+  const [vehiclePriceConfig, setVehiclePriceConfig] = useState<Record<number, VehiclePriceCfg>>(VEHICLE_PRICE_CONFIG_DEFAULT);
 
   // Estados para modales
   const [showStopsModal, setShowStopsModal] = useState(false);
@@ -163,25 +178,24 @@ const TripPreviewScreen = () => {
     (destination?.title || "").toLowerCase().includes("aero");
 
   const vehiclePriceRanges = useMemo(() => {
-    const extraFees = (hasAirportFee ? 7000 : 0) + (stops.length > 0 ? stops.length * 2500 : 0);
+    const stopFees = stops.length > 0 ? stops.length * 2500 : 0;
 
     return VEHICLE_OPTIONS.reduce((acc, vehicle) => {
-      const cfg = VEHICLE_PRICE_CONFIG[vehicle.id];
+      const cfg = vehiclePriceConfig[vehicle.id];
+      if (!cfg) return acc;
+
+      const airportFee = hasAirportFee ? cfg.deltaAeropuerto : 0;
       const distanceComponent = routeDistanceKm * cfg.perKm;
       const timeComponent = routeDurationMin * cfg.perMin;
-      const rawEstimate = cfg.base + distanceComponent + timeComponent + extraFees;
-      const safeEstimate = Math.max(rawEstimate, cfg.base + 2500);
-      const minFare = roundTo50(safeEstimate * 0.92);
-      const maxFare = roundTo50(safeEstimate * 1.15);
+      const rawEstimate = cfg.base + distanceComponent + timeComponent + airportFee + stopFees;
+      const driverPrice = Math.ceil(Math.max(rawEstimate, cfg.minFare) / 100) * 100;
+      // Precio cliente = conductor ÷ 0.8 (conductor recibe 80%)
+      const clientPrice = Math.ceil(driverPrice / 0.8 / 100) * 100;
 
-      acc[vehicle.id] = {
-        min: minFare,
-        max: Math.max(maxFare, minFare + 500),
-      };
-
+      acc[vehicle.id] = { min: driverPrice, max: clientPrice };
       return acc;
     }, {} as Record<number, { min: number; max: number }>);
-  }, [routeDistanceKm, routeDurationMin, hasAirportFee, stops.length]);
+  }, [routeDistanceKm, routeDurationMin, hasAirportFee, stops.length, vehiclePriceConfig]);
 
   const selectedPriceRange =
     selectedVehicleType && vehiclePriceRanges[selectedVehicleType]
@@ -232,6 +246,36 @@ const TripPreviewScreen = () => {
 
     return null;
   }, [routeCoordinates, origin, destination]);
+
+  // Cargar tarifas dinámicas desde car_types en Supabase
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('car_types')
+          .select('name,base_price,price_per_km,rate_per_hour,min_fare,delta_aeropuerto,delta_aeropuerto_prog')
+          .eq('is_active', true);
+        if (error || !data?.length) return;
+        const cfg: Record<number, VehiclePriceCfg> = { ...VEHICLE_PRICE_CONFIG_DEFAULT };
+        data.forEach((car: any) => {
+          const id = VEHICLE_NAME_TO_ID[car.name];
+          if (id) {
+            cfg[id] = {
+              base: parseFloat(car.base_price) || 0,
+              perKm: parseFloat(car.price_per_km) || 0,
+              perMin: parseFloat(car.rate_per_hour) || 0,
+              minFare: parseFloat(car.min_fare) || 0,
+              deltaAeropuerto: parseFloat(car.delta_aeropuerto) || 0,
+              deltaProgramado: parseFloat(car.delta_aeropuerto_prog) || 0,
+            };
+          }
+        });
+        setVehiclePriceConfig(cfg);
+      } catch (e) {
+        console.warn('[TripPreview] Error cargando tarifas:', e);
+      }
+    })();
+  }, []);
 
   // Animated glow for continue button
   const btnGlow = useRef(new Animated.Value(0.3)).current;

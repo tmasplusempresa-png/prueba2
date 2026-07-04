@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef, ReactNode } from "react";
 import {
   View,
-  Dimensions,
   Platform,
   StyleSheet,
   Text,
@@ -15,7 +14,6 @@ import { RootState } from "@/common/store";
 import markerIcon from "@/assets/images/NavegApp.png";
 import { getDistance } from "geolib";
 
-const screen = Dimensions.get("window");
 const DEFAULT_REGION = {
   latitude: 4.7110,
   longitude: -74.0721,
@@ -225,8 +223,17 @@ interface MapSensorProps {
   currentPosition?: [number, number] | null;
 }
 
+type CameraSnapshot = {
+  latitude: number;
+  longitude: number;
+  heading: number;
+};
+
 const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null }) => {
   const mapRef = useRef<MapView>(null);
+  const headingRef = useRef(0);
+  const lastCameraRef = useRef<CameraSnapshot | null>(null);
+  const hasMountedCameraRef = useRef(false);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -248,6 +255,38 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
   const [heading, setHeading] = useState(0);
   const [locationReady, setLocationReady] = useState(false);
 
+  const syncCamera = (
+    latitude: number,
+    longitude: number,
+    nextHeading: number,
+    duration: number,
+    force = false,
+  ) => {
+    const lastCamera = lastCameraRef.current;
+    const headingDelta = lastCamera ? Math.abs(lastCamera.heading - nextHeading) : Number.POSITIVE_INFINITY;
+    const movedMeters = lastCamera
+      ? getDistance(
+          { latitude: lastCamera.latitude, longitude: lastCamera.longitude },
+          { latitude, longitude },
+        )
+      : Number.POSITIVE_INFINITY;
+
+    if (!force && lastCamera && movedMeters < 4 && headingDelta < 8) {
+      return;
+    }
+
+    lastCameraRef.current = { latitude, longitude, heading: nextHeading };
+    mapRef.current?.animateCamera(
+      {
+        center: { latitude, longitude },
+        heading: nextHeading,
+        pitch: 68,
+        zoom: 19,
+      },
+      { duration }
+    );
+  };
+
   useEffect(() => {
     let subscription: Location.LocationSubscription | null = null;
 
@@ -264,13 +303,13 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
           accuracy: Location.Accuracy.High,
         });
         const { latitude, longitude, heading: h } = first.coords;
+        const resolvedHeading = h || 0;
         setRegion(prev => ({ ...prev, latitude, longitude }));
-        setHeading(h || 0);
+        setHeading(resolvedHeading);
+        headingRef.current = resolvedHeading;
         setLocationReady(true);
-        mapRef.current?.animateCamera(
-          { center: { latitude, longitude }, heading: h || 0, pitch: 68, zoom: 19 },
-          { duration: 400 }
-        );
+        syncCamera(latitude, longitude, resolvedHeading, 400, true);
+        hasMountedCameraRef.current = true;
       } catch {
         setLocationReady(true);
       }
@@ -279,13 +318,12 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
         { accuracy: Location.Accuracy.Highest, distanceInterval: 2, timeInterval: 1500 },
         (loc) => {
           const { latitude, longitude, heading: h } = loc.coords;
-          const newHeading = (h !== null && !isNaN(h)) ? h : heading;
+          const newHeading = (h !== null && !isNaN(h)) ? h : headingRef.current;
           setRegion(prev => ({ ...prev, latitude, longitude }));
           setHeading(newHeading);
-          mapRef.current?.animateCamera(
-            { center: { latitude, longitude }, heading: newHeading, pitch: 68, zoom: 19 },
-            { duration: 800 }
-          );
+          headingRef.current = newHeading;
+          syncCamera(latitude, longitude, newHeading, hasMountedCameraRef.current ? 800 : 400, !hasMountedCameraRef.current);
+          hasMountedCameraRef.current = true;
         }
       );
     };
@@ -298,10 +336,8 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
     if (currentPosition) {
       const [longitude, latitude] = currentPosition;
       setRegion(prev => ({ ...prev, latitude, longitude }));
-      mapRef.current?.animateCamera(
-        { center: { latitude, longitude }, heading, pitch: 68, zoom: 19 },
-        { duration: 400 }
-      );
+      syncCamera(latitude, longitude, headingRef.current, 400, true);
+      hasMountedCameraRef.current = true;
     }
   }, [currentPosition]);
 
@@ -354,8 +390,8 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  map: { width: screen.width, height: screen.height },
+  container: { ...StyleSheet.absoluteFillObject },
+  map: { ...StyleSheet.absoluteFillObject },
   markerWrap: { alignItems: 'center', justifyContent: 'center' },
   markerImg: { width: 52, height: 52, resizeMode: 'contain' },
 });

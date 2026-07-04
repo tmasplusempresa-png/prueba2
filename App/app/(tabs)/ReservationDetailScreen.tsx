@@ -231,8 +231,8 @@ Te confirmo, estos son los datos de tu servicio:
               <InfoRow icon="layers" label="Categoría" value={reservation.car_type || 'N/A'} />
               <InfoRow icon="document-text" label="Placa" value={reservation.plate_number || reservation.vehicle_number || 'N/A'} />
               <InfoRow icon="car" label="Marca" value={reservation.vehicle_make || 'N/A'} />
-              <InfoRow icon="construct" label="Modelo" value={reservation.vehicle_model || 'N/A'} />
-              <InfoRow icon="color-palette" label="Color" value={reservation.vehicle_color || 'N/A'} />
+              <InfoRow icon="construct" label="Modelo" value={reservation.vehicle_model || reservation.car_model || 'N/A'} />
+              <InfoRow icon="color-palette" label="Color" value={reservation.vehicle_color || reservation.car_color || 'N/A'} />
               <InfoRow icon="list" label="Línea" value={reservation.car_model || 'N/A'} />
             </View>
           </Animatable.View>

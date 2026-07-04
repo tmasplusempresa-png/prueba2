@@ -2,45 +2,73 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
   Platform, ActivityIndicator, Dimensions, Keyboard, KeyboardAvoidingView,
-  TouchableWithoutFeedback, Animated, Modal,
+  TouchableWithoutFeedback, Animated,
 } from 'react-native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { GooglePlacesAutocomplete } from 'react-native-google-places-autocomplete';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
+import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { RootState } from '@/common/store';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { FareCalculator } from '@/common/actions/FareCalculator';
 
-const { width: SW, height: SH } = Dimensions.get('window');
+const { width: SW } = Dimensions.get('window');
 
 const GOOGLE_MAPS_KEY = API_KEY;
 
-const VEHICLE_TYPES = [
-  { key: 'T+Plus Especial', label: 'Especial', icon: 'car-sport' as const },
-  { key: 'Particular', label: 'Particular', icon: 'car' as const },
-  { key: 'Van', label: 'Van', icon: 'bus' as const },
-  { key: 'Taxi', label: 'Taxi', icon: 'car-outline' as const },
+type VehicleType = { key: string; label: string; icon: 'car-sport' | 'car' | 'bus' | 'car-outline' };
+
+const VEHICLE_ICON_MAP: Record<string, VehicleType['icon']> = {
+  ConfortPlus: 'car-sport',
+  XPlus:       'car',
+  VanPlus:     'bus',
+  TaxiPlus:    'car-outline',
+};
+
+// Fallback mientras Supabase carga — valores reales de car_types
+const DEFAULT_VEHICLE_TYPES: VehicleType[] = [
+  { key: 'ConfortPlus', label: 'ConfortPlus', icon: 'car-sport' },
+  { key: 'XPlus',       label: 'XPlus',       icon: 'car'       },
+  { key: 'VanPlus',     label: 'VanPlus',     icon: 'bus'       },
+  { key: 'TaxiPlus',    label: 'TaxiPlus',    icon: 'car-outline'},
 ];
 
-// ⭐ Configuración de tarifas dinámicas por tipo de vehículo (basado en TripPreviewScreen)
-const VEHICLE_TARIFF_CONFIG: Record<string, { base: number; perKm: number; perMin: number; minFare: number }> = {
-  'T+Plus Especial': { base: 12000, perKm: 3000, perMin: 350, minFare: 15000 },
-  'Particular': { base: 8000, perKm: 2500, perMin: 280, minFare: 12000 },
-  'Van': { base: 15000, perKm: 3500, perMin: 400, minFare: 18000 },
-  'Taxi': { base: 6500, perKm: 1700, perMin: 260, minFare: 10000 },
+const DEFAULT_VEHICLE_RATES: Record<string, any> = {
+  ConfortPlus: { base_fare:24125, base_fare_inter:48250,  rate_per_unit_distance:660,   rate_per_unit_distance_inter:1320, rate_per_hour:600,  rate_per_hour_inter:1200, min_fare:19200, min_fare_inter:38400,  delta_aeropuerto:12000, delta_aeropuerto_prog:5000, convenience_fees:0, convenience_fee_type:'flat', umbral_intermunicipal_km:29 },
+  XPlus:       { base_fare:11791, base_fare_inter:23582,  rate_per_unit_distance:16.80, rate_per_unit_distance_inter:34,   rate_per_hour:460,  rate_per_hour_inter:920,  min_fare:8400,  min_fare_inter:16800,  delta_aeropuerto:12000, delta_aeropuerto_prog:5000, convenience_fees:0, convenience_fee_type:'flat', umbral_intermunicipal_km:29 },
+  VanPlus:     { base_fare:55807, base_fare_inter:111614, rate_per_unit_distance:390,   rate_per_unit_distance_inter:780,  rate_per_hour:1400, rate_per_hour_inter:2800, min_fare:54000, min_fare_inter:108000, delta_aeropuerto:12000, delta_aeropuerto_prog:5000, convenience_fees:0, convenience_fee_type:'flat', umbral_intermunicipal_km:29 },
+  TaxiPlus:    { base_fare:14307, base_fare_inter:28614,  rate_per_unit_distance:540,   rate_per_unit_distance_inter:1080, rate_per_hour:426,  rate_per_hour_inter:852,  min_fare:8880,  min_fare_inter:17760,  delta_aeropuerto:12000, delta_aeropuerto_prog:5000, convenience_fees:0, convenience_fee_type:'flat', umbral_intermunicipal_km:29 },
 };
 
 const COLOMBIA_CENTER = { latitude: 4.6097, longitude: -74.0817, latitudeDelta: 0.08, longitudeDelta: 0.06 };
 
-const roundPrice = (n: number) => Math.round(n / 100) * 100;
+type FavoritePlace = {
+  id: string;
+  name: string;
+  description: string;
+  latitude: number;
+  longitude: number;
+  type_address: string | null;
+};
+
+const FAVORITE_TYPE_ICONS: Record<string, { icon: string; color: string }> = {
+  Casa: { icon: 'home', color: '#00E5FF' },
+  Trabajo: { icon: 'briefcase', color: '#FFFFFF' },
+  Gimnasio: { icon: 'dumbbell', color: '#00E5FF' },
+  Supermercado: { icon: 'cart', color: '#00E676' },
+  Parque: { icon: 'tree', color: '#69F0AE' },
+  Escuela: { icon: 'school', color: '#00E5FF' },
+  Restaurante: { icon: 'silverware-fork-knife', color: '#E91E63' },
+  Otro: { icon: 'map-marker-radius', color: '#FFFFFF' },
+};
 
 const generateUID = () =>
   'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -53,24 +81,6 @@ const generateReference = () => {
   let ref = '';
   for (let i = 0; i < 6; i++) ref += chars.charAt(Math.floor(Math.random() * chars.length));
   return ref;
-};
-
-// ⭐ FUNCIÓN PARA OBTENER PRECIO FIJO DE PROGRAMADO
-const SCHEDULED_PRICE_FIELD = (carTypeData: any) => {
-  if (carTypeData?.min_fare && carTypeData.min_fare > 0) {
-    return parseFloat(carTypeData.min_fare);
-  }
-  if (carTypeData?.base_price_inter && carTypeData.base_price_inter > 0) {
-    return parseFloat(carTypeData.base_price_inter);
-  }
-  return parseFloat(carTypeData?.base_price) || 15000;
-};
-
-// ⭐ FUNCIÓN PARA INICIALIZAR HORA: AHORA +5 MIN
-const getInitialScheduledDate = () => {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() + 5);
-  return d;
 };
 
 /* ─────────── SCREEN ─────────── */
@@ -95,22 +105,22 @@ const CreateReservationScreen = () => {
   const destAutoRef = useRef<any>(null);
   const sessionTokenOrigin = useRef<string | null>(null);
   const sessionTokenDest = useRef<string | null>(null);
-  const expandedMapRef = useRef<MapView>(null);
 
   const [myLat, setMyLat] = useState(COLOMBIA_CENTER.latitude);
   const [myLng, setMyLng] = useState(COLOMBIA_CENTER.longitude);
   const [origin, setOrigin] = useState<any>(params.origin || null);
   const [destination, setDestination] = useState<any>(params.destination || null);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
-  const [showExpandedMap, setShowExpandedMap] = useState(false);
+  const [relocatingMarker, setRelocatingMarker] = useState<'origin' | 'destination' | null>(null);
+  const [tempMarkerCoord, setTempMarkerCoord] = useState<{ latitude: number; longitude: number } | null>(null);
 
   /* ── Trip details ── */
-  const [carType, setCarType] = useState(params.carType || 'T+Plus Especial');
+  const [carType, setCarType] = useState<string>(params.carType || DEFAULT_VEHICLE_TYPES[0].key);
+  const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>(DEFAULT_VEHICLE_TYPES);
   const [tripType, setTripType] = useState<'Ida' | 'Ida y Vuelta'>('Ida');
-  const [bookingMode, setBookingMode] = useState<'immediate' | 'scheduled'>('immediate');
-  const [scheduledDate, setScheduledDate] = useState<Date>(getInitialScheduledDate());
+  const [serviceType, setServiceType] = useState<'immediate' | 'reservation'>('immediate');
+  const [scheduledDate, setScheduledDate] = useState<Date | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [showTimePicker, setShowTimePicker] = useState(false);
   const [observations, setObservations] = useState('');
   const [paymentMode, setPaymentMode] = useState<'cash' | 'nequi' | 'daviplata'>('cash');
 
@@ -121,9 +131,13 @@ const CreateReservationScreen = () => {
   const [clientPrice, setClientPrice] = useState(params.clientPrice || 0);
   const [calculating, setCalculating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [vehicleRates, setVehicleRates] = useState<Record<string, any>>(DEFAULT_VEHICLE_RATES);
 
   /* ── UI state ── */
   const [step, setStep] = useState<'map' | 'details'>(params.origin ? 'details' : 'map');
+
+  /* ── Favorite places ── */
+  const [favoritePlaces, setFavoritePlaces] = useState<FavoritePlace[]>([]);
 
   const customerName = [
     profile?.first_name || user?.first_name || user?.user_metadata?.first_name || user?.user_metadata?.nombre || '',
@@ -170,6 +184,89 @@ const CreateReservationScreen = () => {
     })();
   }, []);
 
+  /* ── Cargar vehículos y tarifas desde car_types ── */
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('car_types')
+          .select('name,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,rate_per_hour_inter,min_fare,min_fare_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_type,umbral_intermunicipal_km')
+          .eq('is_active', true)
+          .order('created_at', { ascending: true });
+        if (error || !data?.length) return;
+
+        const rates: Record<string, any> = {};
+        const types: VehicleType[] = [];
+
+        data.forEach((car: any) => {
+          rates[car.name] = {
+            base_fare:                   parseFloat(car.base_price) || 0,
+            base_fare_inter:             parseFloat(car.base_price_inter) || 0,
+            rate_per_unit_distance:      parseFloat(car.price_per_km) || 0,
+            rate_per_unit_distance_inter:parseFloat(car.price_per_km_inter) || 0,
+            rate_per_hour:               parseFloat(car.rate_per_hour) || 0,
+            rate_per_hour_inter:         parseFloat(car.rate_per_hour_inter) || 0,
+            min_fare:                    parseFloat(car.min_fare) || 0,
+            min_fare_inter:              parseFloat(car.min_fare_inter) || 0,
+            delta_aeropuerto:            parseFloat(car.delta_aeropuerto) || 0,
+            delta_aeropuerto_prog:       parseFloat(car.delta_aeropuerto_prog) || 0,
+            convenience_fees:            parseFloat(car.convenience_fee) || 0,
+            convenience_fee_type:        car.convenience_fee_type || 'flat',
+            umbral_intermunicipal_km:    parseFloat(car.umbral_intermunicipal_km) || 29,
+          };
+          types.push({
+            key: car.name,
+            label: car.name,
+            icon: VEHICLE_ICON_MAP[car.name] ?? 'car',
+          });
+        });
+
+        setVehicleRates(rates);
+        setVehicleTypes(types);
+        setCarType(prev => (prev && rates[prev] ? prev : types[0]?.key ?? ''));
+      } catch (e) {
+        console.warn('[CreateReservation] Error cargando tarifas:', e);
+      }
+    })();
+  }, []);
+
+  /* ── Load favorite places from Supabase ── */
+  useEffect(() => {
+    (async () => {
+      const authId = user?.id || user?.auth_id || profile?.auth_id || profile?.id;
+      if (!authId) return;
+      try {
+        const headers = await getSupabaseAuthHeaders(true);
+        const userUrl = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=id&limit=1`;
+        const userResp = await fetch(userUrl, { headers });
+        if (!userResp.ok) return;
+        const userRows = await userResp.json();
+        const uid = userRows?.[0]?.id;
+        if (!uid) return;
+        const favUrl = `${SUPABASE_URL}/rest/v1/favorite_places?user_id=eq.${encodeURIComponent(uid)}&is_favorite=eq.true&order=usage_count.desc,created_at.desc&limit=5`;
+        const favResp = await fetch(favUrl, { headers });
+        if (!favResp.ok) return;
+        const rows = await favResp.json();
+        setFavoritePlaces(rows || []);
+      } catch (e) { console.warn('[CreateReservation] loadFavorites error:', e); }
+    })();
+  }, [user, profile]);
+
+  const handleSelectFavorite = (place: FavoritePlace) => {
+    setDestination({
+      latitude: place.latitude,
+      longitude: place.longitude,
+      title: place.description,
+    });
+    destAutoRef.current?.setAddressText(place.description);
+    sessionTokenDest.current = null;
+    Keyboard.dismiss();
+    mapRef.current?.animateToRegion(
+      { latitude: place.latitude, longitude: place.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+      600,
+    );
+  };
+
   /* ── Keyboard listener for smooth animation ── */
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -211,34 +308,6 @@ const CreateReservationScreen = () => {
     };
   }, [keyboardOffsetAnim, mapKeyboardOffsetAnim]);
 
-  useEffect(() => {
-    if (!origin?.latitude || !destination?.latitude) {
-      setRouteCoords([]);
-      return;
-    }
-    (async () => {
-      try {
-        const token = getMapboxAccessToken();
-        if (token) {
-          const coords = `${origin.longitude},${origin.latitude};${destination.longitude},${destination.latitude}`;
-          const res = await axios.get(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}`, {
-            params: { geometries: 'geojson', overview: 'full', access_token: token },
-          });
-          const geom = res?.data?.routes?.[0]?.geometry;
-          if (geom?.coordinates?.length) {
-            setRouteCoords(geom.coordinates.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
-          }
-        }
-      } catch {}
-    })();
-  }, [origin, destination]);
-
-  /* ── Calculate price when route available ── */
-  useEffect(() => {
-    if (!origin?.latitude || !destination?.latitude) return;
-    calculateRoute();
-  }, [origin, destination, tripType]);
-
   /* ── Fit map to both markers ── */
   useEffect(() => {
     if (origin?.latitude && destination?.latitude && mapRef.current) {
@@ -261,52 +330,22 @@ const CreateReservationScreen = () => {
     if (!origin?.latitude || !destination?.latitude) return;
     setCalculating(true);
     try {
-      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.latitude},${origin.longitude}&destination=${destination.latitude},${destination.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`;
-      const resp = await fetch(url);
-      const data = await resp.json();
-      
-      if (data.routes?.length > 0) {
-        const leg = data.routes[0].legs[0];
-        const distKm = leg.distance.value / 1000;
-        const durMin = leg.duration.value / 60;
-        const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
-        
-        setDistance(distKm);
-        setDuration(durMin);
+      const token = getMapboxAccessToken();
+      if (!token) throw new Error('No Mapbox token');
 
-        // ⭐ DIFERENCIAR PRECIO SEGÚN MODO Y TIPO DE VEHÍCULO
-        const vehicleConfig = VEHICLE_TARIFF_CONFIG[carType];
-        
-        if (bookingMode === 'immediate') {
-          // ⚡ DINÁMICO: según distancia, tiempo y tipo de vehículo
-          const distanceComponent = distKm * vehicleConfig.perKm;
-          const timeComponent = durMin * vehicleConfig.perMin;
-          const rawEstimate = vehicleConfig.base + distanceComponent + timeComponent;
-          const safeEstimate = Math.max(rawEstimate, vehicleConfig.minFare);
-          const base = roundPrice(safeEstimate * mult);
-          
-          setDriverPrice(base);
-          setClientPrice(roundPrice(base + 5000));
-          console.log(`⚡ INMEDIATO [${carType}] - Precio dinámico: ${base}`, { distanceComponent, timeComponent, rawEstimate });
-        } else {
-          // 📅 FIJO: combinación de Supabase + configuración de tarifas
-          const carData = params.carTypeData;
-          
-          // Intenta obtener precio fijo de Supabase primero
-          let fixedPrice = SCHEDULED_PRICE_FIELD(carData);
-          
-          // Si Supabase no tiene datos útiles, calcula basado en vehicleConfig
-          if (!fixedPrice || fixedPrice < vehicleConfig.minFare) {
-            // Para programado, usa tarifa base + componente mínima como precio fijo
-            const scheduledBase = vehicleConfig.base + (vehicleConfig.minFare * 0.5);
-            fixedPrice = roundPrice(scheduledBase);
-          }
-          
-          const finalPrice = mult === 2 ? roundPrice(fixedPrice * 2) : roundPrice(fixedPrice);
-          setDriverPrice(finalPrice);
-          setClientPrice(roundPrice(finalPrice + 2000));
-          console.log(`📅 PROGRAMADO [${carType}] - Precio fijo: ${finalPrice}`, { fromSupabase: SCHEDULED_PRICE_FIELD(carData), fromConfig: vehicleConfig.minFare });
-        }
+      const coords = `${origin.longitude},${origin.latitude};${destination.longitude},${destination.latitude}`;
+      const res = await axios.get(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}`, {
+        params: { geometries: 'geojson', overview: 'full', access_token: token },
+      });
+
+      const route = res?.data?.routes?.[0];
+      if (!route) return;
+
+      setDistance(route.distance / 1000);
+      setDuration(route.duration / 60);
+
+      if (route.geometry?.coordinates?.length) {
+        setRouteCoords(route.geometry.coordinates.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
       }
     } catch (e) {
       console.error('Route calc error:', e);
@@ -315,26 +354,105 @@ const CreateReservationScreen = () => {
     }
   };
 
-  /* ── Update scheduledDate when bookingMode changes ── */
+  // Recalcula precio cada vez que cambia distancia, tiempo, vehículo o tarifas.
+  // Separado de calculateRoute para que funcione aunque Supabase cargue después de Mapbox.
   useEffect(() => {
-    if (bookingMode === 'immediate') {
-      const d = new Date();
-      d.setMinutes(d.getMinutes() + 5);
-      setScheduledDate(d);
-    } else {
-      const d = new Date();
-      d.setHours(d.getHours() + 1);
-      d.setMinutes(0);
-      setScheduledDate(d);
-    }
-  }, [bookingMode]);
+    if (!distance || !duration) return;
+    const rates = vehicleRates[carType] ?? Object.values(vehicleRates)[0];
+    if (!rates) return;
 
-  /* ── Recalcular cuando cambia modo, vehículo o ruta ── */
+    const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
+    const isAirport = (origin?.title || '').toLowerCase().includes('aero') ||
+                      (destination?.title || '').toLowerCase().includes('aero');
+    const isScheduled = serviceType === 'reservation';
+    const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || 29);
+
+    const { totalCost, clientTotal } = FareCalculator(
+      distance * mult,
+      duration * 60 * mult,
+      rates,
+      null,
+      2,
+      { isAirport, isScheduled, isIntermunicipal },
+    );
+
+    setDriverPrice(totalCost);
+    setClientPrice(clientTotal);
+  }, [distance, duration, carType, vehicleRates, tripType, serviceType, origin, destination]);
+
   useEffect(() => {
-    if (origin?.latitude && destination?.latitude) {
-      calculateRoute();
+    if (!origin?.latitude || !destination?.latitude) {
+      setRouteCoords([]);
+      setDistance(0);
+      setDuration(0);
+      return;
     }
-  }, [bookingMode, carType, tripType, origin, destination]);
+    calculateRoute();
+  }, [origin, destination, tripType]);
+
+
+  /* ── Click-to-Relocate Handlers ── */
+  const handleOriginPress = () => {
+    setRelocatingMarker('origin');
+    setTempMarkerCoord(null);
+  };
+  
+  const handleDestinationPress = () => {
+    setRelocatingMarker('destination');
+    setTempMarkerCoord(null);
+  };
+  
+  const handleMapPress = async (e: any) => {
+    if (!relocatingMarker) return;
+    
+    const { coordinate } = e.nativeEvent;
+    setTempMarkerCoord(coordinate);
+    
+    try {
+      // Reverse geocode para obtener la dirección
+      const resp = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${coordinate.latitude},${coordinate.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
+      );
+      const data = await resp.json();
+      const addr = data.results?.[0]?.formatted_address || 'Nueva ubicación';
+      
+      if (relocatingMarker === 'origin') {
+        setOrigin({
+          latitude: coordinate.latitude,
+          longitude: coordinate.longitude,
+          title: addr,
+        });
+        originAutoRef.current?.setAddressText(addr);
+      } else {
+        setDestination({
+          latitude: coordinate.latitude,
+          longitude: coordinate.longitude,
+          title: addr,
+        });
+        destAutoRef.current?.setAddressText(addr);
+      }
+    } catch (err) {
+      console.error('Error geocoding:', err);
+      if (relocatingMarker === 'origin') {
+        setOrigin({
+          latitude: coordinate.latitude,
+          longitude: coordinate.longitude,
+          title: 'Nueva ubicación (Origen)',
+        });
+        originAutoRef.current?.setAddressText('Nueva ubicación (Origen)');
+      } else {
+        setDestination({
+          latitude: coordinate.latitude,
+          longitude: coordinate.longitude,
+          title: 'Nueva ubicación (Destino)',
+        });
+        destAutoRef.current?.setAddressText('Nueva ubicación (Destino)');
+      }
+    } finally {
+      setRelocatingMarker(null);
+      setTempMarkerCoord(null);
+    }
+  };
 
   /* ── Animar mapa cuando aparece la ruta ── */
   useEffect(() => {
@@ -391,7 +509,14 @@ const CreateReservationScreen = () => {
       const loc = { latitude, longitude, title: 'Ubicación seleccionada' };
       if (type === 'origin') setOrigin(loc);
       else setDestination(loc);
+    } finally {
+      setRelocatingMarker(null); // 🆕 Clear dragging state
     }
+  };
+  
+  // 🆕 Handle drag start - visual feedback
+  const handleMarkerDragStart = (type: 'origin' | 'destination') => {
+    setRelocatingMarker(type);
   };
 
   /* ── Center on my location ── */
@@ -401,36 +526,23 @@ const CreateReservationScreen = () => {
     }
   };
 
-  /* ── Date / Time handlers ── */
-  const handleDateConfirm = (date: Date) => {
-    setScheduledDate(prev => {
-      const d = new Date(date);
-      d.setHours(prev.getHours(), prev.getMinutes());
-      return d;
-    });
-    setShowDatePicker(false);
+  /* ── Zoom controls ── */
+  const handleZoomIn = () => {
+    if (mapRef.current) {
+      mapRef.current.getCamera().then((cam: any) => {
+        mapRef.current?.animateCamera({ zoom: cam.zoom + 1 }, { duration: 300 });
+      });
+    }
   };
-  const handleTimeConfirm = (time: Date) => {
-    setScheduledDate(prev => {
-      const d = new Date(prev);
-      d.setHours(time.getHours(), time.getMinutes(), 0, 0);
-      return d;
-    });
-    setShowTimePicker(false);
+
+  const handleZoomOut = () => {
+    if (mapRef.current) {
+      mapRef.current.getCamera().then((cam: any) => {
+        mapRef.current?.animateCamera({ zoom: Math.max(cam.zoom - 1, 3) }, { duration: 300 });
+      });
+    }
   };
-  const fmtDate = (d: Date) => {
-    const days = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
-    const months = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
-    return `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
-  };
-  const fmtTime = (d: Date) => {
-    let h = d.getHours();
-    const m = d.getMinutes().toString().padStart(2, '0');
-    const ampm = h >= 12 ? 'p.m.' : 'a.m.';
-    if (h > 12) h -= 12;
-    if (h === 0) h = 12;
-    return `${h}:${m} ${ampm}`;
-  };
+
 
   const canContinue = !!origin && !!destination && distance > 0 && !calculating;
   const canSubmit = canContinue && !saving;
@@ -447,29 +559,72 @@ const CreateReservationScreen = () => {
     setAlertVisible(true);
   };
 
+  const isUuid = (value?: string | null) => {
+    if (!value) return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  };
+
+  const resolveCustomerId = async (): Promise<string> => {
+    const candidates = [user?.auth_id, user?.id, profile?.auth_id, profile?.id]
+      .map((value) => String(value || '').trim())
+      .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index);
+
+    if (candidates.length === 0) {
+      throw new Error('No se pudo resolver el usuario cliente.');
+    }
+
+    const headers = await getSupabaseAuthHeaders();
+
+    // 1) Buscar coincidencia directa en users.id
+    for (const candidate of candidates) {
+      if (!isUuid(candidate)) continue;
+
+      const byIdUrl = `${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidate)}&select=id&limit=1`;
+      const byIdResp = await fetch(byIdUrl, { method: 'GET', headers });
+      const byIdData = await byIdResp.json();
+
+      if (Array.isArray(byIdData) && byIdData.length > 0 && byIdData[0]?.id) {
+        return byIdData[0].id;
+      }
+    }
+
+    // 2) Si no existe en id, buscar por auth_id
+    for (const candidate of candidates) {
+      if (!isUuid(candidate)) continue;
+
+      const byAuthIdUrl = `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidate)}&select=id&limit=1`;
+      const byAuthResp = await fetch(byAuthIdUrl, { method: 'GET', headers });
+      const byAuthData = await byAuthResp.json();
+
+      if (Array.isArray(byAuthData) && byAuthData.length > 0 && byAuthData[0]?.id) {
+        return byAuthData[0].id;
+      }
+    }
+
+    throw new Error('No se encontró el perfil del cliente en users.');
+  };
+
   /* ── Submit reservation ── */
   const handleSubmit = async () => {
     if (!origin || !destination) { showAlert('error', 'Error', 'Selecciona origen y destino.'); return; }
-    if (scheduledDate <= new Date()) { showAlert('error', 'Error', 'La fecha y hora deben ser en el futuro.'); return; }
     if (distance <= 0) { showAlert('error', 'Error', 'No se pudo calcular la ruta.'); return; }
+    if (serviceType === 'reservation' && !scheduledDate) {
+      showAlert('error', 'Fecha requerida', 'Selecciona la fecha y hora del servicio programado.');
+      return;
+    }
     setSaving(true);
     try {
       const headers = await getSupabaseAuthHeaders(true);
-      const userId = user?.auth_id || user?.id;
-      
-      // Determinar tipo de reserva según booking mode
-      const isImmediate = bookingMode === 'immediate';
-      
-      // DEBUG: Verificar qué modo se está guardando
-      console.log('🔍 DEBUG SUBMIT:', { bookingMode, isImmediate, willSaveAs: isImmediate ? 'immediate' : 'reservation' });
-      
+      const userId = await resolveCustomerId();
+
+      const bookingDateToUse = serviceType === 'reservation' && scheduledDate ? scheduledDate : new Date();
+
       const body = {
-        booking_type: isImmediate ? 'immediate' : 'reservation',
-        // booking_mode: bookingMode,  // TODO: Agregar columna a DB y descomentar después de migración SQL
-        status: 'PENDING', // Ambos tipos comienzan como PENDING para mostrar en "Pendientes"
-        customer_status: isImmediate ? 'SEARCHING' : 'NEW',
+        booking_type: serviceType,
+        status: 'PENDING',
+        customer_status: 'SEARCHING',
         reference: generateReference(),
-        booking_date: scheduledDate.toISOString(),
+        booking_date: bookingDateToUse.toISOString(),
         customer: userId,
         customer_id: userId,
         customer_name: customerName,
@@ -518,7 +673,13 @@ const CreateReservationScreen = () => {
         } }],
       );
     } catch (e: any) {
-      showAlert('error', 'Error', 'No se pudo crear la reserva. Intenta de nuevo.');
+      const raw = String(e?.message || 'Error desconocido');
+      let detail = raw;
+      try {
+        const parsed = JSON.parse(raw);
+        detail = parsed?.message || parsed?.details || raw;
+      } catch {}
+      showAlert('error', 'Error al crear reserva', `No se pudo crear la reserva. ${detail}`);
       console.error('CreateReservation error:', e);
     } finally {
       setSaving(false);
@@ -579,48 +740,132 @@ const CreateReservationScreen = () => {
               showsUserLocation
               showsMyLocationButton={false}
               initialRegion={{ latitude: myLat, longitude: myLng, latitudeDelta: 0.015, longitudeDelta: 0.015 }}
-              zoomControlEnabled
+              zoomControlEnabled={false}
               loadingEnabled
               loadingIndicatorColor="#00E5FF"
+              onPress={handleMapPress}
             >
-              {origin && (
+              {origin && relocatingMarker !== 'origin' && (
                 <Marker
                   coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                  title="Origen"
+                  title="📍 Origen"
                   description={origin.title}
                   draggable
+                  onPress={handleOriginPress}
+                  onDragStart={() => handleMarkerDragStart('origin')}
                   onDragEnd={e => handleMarkerDragEnd(e, 'origin')}
-                  pinColor="#00E676"
-                />
-              )}
-              {destination && (
-                <Marker
-                  coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-                  title="Destino"
-                  description={destination.title}
-                  draggable
-                  onDragEnd={e => handleMarkerDragEnd(e, 'destination')}
                 >
-                  <Ionicons name="location" size={36} color="#00f4f5" />
+                  <View style={{
+                    backgroundColor: '#00FF7F',
+                    borderRadius: 50,
+                    padding: 8,
+                    borderWidth: 3,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#00FF7F',
+                    shadowOffset: { width: 0, height: 0 },
+                    shadowOpacity: 0.8,
+                    shadowRadius: 8,
+                    elevation: 10,
+                  }}>
+                    <Ionicons name="location" size={18} color="#051A26" style={{ fontWeight: '900' }} />
+                  </View>
                 </Marker>
               )}
-              {routeCoords.length > 0 && (
+              {destination && relocatingMarker !== 'destination' && (
+                <Marker
+                  coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
+                  title="🚩 Destino"
+                  description={destination.title}
+                  draggable
+                  onPress={handleDestinationPress}
+                  onDragStart={() => handleMarkerDragStart('destination')}
+                  onDragEnd={e => handleMarkerDragEnd(e, 'destination')}
+                >
+                  <View style={{
+                    backgroundColor: '#E91E63',
+                    borderRadius: 50,
+                    padding: 8,
+                    borderWidth: 3,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#E91E63',
+                    shadowOffset: { width: 0, height: 0 },
+                    shadowOpacity: 0.7,
+                    shadowRadius: 8,
+                    elevation: 10,
+                  }}>
+                    <Ionicons name="flag" size={18} color="#FFFFFF" style={{ fontWeight: '900' }} />
+                  </View>
+                </Marker>
+              )}
+              {/* 🆕 Marcador temporal mientras se reubica */}
+              {relocatingMarker && tempMarkerCoord && (
+                <Marker
+                  coordinate={tempMarkerCoord}
+                  title={relocatingMarker === 'origin' ? '✓ Nuevo Origen' : '✓ Nuevo Destino'}
+                  opacity={0.9}
+                >
+                  <View style={{
+                    backgroundColor: relocatingMarker === 'origin' ? '#00FF88' : '#FF8800',
+                    borderRadius: 50,
+                    padding: 8,
+                    borderWidth: 2.5,
+                    borderColor: '#FFFFFF',
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 3 },
+                    shadowOpacity: 0.6,
+                    shadowRadius: 4,
+                    elevation: 8,
+                  }}>
+                    <Ionicons name="checkmark" size={16} color="#FFFFFF" style={{ fontWeight: '800' }} />
+                  </View>
+                </Marker>
+              )}
+              {routeCoords.length > 1 && (
                 <Polyline
                   coordinates={routeCoords}
-                  strokeColor="#00E5FF"
-                  strokeWidth={4}
-                  lineDashPattern={[]}
-                  geodesic
+                  strokeColor="#00E676"
+                  strokeWidth={6}
                   lineJoin="round"
                   lineCap="round"
                 />
               )}
             </MapView>
 
+            {/* Zoom controls */}
+            <View style={st.zoomControls}>
+              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomIn} activeOpacity={0.8}>
+                <Ionicons name="add" size={20} color="#00E5FF" />
+              </TouchableOpacity>
+              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomOut} activeOpacity={0.8}>
+                <Ionicons name="remove" size={20} color="#00E5FF" />
+              </TouchableOpacity>
+            </View>
+
             {/* Center on my location */}
             <TouchableOpacity style={st.myLocBtn} onPress={centerOnMe} activeOpacity={0.8}>
               <Ionicons name="locate" size={22} color="#00E5FF" />
             </TouchableOpacity>
+
+            {/* 🆕 Banner de instrucciones cuando se está reubicando */}
+            {relocatingMarker && (
+              <View style={st.relocatingBanner}>
+                <Ionicons name="hand-left-outline" size={18} color="#00E5FF" />
+                <Text style={st.relocatingText}>
+                  {`Toca el mapa para ubicar el ${relocatingMarker === 'origin' ? 'origen' : 'destino'}`}
+                </Text>
+                <TouchableOpacity onPress={() => setRelocatingMarker(null)} style={st.cancelRelocateBtn}>
+                  <Ionicons name="close" size={18} color="#FFF" />
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* 🆕 Hint discreto cuando no se está reubicando y hay markers */}
+            {!relocatingMarker && origin && destination && (
+              <View style={st.mapHintPill}>
+                <Ionicons name="information-circle-outline" size={14} color="#00E5FF" />
+                <Text style={st.mapHintText}>Toca o arrastra los marcadores para reubicar</Text>
+              </View>
+            )}
           </View>
 
           {/* Search panel - Animated */}
@@ -687,6 +932,46 @@ const CreateReservationScreen = () => {
               />
             </View>
 
+            {/* Favorite places chips */}
+            {favoritePlaces.length > 0 && (
+              <View style={st.favoritesSection}>
+                <View style={st.favoritesHeader}>
+                  <Ionicons name="star" size={12} color="#00E5FF" />
+                  <Text style={st.favoritesTitle}>Tus lugares favoritos</Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={st.favoritesRow}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  {favoritePlaces.map(place => {
+                    const typeInfo = place.type_address ? FAVORITE_TYPE_ICONS[place.type_address] : null;
+                    return (
+                      <TouchableOpacity
+                        key={place.id}
+                        style={st.favoriteChip}
+                        onPress={() => handleSelectFavorite(place)}
+                        activeOpacity={0.75}
+                      >
+                        <View style={[st.favoriteChipIcon, { borderColor: typeInfo?.color || '#00E5FF' }]}>
+                          {typeInfo ? (
+                            <MaterialCommunityIcons name={typeInfo.icon as any} size={16} color={typeInfo.color} />
+                          ) : (
+                            <Ionicons name="location" size={14} color="#00E5FF" />
+                          )}
+                        </View>
+                        <View style={st.favoriteChipText}>
+                          <Text style={st.favoriteChipName} numberOfLines={1}>{place.name}</Text>
+                          <Text style={st.favoriteChipAddr} numberOfLines={1}>{place.description}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            )}
+
             {/* Route summary chips */}
             {calculating && (
               <View style={st.routeSummary}>
@@ -698,64 +983,7 @@ const CreateReservationScreen = () => {
               <View style={st.routeSummary}>
                 <View style={st.routeChip}><Ionicons name="speedometer-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{distance.toFixed(1)} km</Text></View>
                 <View style={st.routeChip}><Ionicons name="time-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{Math.round(duration)} min</Text></View>
-                <View style={st.routeChip}><Ionicons name="cash-outline" size={14} color="#00E676" /><Text style={st.routeChipTxt}>$ {driverPrice.toLocaleString('es-CO')}</Text></View>
               </View>
-            )}
-
-            {/* Mini Map Preview */}
-            {origin && destination && (
-              <Animatable.View animation="fadeInUp" duration={400} delay={50} useNativeDriver>
-                <View style={st.miniMapContainer}>
-                  <View style={st.miniMapHeader}>
-                    <Text style={st.miniMapTitle}>Visualiza tu ruta</Text>
-                    <TouchableOpacity 
-                      style={st.expandMapBtn}
-                      onPress={() => setShowExpandedMap(true)}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="expand-outline" size={18} color="#00E5FF" />
-                    </TouchableOpacity>
-                  </View>
-                  <View style={st.miniMap}>
-                    <MapView
-                      style={{ width: '100%', height: 220 }}
-                      provider={PROVIDER_GOOGLE}
-                      scrollEnabled={false}
-                      zoomEnabled={false}
-                      pitchEnabled={false}
-                      rotateEnabled={false}
-                      region={{
-                        latitude: (origin.latitude + destination.latitude) / 2,
-                        longitude: (origin.longitude + destination.longitude) / 2,
-                        latitudeDelta: Math.max(Math.abs(origin.latitude - destination.latitude) * 1.6, 0.03),
-                        longitudeDelta: Math.max(Math.abs(origin.longitude - destination.longitude) * 1.6, 0.03),
-                      }}
-                    >
-                      <Marker
-                        coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                        pinColor="#00E676"
-                        title="Origen"
-                      />
-                      <Marker
-                        coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-                        pinColor="#E91E63"
-                        title="Destino"
-                      />
-                      {routeCoords.length > 0 && (
-                        <Polyline
-                          coordinates={routeCoords}
-                          strokeColor="#00E5FF"
-                          strokeWidth={3}
-                          lineDashPattern={[]}
-                          geodesic
-                          lineJoin="round"
-                          lineCap="round"
-                        />
-                      )}
-                    </MapView>
-                  </View>
-                </View>
-              </Animatable.View>
             )}
 
             {/* Continue button */}
@@ -816,36 +1044,49 @@ const CreateReservationScreen = () => {
             </View>
           </Animatable.View>
 
-          {/* ════ BOOKING MODE TOGGLE ════ */}
+          {/* Service type */}
           <Animatable.View animation="fadeInUp" duration={250} delay={0} useNativeDriver>
-            <Text style={st.label}>Tipo de Viaje</Text>
-            <View style={st.bookingModeRow}>
-              {[
-                { mode: 'immediate' as const, label: '⚡ Inmediato', desc: 'Ahora +5 min' },
-                { mode: 'scheduled' as const, label: '📅 Programado', desc: 'Elige la hora' },
-              ].map((b) => (
-                <TouchableOpacity
-                  key={b.mode}
-                  style={[st.bookingModeBtn, bookingMode === b.mode && st.bookingModeBtnActive]}
-                  onPress={() => setBookingMode(b.mode)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[st.bookingModeLabel, bookingMode === b.mode && st.bookingModeLabelActive]}>
-                    {b.label}
-                  </Text>
-                  <Text style={[st.bookingModeDesc, bookingMode === b.mode && st.bookingModeDescActive]}>
-                    {b.desc}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+            <Text style={st.label}>Tipo de Servicio</Text>
+            <View style={st.tripRow}>
+              <TouchableOpacity
+                style={[st.tripBtn, serviceType === 'immediate' && st.tripBtnActive]}
+                onPress={() => setServiceType('immediate')}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="flash" size={20} color={serviceType === 'immediate' ? '#051A26' : 'rgba(255,255,255,0.6)'} />
+                <Text style={[st.tripTxt, serviceType === 'immediate' && st.tripTxtActive]}>Inmediato</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[st.tripBtn, serviceType === 'reservation' && st.tripBtnActive]}
+                onPress={() => setServiceType('reservation')}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="calendar" size={20} color={serviceType === 'reservation' ? '#051A26' : 'rgba(255,255,255,0.6)'} />
+                <Text style={[st.tripTxt, serviceType === 'reservation' && st.tripTxtActive]}>Programado</Text>
+              </TouchableOpacity>
             </View>
+            {serviceType === 'reservation' && (
+              <TouchableOpacity
+                style={st.datePickerBtn}
+                onPress={() => setShowDatePicker(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="calendar-outline" size={18} color="#00E5FF" />
+                <Text style={st.datePickerTxt}>
+                  {scheduledDate
+                    ? scheduledDate.toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' })
+                    : 'Seleccionar fecha y hora'}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
+              </TouchableOpacity>
+            )}
           </Animatable.View>
 
           {/* Vehicle type */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={20} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={0} useNativeDriver>
             <Text style={st.label}>Tipo de Vehículo</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.vehicleRow}>
-              {VEHICLE_TYPES.map(v => (
+              {vehicleTypes.map(v => (
                 <TouchableOpacity
                   key={v.key}
                   style={[st.vehicleBtn, carType === v.key && st.vehicleBtnActive]}
@@ -860,7 +1101,7 @@ const CreateReservationScreen = () => {
           </Animatable.View>
 
           {/* Trip type */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={40} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={20} useNativeDriver>
             <Text style={st.label}>Tipo de Recorrido</Text>
             <View style={st.tripRow}>
               {(['Ida', 'Ida y Vuelta'] as const).map(t => (
@@ -877,41 +1118,10 @@ const CreateReservationScreen = () => {
             </View>
           </Animatable.View>
 
-          {/* Date - Solo si es PROGRAMADO */}
-          {bookingMode === 'scheduled' && (
-            <Animatable.View animation="fadeInUp" duration={250} delay={60} useNativeDriver>
-              <Text style={st.label}>Fecha</Text>
-              <TouchableOpacity style={st.infoCard} onPress={() => setShowDatePicker(true)} activeOpacity={0.8}>
-                <Ionicons name="calendar-outline" size={20} color="#00E5FF" />
-                <Text style={st.infoVal}>{fmtDate(scheduledDate)}</Text>
-                <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
-              </TouchableOpacity>
-            </Animatable.View>
-          )}
-
-          {/* Time - Mostrar siempre, pero con comportamiento diferente */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={bookingMode === 'scheduled' ? 80 : 60} useNativeDriver>
-            <Text style={st.label}>
-              {bookingMode === 'immediate' ? 'Hora (Automática)' : 'Hora'}
-            </Text>
-            <TouchableOpacity 
-              style={[st.infoCard, bookingMode === 'immediate' && { opacity: 0.6 }]} 
-              onPress={() => bookingMode === 'scheduled' && setShowTimePicker(true)}
-              disabled={bookingMode === 'immediate'}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="time-outline" size={20} color="#00E5FF" />
-              <Text style={st.infoVal}>
-                {bookingMode === 'immediate' ? `${fmtTime(scheduledDate)} ⚡` : fmtTime(scheduledDate)}
-              </Text>
-              {bookingMode === 'scheduled' && <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />}
-            </TouchableOpacity>
-          </Animatable.View>
-
           {/* Prices */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={100} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={80} useNativeDriver>
             <Text style={st.label}>
-              Valor Estimado {bookingMode === 'immediate' ? '⚡ (Dinámico)' : '📅 (Fijo)'}
+              Valor Estimado ⚡ (Dinámico)
             </Text>
             <View style={st.priceRow}>
               <View style={st.priceCard}>
@@ -926,7 +1136,7 @@ const CreateReservationScreen = () => {
           </Animatable.View>
 
           {/* Observations */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={120} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={100} useNativeDriver>
             <Text style={st.label}>Observaciones (opcional)</Text>
             <TextInput
               style={st.obsInput}
@@ -940,7 +1150,7 @@ const CreateReservationScreen = () => {
           </Animatable.View>
 
           {/* Payment method selector */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={140} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={120} useNativeDriver>
             <Text style={st.label}>Método de Pago</Text>
             <View style={st.payMethodRow}>
               {[
@@ -976,7 +1186,7 @@ const CreateReservationScreen = () => {
           </Animatable.View>
 
           {/* Submit */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={160} useNativeDriver>
+          <Animatable.View animation="fadeInUp" duration={250} delay={140} useNativeDriver>
             <TouchableOpacity
               style={[st.submitBtn, !canSubmit && { opacity: 0.5 }]}
               onPress={handleSubmit}
@@ -1003,74 +1213,14 @@ const CreateReservationScreen = () => {
         </KeyboardAvoidingView>
       )}
 
-      {/* Date/Time pickers */}
-      <DateTimePickerModal isVisible={showDatePicker} mode="date" minimumDate={new Date()} onConfirm={handleDateConfirm} onCancel={() => setShowDatePicker(false)} confirmTextIOS="Confirmar" cancelTextIOS="Cancelar" />
-      <DateTimePickerModal isVisible={showTimePicker} mode="time" onConfirm={handleTimeConfirm} onCancel={() => setShowTimePicker(false)} confirmTextIOS="Confirmar" cancelTextIOS="Cancelar" />
-
-      {/* Expanded Map Modal */}
-      <Modal visible={showExpandedMap} transparent={false} animationType="slide">
-        <View style={st.expandedMapContainer}>
-          <View style={st.expandedMapHeader}>
-            <TouchableOpacity onPress={() => setShowExpandedMap(false)} activeOpacity={0.7}>
-              <Ionicons name="chevron-down" size={28} color="#00E5FF" />
-            </TouchableOpacity>
-            <Text style={st.expandedMapTitle}>Ruta Completa</Text>
-            <View style={{ width: 28 }} />
-          </View>
-          
-          {origin && destination && (
-            <MapView
-              ref={expandedMapRef}
-              style={st.expandedMap}
-              provider={PROVIDER_GOOGLE}
-              scrollEnabled
-              zoomEnabled
-              pitchEnabled
-              rotateEnabled
-              region={{
-                latitude: (origin.latitude + destination.latitude) / 2,
-                longitude: (origin.longitude + destination.longitude) / 2,
-                latitudeDelta: Math.max(Math.abs(origin.latitude - destination.latitude) * 1.6, 0.03),
-                longitudeDelta: Math.max(Math.abs(origin.longitude - destination.longitude) * 1.6, 0.03),
-              }}
-            >
-              <Marker
-                coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                pinColor="#00E676"
-                title="Origen"
-                description={origin.title}
-              />
-              <Marker
-                coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-                pinColor="#E91E63"
-                title="Destino"
-                description={destination.title}
-              />
-              {routeCoords.length > 0 && (
-                <Polyline
-                  coordinates={routeCoords}
-                  strokeColor="#00E5FF"
-                  strokeWidth={4}
-                  lineDashPattern={[]}
-                  geodesic
-                  lineJoin="round"
-                  lineCap="round"
-                />
-              )}
-            </MapView>
-          )}
-
-          <View style={st.expandedMapFooter}>
-            <TouchableOpacity 
-              style={st.expandedMapCloseBtn}
-              onPress={() => setShowExpandedMap(false)}
-              activeOpacity={0.8}
-            >
-              <Text style={st.expandedMapCloseBtnText}>Cerrar</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <DateTimePickerModal
+        isVisible={showDatePicker}
+        mode="datetime"
+        minimumDate={new Date()}
+        locale="es_CO"
+        onConfirm={(date) => { setScheduledDate(date); setShowDatePicker(false); }}
+        onCancel={() => setShowDatePicker(false)}
+      />
 
       <CustomAlert
         visible={alertVisible}
@@ -1108,6 +1258,40 @@ const st = StyleSheet.create({
     borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
   },
+  zoomControls: {
+    position: 'absolute', left: 16, top: 220, gap: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  },
+  zoomBtn: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  },
+  /* ═══ Relocating UI (overlay sobre el mapa) ═══ */
+  relocatingBanner: {
+    position: 'absolute', top: 14, left: 14, right: 14,
+    backgroundColor: 'rgba(0,229,255,0.95)',
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 8, elevation: 10,
+  },
+  relocatingText: {
+    flex: 1, color: '#051A26', fontSize: 13, fontWeight: '700',
+  },
+  cancelRelocateBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: 'rgba(5,26,38,0.85)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  mapHintPill: {
+    position: 'absolute', top: 14, alignSelf: 'center',
+    backgroundColor: 'rgba(5,26,38,0.88)',
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)',
+  },
+  mapHintText: { color: '#00E5FF', fontSize: 11, fontWeight: '600' },
   searchPanel: {
     backgroundColor: 'rgba(5,26,38,0.95)', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 40,
     borderTopLeftRadius: 28, borderTopRightRadius: 28, marginTop: -60,
@@ -1121,6 +1305,37 @@ const st = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     marginTop: 12, paddingVertical: 10, borderRadius: 12,
     backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)',
+  },
+  favoritesSection: {
+    marginTop: 12,
+  },
+  favoritesHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, paddingHorizontal: 2,
+  },
+  favoritesTitle: {
+    fontSize: 11, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.8, textTransform: 'uppercase',
+  },
+  favoritesRow: {
+    gap: 8, paddingRight: 4,
+  },
+  favoriteChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12, maxWidth: 220,
+    backgroundColor: 'rgba(10,46,61,0.72)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
+  },
+  favoriteChipIcon: {
+    width: 28, height: 28, borderRadius: 14, borderWidth: 1.2,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.06)',
+  },
+  favoriteChipText: {
+    flexShrink: 1,
+  },
+  favoriteChipName: {
+    fontSize: 12, fontWeight: '700', color: '#FFF', maxWidth: 160,
+  },
+  favoriteChipAddr: {
+    fontSize: 10, color: 'rgba(255,255,255,0.55)', marginTop: 1, maxWidth: 160,
   },
   routeSummaryTxt: { fontSize: 13, color: '#00E5FF', fontWeight: '600' },
   routeChip: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -1210,32 +1425,13 @@ const st = StyleSheet.create({
   submitTxt: { fontSize: 16, fontWeight: '700', color: '#051A26' },
   userRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 16, paddingVertical: 10 },
   userTxt: { fontSize: 12, color: 'rgba(255,255,255,0.4)' },
-  
-  /* ═══ Toggle Booking Mode ═══ */
-  bookingModeRow: { flexDirection: 'row', gap: 12, marginBottom: 10 },
-  bookingModeBtn: {
-    flex: 1, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 16, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.15)',
-    shadowColor: 'rgba(0,229,255,0.1)', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 3, elevation: 2,
+  datePickerBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginTop: 10, paddingVertical: 14, paddingHorizontal: 16, borderRadius: 16,
+    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)',
   },
-  bookingModeBtnActive: {
-    backgroundColor: 'rgba(0,229,255,0.15)', borderColor: '#00E5FF',
-    shadowColor: '#00E5FF', shadowOpacity: 0.3, elevation: 4,
-  },
-  bookingModeLabel: {
-    fontSize: 16, fontWeight: '700', color: 'rgba(255,255,255,0.5)',
-  },
-  bookingModeLabelActive: {
-    color: '#00E5FF', fontSize: 17,
-  },
-  bookingModeDesc: {
-    fontSize: 11, fontWeight: '500', color: 'rgba(255,255,255,0.3)',
-  },
-  bookingModeDescActive: {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  
+  datePickerTxt: { flex: 1, fontSize: 14, fontWeight: '600', color: '#FFF' },
+
   /* ═══ Mini Map Preview ═══ */
   miniMapContainer: {
     marginTop: 16, paddingVertical: 14, paddingHorizontal: 16, borderRadius: 18,
@@ -1256,6 +1452,16 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
   },
   
+  /* 🆕 Drag Hint */
+  dragHint: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 10, paddingVertical: 8, marginBottom: 10, borderRadius: 10,
+    backgroundColor: 'rgba(0,229,255,0.08)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
+  },
+  dragHintText: {
+    fontSize: 12, color: '#00E5FF', fontWeight: '500',
+  },
+  
   /* ═══ Expanded Map Modal ═══ */
   expandedMapContainer: {
     flex: 1, backgroundColor: '#051A26',
@@ -1266,8 +1472,19 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(5,26,38,0.92)',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
   },
+  expandedMapHeaderRelocating: {
+    backgroundColor: 'rgba(5,26,38,0.95)',
+    borderBottomColor: 'rgba(0,229,255,0.25)',
+    borderBottomWidth: 2,
+  },
   expandedMapTitle: {
-    fontSize: 18, fontWeight: '700', color: '#FFF',
+    fontSize: 20, fontWeight: '800', color: '#00FF7F', letterSpacing: 0.5, textShadowColor: 'rgba(0,255,127,0.3)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 6,
+  },
+  dragInstructions: {
+    fontSize: 12, color: 'rgba(0,229,255,0.7)', fontWeight: '600', marginTop: 4,
+  },
+  dragInstructionsActive: {
+    color: '#00FF7F', fontWeight: '700', fontSize: 13, textShadowColor: 'rgba(0,255,127,0.4)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 4,
   },
   expandedMap: {
     flex: 1,
@@ -1278,11 +1495,12 @@ const st = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: 'rgba(0,229,255,0.1)',
   },
   expandedMapCloseBtn: {
-    paddingVertical: 14, borderRadius: 12,
-    backgroundColor: '#E91E63', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 14, paddingHorizontal: 24, borderRadius: 14,
+    backgroundColor: 'rgba(233,30,99,0.9)', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: 'rgba(233,30,99,0.5)',
   },
   expandedMapCloseBtnText: {
-    fontSize: 16, fontWeight: '700', color: '#FFF',
+    fontSize: 16, fontWeight: '700', color: '#FFF', letterSpacing: 0.3,
   },
 });
 

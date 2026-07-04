@@ -3,6 +3,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { useSelector } from "react-redux";
 import { RootState } from "./../../common/store";
 import LoginScreen from "./../login/LoginScreen";
+import ResetPasswordScreen from "./../login/ResetPassword";
 import TabNavigator from "@/components/TabNavigator";
 import CustomerSupport from "@/app/(tabs)/CustomerSupport";
 import WalletDetails from "@/app/(tabs)/WalletDetails";
@@ -46,6 +47,9 @@ import ReservationDetailScreen from '../(tabs)/ReservationDetailScreen';
 import ReservationTripScreen from '../(tabs)/ReservationTripScreen';
 import CustomerActiveTripScreen from '../(tabs)/CustomerActiveTripScreen';
 import DriverActivityScreen from '../(tabs)/DriverActivityScreen';
+import NotificationsScreen from '../(tabs)/NotificationsScreen';
+import PlateTrackingScreen from '../Booking/PlateTrackingScreen';
+import ChangePasswordScreen from '../(tabs)/ChangePasswordScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -109,17 +113,21 @@ const Navigation = () => {
           <Stack.Screen name="ReservationTrip" component={ReservationTripScreen} />
           <Stack.Screen name="CustomerActiveTrip" component={CustomerActiveTripScreen} />
           <Stack.Screen name="DriverActivity" component={DriverActivityScreen} />
+          <Stack.Screen name="Notifications" component={NotificationsScreen} />
+          <Stack.Screen name="PlateTracking" component={PlateTrackingScreen} />
+          <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
         </Stack.Group>
       ) : (
         <Stack.Group screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Prelogin" component={Prelogin} />
-          <Stack.Screen 
-            name="Login" 
+          <Stack.Screen
+            name="Login"
             component={LoginScreen}
             options={{
               gestureEnabled: false,
             }}
           />
+          <Stack.Screen name="ResetPassword" component={ResetPasswordScreen} />
         </Stack.Group>
       )}
     </Stack.Navigator>

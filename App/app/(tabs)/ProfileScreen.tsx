@@ -21,6 +21,7 @@ import { RootState } from "@/common/store";
 import { settings } from "@/scripts/settings";
 import { logout } from "@/common/reducers/authReducer";
 import { AppConfig } from "@/config/AppConfig";
+import { getDriverOwnReferralCode, DriverReferralCode } from "@/common/services/referralsService";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
@@ -63,14 +64,34 @@ const ProfileScreen = ({ navigation }: Props) => {
     firstName: string | null;
     lastName: string | null;
     mobile: string | null;
+    documentType: string | null;
+    documentNumber: string | null;
+    userType: string | null;
+    referredByCode: string | null;
+    referralId: string | null;
+    rating: number | null;
   }>({
     firstName: null,
     lastName: null,
     mobile: null,
+    documentType: null,
+    documentNumber: null,
+    userType: null,
+    referredByCode: null,
+    referralId: null,
+    rating: null,
   });
+  // Código de referido PROPIO (AAA-XXXXX) + conteo. null = aún generándose.
+  const [ownReferral, setOwnReferral] = useState<DriverReferralCode | null>(null);
   const pickerRef = useRef<ScrollView>(null);
   const currentUserType = String(
-    user?.usertype || user?.user_type || user?.userType || user?.user_metadata?.usertype || "customer"
+    dbProfile.userType ||
+      user?.usertype ||
+      user?.user_type ||
+      user?.userType ||
+      user?.user_metadata?.usertype ||
+      user?.user_metadata?.user_type ||
+      "customer"
   )
     .trim()
     .toLowerCase();
@@ -84,12 +105,12 @@ const ProfileScreen = ({ navigation }: Props) => {
     const fetchProfileData = async () => {
       const authId = user?.id || user?.auth_id;
       if (!authId) {
-        if (!cancelled) setDbProfile({ firstName: null, lastName: null, mobile: null });
+        if (!cancelled) setDbProfile({ firstName: null, lastName: null, mobile: null, documentType: null, documentNumber: null, userType: null, referredByCode: null, referralId: null, rating: null });
         return;
       }
 
       try {
-        const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=first_name,last_name,mobile&limit=1`;
+        const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=first_name,last_name,mobile,document_type,document_number,user_type,referred_by_code,referral_id,rating&limit=1`;
         const response = await fetch(url, {
           method: 'GET',
           headers: {
@@ -110,17 +131,34 @@ const ProfileScreen = ({ navigation }: Props) => {
               firstName: p.first_name || null,
               lastName: p.last_name || null,
               mobile: p.mobile || null,
+              documentType: p.document_type || null,
+              documentNumber: p.document_number || null,
+              userType: p.user_type || null,
+              referredByCode: p.referred_by_code || null,
+              referralId: p.referral_id || null,
+              rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : null,
             });
           }
         }
       } catch (e: any) {
         if (!cancelled && e?.name !== 'AbortError') {
-          setDbProfile({ firstName: null, lastName: null, mobile: null });
+          setDbProfile({ firstName: null, lastName: null, mobile: null, documentType: null, documentNumber: null, userType: null, referredByCode: null, referralId: null, rating: null });
         }
       }
     };
 
+    const fetchOwnReferral = async () => {
+      const authId = user?.id || user?.auth_id;
+      if (!authId) {
+        if (!cancelled) setOwnReferral(null);
+        return;
+      }
+      const code = await getDriverOwnReferralCode(authId, controller.signal);
+      if (!cancelled) setOwnReferral(code);
+    };
+
     fetchProfileData();
+    fetchOwnReferral();
 
     return () => {
       cancelled = true;
@@ -156,6 +194,31 @@ const ProfileScreen = ({ navigation }: Props) => {
     user?.user_metadata?.phone ||
     "+57 300 000 0000";
 
+  const displayDocumentType =
+    dbProfile.documentType ||
+    (profile as any)?.document_type ||
+    user?.user_metadata?.document_type ||
+    null;
+
+  const displayDocumentNumber =
+    dbProfile.documentNumber ||
+    (profile as any)?.document_number ||
+    user?.user_metadata?.document_number ||
+    null;
+
+  const displayReferredBy =
+    dbProfile.referredByCode ||
+    (profile as any)?.referred_by_code ||
+    user?.user_metadata?.referred_by_code ||
+    null;
+
+  const displayUserTypeLabel =
+    currentUserType === 'driver'
+      ? 'Conductor'
+      : currentUserType === 'customer'
+      ? 'Cliente'
+      : currentUserType;
+
   const stopBackgroundLocation = async () => {
     const tasks = await TaskManager.getRegisteredTasksAsync();
     tasks.forEach((task) => {
@@ -169,27 +232,63 @@ const ProfileScreen = ({ navigation }: Props) => {
     try {
       setLoading(true);
       if (user?.usertype === "driver") {
-        await stopBackgroundLocation();
+        await Promise.race([
+          stopBackgroundLocation(),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), 5000)
+          ),
+        ]).catch(() => {});
       }
+      const signOutPromise = supabase.auth.signOut();
+      const timeoutPromise = new Promise<{ error: Error }>(
+        (resolve) => setTimeout(() => resolve({ error: new Error('timeout') }), 8000)
+      );
+      const { error } = await Promise.race([signOutPromise, timeoutPromise]);
+      if (error && error.message !== 'timeout') throw error;
       dispatch(logout());
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Error desconocido";
       showAlert('error', 'Error', `No se pudo cerrar sesión: ${msg}`);
+    } finally {
       setLoading(false);
-      return;
     }
-    setLoading(false);
   };
 
-  const refer = useCallback(() => {
-    const message =
-      settings.bonus > 0
-        ? `${user?.firstName} ya se mueve con T+Plus y te invita a que seas parte de este cambio para la movilidad. Descarga, registrate y disfruta de este bono en tu proximo servicio. ${settings.code} ${settings.bonus}.\nCodigo: ${user?.referralId}\n${settings.DinamikLink}`
-        : `share_msg_no_bonus\napp_link ${Platform.OS === "ios" ? settings.AppleStoreLink : settings.PlayStoreLink}`;
-    Share.share({ message });
-  }, [user]);
+  const refer = useCallback(async () => {
+    try {
+      const authId = user?.id || user?.auth_id || profile?.auth_id;
+      if (!authId) {
+        console.error('[ProfileScreen] refer: No authId found');
+        return;
+      }
+
+      // Compartimos el código PROPIO del usuario (AAA-XXXXX) — el de
+      // referral_codes, NO users.referral_id (que es el de quien lo invitó).
+      const own = ownReferral ?? (await getDriverOwnReferralCode(authId));
+      if (own && !ownReferral) setOwnReferral(own);
+
+      const firstName = displayFirstName || 'Usuario';
+      const ownCode = own?.referralCode;
+
+      if (!ownCode) {
+        showAlert(
+          'info',
+          'Código en preparación',
+          'Tu código de referido se está generando. Inténtalo de nuevo en unos momentos.'
+        );
+        return;
+      }
+
+      const message =
+        settings.bonus > 0
+          ? `🚗 Imagina que con un solo viaje ayudas a que un conductor lleve el 100% de su trabajo a casa.\n\nDescarga Gratis T+Plus en Ios o Android y regístrate según tu sistema operativo.\n\n🔒 Tendrás seguridad en cada viaje y los conductores recibirán el pago completo, apoyando a sus familias.\n\n💸 Además, recibe un incentivo en tu próximo viaje.\n\n🎟️ Código de referido: ${ownCode}\n\n👉 https://tmasplus.com — Seguridad para ti. Justo para ti... Justo para todos!`
+          : `🚗 Imagina que con un solo viaje ayudas a que un conductor lleve el 100% de su trabajo a casa.\n\nDescarga Gratis T+Plus en Ios o Android y regístrate según tu sistema operativo.\n\n🔒 Tendrás seguridad en cada viaje y los conductores recibirán el pago completo, apoyando a sus familias.\n\n🎟️ Código de referido: ${ownCode}\n\n👉 https://tmasplus.com — Seguridad para ti. Justo para ti... Justo para todos!`;
+
+      Share.share({ message });
+    } catch (error) {
+      console.error('[ProfileScreen] refer error:', error);
+    }
+  }, [user, profile, ownReferral, displayFirstName]);
 
   const sos = useCallback(() => {
     const emergencyNumber = "123";
@@ -206,7 +305,7 @@ const ProfileScreen = ({ navigation }: Props) => {
   const baseItems: PickerItem[] = useMemo(
     () => [
       { key: "profile-config", label: "Configuracion de perfil", icon: "settings-outline", onPress: () => navigation.navigate("Docs") },
-      { key: "carnet", label: "Carnet", icon: "card-outline", onPress: () => navigation.navigate("Carnet") },
+      { key: "change-password", label: "Cambiar contraseña", icon: "lock-closed-outline", onPress: () => navigation.navigate("ChangePassword") },
       { key: "security-contact", label: "Contacto de seguridad", icon: "people-outline", onPress: () => navigation.navigate("SecurityContact") },
       { key: "shared-trip", label: "Viaje Compartido", icon: "navigate-outline", onPress: () => navigation.navigate("ReceiveLocation") },
       { key: "chat", label: "Chat con tmasplus", icon: "chatbubble-ellipses-outline", onPress: () => navigation.navigate("Soporte") },
@@ -224,7 +323,8 @@ const ProfileScreen = ({ navigation }: Props) => {
       out.splice(1, 0, { key: "saved-places", label: "Mis lugares", icon: "location-outline", onPress: () => navigation.navigate("Search") });
     }
     if (currentUserType === "driver") {
-      out.splice(2, 0, { key: "my-vehicles", label: "Mis Vehiculos", icon: "car-outline", onPress: () => navigation.navigate("CarsScreen") });
+      out.splice(1, 0, { key: "carnet", label: "Carnet", icon: "card-outline", onPress: () => navigation.navigate("Carnet") });
+      out.splice(3, 0, { key: "my-vehicles", label: "Mis Vehiculos", icon: "car-outline", onPress: () => navigation.navigate("CarsScreen") });
       out.push({ key: "insurance", label: "Aseguradora", icon: "shield-checkmark-outline", onPress: () => navigation.navigate("Insurance") });
     }
     out.push({ key: "updates", label: "Ver actualizaciones", icon: "refresh-outline", onPress: () => navigation.navigate("Updates") });
@@ -283,7 +383,57 @@ const ProfileScreen = ({ navigation }: Props) => {
 
           <View style={styles.userInfo}>
             <Text style={styles.profileName}>{`${displayFirstName} ${displayLastName}`.trim()}</Text>
+            <View style={styles.ratingRow}>
+              {[1, 2, 3, 4, 5].map((n) => {
+                const r = dbProfile.rating ?? 0;
+                const filled = n <= Math.round(r);
+                return (
+                  <AntDesign
+                    key={n}
+                    name="star"
+                    size={14}
+                    color={filled ? "#FFD700" : "rgba(255,255,255,0.25)"}
+                    style={{ marginRight: 2 }}
+                  />
+                );
+              })}
+              <Text style={styles.ratingText}>
+                {dbProfile.rating !== null
+                  ? `${dbProfile.rating.toFixed(1)} / 5`
+                  : "Sin calificaciones"}
+              </Text>
+            </View>
             <Text style={styles.profilePhone}>{displayPhone}</Text>
+            {displayUserTypeLabel ? (
+              <View style={styles.profileBadgeRow}>
+                <View style={styles.profileBadge}>
+                  <Text style={styles.profileBadgeText}>{displayUserTypeLabel}</Text>
+                </View>
+              </View>
+            ) : null}
+            {displayDocumentType || displayDocumentNumber ? (
+              <Text style={styles.profileMeta} numberOfLines={1}>
+                {displayDocumentType ? `${displayDocumentType} ` : ''}
+                {displayDocumentNumber || 'sin número'}
+              </Text>
+            ) : (
+              <Text style={styles.profileMetaMuted}>Sin documento registrado</Text>
+            )}
+            {displayReferredBy ? (
+              <Text style={styles.profileMetaMuted} numberOfLines={1}>
+                Referido por: {displayReferredBy}
+              </Text>
+            ) : null}
+            {ownReferral ? (
+              <Text style={styles.profileMeta} numberOfLines={1}>
+                Tu código: {ownReferral.referralCode} · {ownReferral.totalReferrals}{' '}
+                {ownReferral.totalReferrals === 1 ? 'referido' : 'referidos'}
+              </Text>
+            ) : (
+              <Text style={styles.profileMetaMuted} numberOfLines={1}>
+                Generando tu código…
+              </Text>
+            )}
           </View>
 
           <TouchableOpacity style={styles.editBtn} onPress={() => navigation.navigate("Docs")} activeOpacity={0.8}>
@@ -469,6 +619,48 @@ const styles = StyleSheet.create({
   profilePhone: {
     fontSize: 13,
     color: "rgba(255,255,255,0.72)",
+  },
+  ratingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  ratingText: {
+    marginLeft: 6,
+    fontSize: 12,
+    color: "#FFD700",
+    fontWeight: "600",
+  },
+  profileBadgeRow: {
+    flexDirection: "row",
+    marginTop: 6,
+  },
+  profileBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,229,255,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(0,229,255,0.28)",
+  },
+  profileBadgeText: {
+    color: "#00E5FF",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+  },
+  profileMeta: {
+    marginTop: 6,
+    fontSize: 12,
+    color: "#B6D4E0",
+    fontWeight: "600",
+  },
+  profileMetaMuted: {
+    marginTop: 4,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.55)",
+    fontStyle: "italic",
   },
   editBtn: {
     width: 40,

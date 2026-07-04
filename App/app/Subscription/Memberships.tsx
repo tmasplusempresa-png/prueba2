@@ -15,11 +15,11 @@ const SubscriptionCard = () => {
   const activeMembership = memberships.find((membership) => membership.status === "ACTIVA");
 
   useEffect(() => {
-    if (user?.uid) {
+    if (user?.id) {
       // Cargar membresías al montar el componente si el usuario está autenticado
-      dispatch(fetchMemberships(user.uid));
+      dispatch(fetchMemberships(user.id));
     }
-  }, [dispatch, user?.uid]);
+  }, [dispatch, user?.id]);
 
   const handleRenew = (uid: string) => {
     dispatch(renewMembership(uid))
@@ -42,7 +42,8 @@ const SubscriptionCard = () => {
   };
 
   const handleCreateMembership = (plan: string) => {
-    dispatch(createMembership(user.uid))
+    if (!user?.id) return;
+    dispatch(createMembership({ uid: user.id, costo: '90600' }))
       .then(() => {
         alert(`Membresía de ${plan} creada con éxito`);
       })

@@ -13,14 +13,19 @@ import {
   Linking,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  InteractionManager,
 } from 'react-native';
 import { useSelector } from 'react-redux';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
+import * as Speech from 'expo-speech';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import BookingRealtimeService from '@/common/services/BookingRealtimeService';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 const CARD_W = 260;
@@ -29,7 +34,7 @@ const H_PAD = 20;
 const BG_IMAGE = require('../../assets/images/bg.png');
 const CARD_TEXTURE = require('../../assets/images/card_texture.png');
 
-const PARTICLES = Array.from({ length: 20 }, (_, i) => ({
+const PARTICLES = Array.from({ length: 8 }, (_, i) => ({
   id: i,
   x: Math.random() * SW,
   y: Math.random() * SH * 0.85,
@@ -39,10 +44,16 @@ const PARTICLES = Array.from({ length: 20 }, (_, i) => ({
   drift: -(30 + Math.random() * 70),
 }));
 
-const Particle = React.memo(({ p }: { p: typeof PARTICLES[0] }) => {
+const Particle = React.memo(({ p, active }: { p: typeof PARTICLES[0]; active: boolean }) => {
   const anim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (!active) {
+      anim.stopAnimation();
+      anim.setValue(0);
+      return;
+    }
+
     const loop = Animated.loop(
       Animated.sequence([
         Animated.delay(p.delay),
@@ -52,7 +63,7 @@ const Particle = React.memo(({ p }: { p: typeof PARTICLES[0] }) => {
     );
     loop.start();
     return () => loop.stop();
-  }, []);
+  }, [active, anim, p.delay, p.duration]);
 
   const opacity = anim.interpolate({ inputRange: [0, 0.2, 0.8, 1], outputRange: [0, 0.7, 0.35, 0] });
   const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [0, p.drift] });
@@ -64,8 +75,6 @@ const Particle = React.memo(({ p }: { p: typeof PARTICLES[0] }) => {
         position: 'absolute', left: p.x, top: p.y,
         width: p.size, height: p.size, borderRadius: p.size / 2,
         backgroundColor: '#00E5FF',
-        shadowColor: '#00E5FF', shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 0.9, shadowRadius: 4, elevation: 2,
         opacity, transform: [{ translateY }],
       }}
     />
@@ -129,11 +138,16 @@ const CustomerHomeScreen = () => {
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const profile = useSelector((state: RootState) => state.auth.profile) as any;
   const nav = useNavigation<any>();
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
 
   const [dbFirstName, setDbFirstName] = useState<string | null>(null);
   const [dbLastName, setDbLastName] = useState<string | null>(null);
   const [activeCard, setActiveCard] = useState(0);
+  const [hasUnread, setHasUnread] = useState(false);
+  const [activeBookingId, setActiveBookingId] = useState<string | null>(null);
+  const lastStatusRef = useRef<string | null>(null);
+  const lastBookingIdRef = useRef<string | null>(null);
 
   const scrollY = useRef(new Animated.Value(0)).current;
   const pulseScale = useRef(new Animated.Value(1)).current;
@@ -142,6 +156,7 @@ const CustomerHomeScreen = () => {
   const navPulseOp = useRef(new Animated.Value(0.45)).current;
   const bellAnim = useRef(new Animated.Value(0)).current;
   const navCtrScale = useRef(new Animated.Value(1)).current;
+  const navigateLockRef = useRef(false);
 
   const greeting = useCallback(() => {
     const h = new Date().getHours();
@@ -168,7 +183,128 @@ const CustomerHomeScreen = () => {
     return () => { alive = false; };
   }, [user?.id]);
 
+  // ── Voice greeting on first focus after login ──
   useEffect(() => {
+    if (!isFocused || !dbFirstName) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const flagKey = `greeted_${user?.id || user?.auth_id || 'anon'}`;
+        const alreadyGreeted = await AsyncStorage.getItem(flagKey);
+        if (alreadyGreeted === '1' || cancelled) return;
+        const hour = new Date().getHours();
+        const salute = hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
+        const msg = `${salute}, ${dbFirstName}. Bienvenido a T más plus.`;
+        try { Speech.stop(); } catch {}
+        Speech.speak(msg, { language: 'es-CO', pitch: 1.0, rate: 0.98 });
+        await AsyncStorage.setItem(flagKey, '1');
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [isFocused, dbFirstName, user?.id, user?.auth_id]);
+
+  // ── Bell interactions (defined early so they can be referenced in effects below) ──
+  const shakeBell = useCallback(() => {
+    Animated.sequence([
+      Animated.timing(bellAnim, { toValue: -15, duration: 80, useNativeDriver: true }),
+      Animated.timing(bellAnim, { toValue: 12, duration: 80, useNativeDriver: true }),
+      Animated.timing(bellAnim, { toValue: -10, duration: 80, useNativeDriver: true }),
+      Animated.timing(bellAnim, { toValue: 8, duration: 80, useNativeDriver: true }),
+      Animated.timing(bellAnim, { toValue: -4, duration: 80, useNativeDriver: true }),
+      Animated.timing(bellAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
+    ]).start();
+  }, [bellAnim]);
+
+  const triggerNotificationAlert = useCallback((spokenMessage?: string) => {
+    setHasUnread(true);
+    shakeBell();
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    const msg = spokenMessage || 'Tienes una notificación nueva';
+    try { Speech.stop(); } catch {}
+    Speech.speak(msg, { language: 'es-CO', pitch: 1.0, rate: 1.0 });
+  }, [shakeBell]);
+
+  const onBellPress = useCallback(() => {
+    setHasUnread(false);
+    shakeBell();
+    nav.navigate('Notifications');
+  }, [shakeBell, nav]);
+
+  // ── Fetch active booking to know if there are ongoing notifications ──
+  const refreshActiveBooking = useCallback(async () => {
+    try {
+      const headers = await getSupabaseAuthHeaders();
+      const candidates = [user?.id, user?.auth_id].filter(Boolean);
+      let uid: string | null = null;
+      for (const c of candidates) {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/users?or=(id.eq.${c},auth_id.eq.${c})&select=id&limit=1`, { headers });
+        if (r.ok) {
+          const rows = await r.json();
+          if (rows?.[0]?.id) { uid = rows[0].id; break; }
+        }
+      }
+      if (!uid) return;
+      const statuses = ['PENDING', 'ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED', 'NEW']
+        .map(s => `"${s}"`).join(',');
+      const url = `${SUPABASE_URL}/rest/v1/bookings?customer=eq.${uid}&status=in.(${statuses})&order=created_at.desc&limit=1&select=id,status`;
+      const resp = await fetch(url, { headers });
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      const b = rows?.[0];
+      if (b?.id) {
+        if (lastBookingIdRef.current && lastBookingIdRef.current !== b.id) {
+          triggerNotificationAlert('Nueva actualización en tu viaje');
+        }
+        lastBookingIdRef.current = b.id;
+        lastStatusRef.current = b.status || null;
+        setActiveBookingId(b.id);
+      } else {
+        lastBookingIdRef.current = null;
+        setActiveBookingId(null);
+      }
+    } catch {}
+  }, [user?.id, user?.auth_id, triggerNotificationAlert]);
+
+  useEffect(() => {
+    if (!isFocused) return;
+    refreshActiveBooking();
+  }, [isFocused, refreshActiveBooking]);
+
+  // ── Subscribe to realtime updates for the active booking ──
+  useEffect(() => {
+    if (!activeBookingId) return;
+    const STATUS_LABELS: Record<string, string> = {
+      PENDING: 'Buscando conductor',
+      ACCEPTED: 'Conductor en camino',
+      ARRIVED: 'Tu conductor ha llegado',
+      STARTED: 'Tu viaje ha comenzado',
+      IN_PROGRESS: 'Viaje en progreso',
+      TRIP_STARTED: 'Viaje en progreso',
+      COMPLETE: 'Viaje finalizado',
+      CANCELLED: 'Viaje cancelado',
+    };
+    const channel = BookingRealtimeService.subscribeToBookingUpdates(activeBookingId, (updated: any) => {
+      const newStatus = updated?.status;
+      if (newStatus && lastStatusRef.current && newStatus !== lastStatusRef.current) {
+        const label = STATUS_LABELS[newStatus] || 'Estado del viaje actualizado';
+        triggerNotificationAlert(label);
+      }
+      if (newStatus) lastStatusRef.current = newStatus;
+    });
+    return () => {
+      try { BookingRealtimeService.unsubscribe(`booking-${activeBookingId}`); } catch {}
+    };
+  }, [activeBookingId, triggerNotificationAlert]);
+
+  useEffect(() => {
+    if (!isFocused) {
+      pulseScale.stopAnimation();
+      pulseOp.stopAnimation();
+      pulseScale.setValue(1);
+      pulseOp.setValue(0.5);
+      return;
+    }
+
     const loop = Animated.loop(
       Animated.parallel([
         Animated.sequence([
@@ -183,9 +319,39 @@ const CustomerHomeScreen = () => {
     );
     loop.start();
     return () => loop.stop();
-  }, []);
+  }, [isFocused, pulseOp, pulseScale]);
 
   useEffect(() => {
+    if (!isFocused) return;
+
+    let cancelled = false;
+    const consumePendingTripNavigation = async () => {
+      try {
+        const pendingBookingId = await AsyncStorage.getItem('pending_customer_active_trip');
+        if (!pendingBookingId || cancelled) return;
+
+        await AsyncStorage.removeItem('pending_customer_active_trip');
+        nav.navigate('CustomerActiveTrip', { bookingId: pendingBookingId });
+      } catch {
+        // ignore storage/navigation race errors
+      }
+    };
+
+    consumePendingTripNavigation();
+    return () => {
+      cancelled = true;
+    };
+  }, [isFocused, nav]);
+
+  useEffect(() => {
+    if (!isFocused) {
+      navPulseScale.stopAnimation();
+      navPulseOp.stopAnimation();
+      navPulseScale.setValue(1);
+      navPulseOp.setValue(0.45);
+      return;
+    }
+
     const loop = Animated.loop(
       Animated.parallel([
         Animated.sequence([
@@ -200,24 +366,27 @@ const CustomerHomeScreen = () => {
     );
     loop.start();
     return () => loop.stop();
-  }, []);
+  }, [isFocused, navPulseOp, navPulseScale]);
 
-  const shakeBell = useCallback(() => {
-    Animated.sequence([
-      Animated.timing(bellAnim, { toValue: -15, duration: 80, useNativeDriver: true }),
-      Animated.timing(bellAnim, { toValue: 12, duration: 80, useNativeDriver: true }),
-      Animated.timing(bellAnim, { toValue: -6, duration: 80, useNativeDriver: true }),
-      Animated.timing(bellAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
-    ]).start();
-  }, []);
+  const navigateToCreateReservation = useCallback(() => {
+    if (navigateLockRef.current) return;
+    navigateLockRef.current = true;
+
+    InteractionManager.runAfterInteractions(() => {
+      nav.navigate('CreateReservation');
+      setTimeout(() => {
+        navigateLockRef.current = false;
+      }, 650);
+    });
+  }, [nav]);
 
   const onCenterPress = useCallback(() => {
     Animated.sequence([
       Animated.timing(navCtrScale, { toValue: 0.88, duration: 100, useNativeDriver: true }),
       Animated.spring(navCtrScale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 14 }),
     ]).start();
-    nav.navigate('CreateReservation');
-  }, [nav, navCtrScale]);
+    navigateToCreateReservation();
+  }, [navCtrScale, navigateToCreateReservation]);
 
   const firstName = dbFirstName || profile?.first_name || profile?.firstName || user?.first_name || user?.firstName || user?.user_metadata?.first_name || user?.user_metadata?.firstName || '';
   const lastName = dbLastName || profile?.last_name || profile?.lastName || user?.last_name || user?.lastName || user?.user_metadata?.last_name || user?.user_metadata?.lastName || '';
@@ -250,7 +419,7 @@ const CustomerHomeScreen = () => {
       <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
         <Image source={BG_IMAGE} style={s.bgImage} resizeMode="cover" />
         <View style={s.bgGlow2} />
-        {PARTICLES.map(p => <Particle key={p.id} p={p} />)}
+        {isFocused && PARTICLES.map(p => <Particle key={p.id} p={p} active={isFocused} />)}
       </View>
       <View style={[s.headerWrap, { paddingTop: headerTopPad }]}>
         <Animated.View style={[StyleSheet.absoluteFillObject, s.headerScrollBg, { opacity: headerBgOp }]} />
@@ -264,11 +433,11 @@ const CustomerHomeScreen = () => {
             <Text style={s.greetLabel}>{greeting()}</Text>
             <Text style={s.greetName}>{displayName}</Text>
           </View>
-          <Pressable style={({ pressed }) => [s.notifBtn, pressed && s.notifBtnPressed]} onPress={shakeBell}>
+          <Pressable style={({ pressed }) => [s.notifBtn, pressed && s.notifBtnPressed]} onPress={onBellPress}>
             <Animated.View style={{ transform: [{ rotate: bellRot }] }}>
               <Ionicons name="notifications-outline" size={22} color="rgba(255,255,255,0.7)" />
             </Animated.View>
-            <View style={s.notifDot} />
+            {(hasUnread || !!activeBookingId) && <View style={s.notifDot} />}
           </Pressable>
         </Animatable.View>
       </View>
@@ -280,7 +449,7 @@ const CustomerHomeScreen = () => {
         onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
       >
         <Animatable.View animation="fadeInUp" duration={500} delay={50} useNativeDriver>
-          <Scalable onPress={() => nav.navigate('CreateReservation')} scaleTo={0.97} liftBy={-2} style={s.destCard}>
+          <Scalable onPress={navigateToCreateReservation} scaleTo={0.97} liftBy={-2} style={s.destCard}>
             <View style={s.destInner}>
               <Ionicons name="location-outline" size={20} style={s.destLeadingIcon} />
               <Text style={s.destText}>¿A dónde vamos?</Text>
@@ -297,7 +466,7 @@ const CustomerHomeScreen = () => {
           </View>
           <View style={s.actionsGrid}>
             {SERVICES.map(sv => (
-              <ActionBtn key={sv.id} icon={sv.icon} label={sv.label} onPress={() => nav.navigate('CreateReservation')} />
+              <ActionBtn key={sv.id} icon={sv.icon} label={sv.label} onPress={navigateToCreateReservation} />
             ))}
           </View>
         </Animatable.View>
@@ -423,6 +592,7 @@ const s = StyleSheet.create({
   cardCarnet: { backgroundColor: 'rgba(0,229,255,0.1)' },
   cardReservas: { backgroundColor: 'rgba(0,188,212,0.1)' },
   cardHistorial: { backgroundColor: 'rgba(20,83,104,0.3)' },
+  cardTracking: { backgroundColor: 'rgba(0,100,80,0.3)' },
   cardIconWrap: { width: 60, height: 60, borderRadius: 14, backgroundColor: 'rgba(0,229,255,0.15)', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
   cardTitle: { fontSize: 18, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3, marginBottom: 6 },
   cardDesc: { fontSize: 13, lineHeight: 19, color: 'rgba(255,255,255,0.5)', flex: 1, marginBottom: 12 },

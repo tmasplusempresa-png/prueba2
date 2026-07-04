@@ -22,7 +22,7 @@ import {
   Linking,
   FlatList,
   Animated,
-  PanResponder,
+  InteractionManager,
 } from "react-native";
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
@@ -34,15 +34,7 @@ import {
   removeBooking,
 } from "@/common/store/bookingsSlice";
 import { useNavigation } from "@react-navigation/native";
-import {
-  getDatabase,
-  onValue,
-  ref,
-  query,
-  orderByChild,
-  equalTo,
-  get,
-} from "firebase/database"; // Importa m�todos para hacer queries
+// Firebase imports eliminados - migrado a Supabase
 import { fetchMemberships } from "@/common/reducers/membershipSlice"; // Import the fetchMemberships action
 import { differenceInDays } from "date-fns";
 import { fetchKilometers } from "@/common/reducers/KilometersSlice";
@@ -57,18 +49,24 @@ import * as ImagePicker from "expo-image-picker";
 import { Button, Input } from "react-native-elements";
 import { ActivityIndicator } from "react-native"; // Aseg�rate de importar ActivityIndicator
 import axios from "axios";
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from '@/config/SupabaseConfig';
-const { width } = Dimensions.get("window");
+import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { mapSupabaseBooking } from '@/common/store/bookingsSlice';
+const { width, height: screenHeight } = Dimensions.get("window");
 import { useRoute } from "@react-navigation/native";
 import { useFocusEffect } from "@react-navigation/native";
 import BottomSheet from "@gorhom/bottom-sheet"; // Importa el BottomSheet
 import MapSensor from "./mapaSensors";
+import DriverReservationsScreen from "./DriverReservationsScreen";
 import * as Speech from "expo-speech";
 import { useAppDispatch } from "../../common/store/hooks";
 import { showDriverActiveNotification, dismissDriverNotification, updateDriverNotification } from '@/hooks/DriverNotificationService';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 
 const tourImage = require("../../assets/images/icon.png");
+
+// Tracks driver IDs that have already seen the membership-renewal reminder
+// in the current app session. Reset on app reload (i.e. on next login).
+const driversShownRenewalReminder = new Set<string>();
 
 type UserDataState = {
   profile_image: string | null;
@@ -81,6 +79,48 @@ type UserDataState = {
   verifyIdImage?: string;
   firstName?: string;
   lastName?: string;
+};
+
+const toFiniteCoordinate = (value: any): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const extractImmediateCoords = (source: any): { lat: number; lng: number } | null => {
+  if (!source) return null;
+
+  const directLat = toFiniteCoordinate(source.lat ?? source.latitude ?? source.pickup_lat);
+  const directLng = toFiniteCoordinate(source.lng ?? source.longitude ?? source.pickup_lng);
+  if (directLat !== null && directLng !== null) {
+    return { lat: directLat, lng: directLng };
+  }
+
+  const nestedLocation = source.location || source.pickup_location || source.pickup;
+  if (nestedLocation) {
+    if (typeof nestedLocation === 'string') {
+      try {
+        return extractImmediateCoords(JSON.parse(nestedLocation));
+      } catch {
+        return null;
+      }
+    }
+    return extractImmediateCoords(nestedLocation);
+  }
+
+  return null;
+};
+
+const calculateImmediateDistanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const deltaLat = toRad(lat2 - lat1);
+  const deltaLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
 };
 
 
@@ -108,9 +148,13 @@ const MapScreen = () => {
   const memberships = useSelector(
     (state: RootState) => state.memberships.memberships
   );
+  const membershipsLoading = useSelector(
+    (state: RootState) => state.memberships.loading
+  );
   const [showRenewBanner, setShowRenewBanner] = useState(false);
   const [showKmBanner, setShowKmBanner] = useState(false);
   const [filteredBookings, setFilteredBookings] = useState<any[]>([]);
+  const [homeImmediateBookings, setHomeImmediateBookings] = useState<any[]>([]);
   const [activeBookingsCount, setActiveBookingsCount] = useState(0);
   const [tourVisible, setTourVisible] = useState(false);
   const [dbFirstName, setDbFirstName] = useState<string | null>(null);
@@ -264,7 +308,6 @@ const MapScreen = () => {
     "Puerto Asis",
   ];
   const [closestBooking, setClosestBooking] = useState<any | null>(null);
-  const database = getDatabase();
   const [IsMapVisible, setIsMapVisible] = useState(false);
   const userTypeRaw = String(
     profile?.user_type ||
@@ -279,7 +322,6 @@ const MapScreen = () => {
     .trim()
     .toLowerCase();
   const isDriverView = userTypeRaw === 'driver';
-  const userRef = ref(database, `users/${user.id}`);
 
   const resolveDriverName = useCallback(async () => {
     const profileFirst = String(profile?.first_name || profile?.firstName || '').trim();
@@ -334,7 +376,19 @@ const MapScreen = () => {
   }, [profile?.auth_id, profile?.first_name, profile?.firstName, profile?.id, profile?.last_name, profile?.lastName, user?.auth_id, user?.id, user?.user_metadata?.sub]);
 
   useEffect(() => {
+    if (!user?.id) return;
+    const channel = supabase
+      .channel(`balance-bookings-${user.id}`)
+      .on(
+        'postgres_changes' as any,
+        { event: '*', schema: 'public', table: 'bookings', filter: `driver=eq.${user.id}` },
+        () => { fetchBalanceBookings(); }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user?.id]);
 
+  useEffect(() => {
     let isMounted = true;
 
     const fetchFirstName = async () => {
@@ -376,31 +430,14 @@ const MapScreen = () => {
   useFocusEffect(
     React.useCallback(() => {
       if (route.params?.openModal) {
-        setTourVisible(true);
-        // Reset the parameter so it doesn't trigger again
+        // Tour de onboarding deshabilitado: nunca debe mostrarse
         navigation.setParams({ openModal: undefined });
       }
     }, [route.params?.openModal])
   );
+  // Tour de onboarding deshabilitado: el modal de "paso N de 9" no debe aparecer.
   useEffect(() => {
-    if (isDriverView) {
-      const fields = [
-        { value: user.profile_image, step: 0 },
-        { value: user.mobile, step: 1 },
-        { value: user.docType, step: 2 },
-        { value: user.verifyId, step: 3 },
-        { value: user.bankAccount, step: 4 },
-        { value: user.city, step: 5 },
-        { value: user.addres, step: 6 },
-      ];
-      const firstEmptyField = fields.find((field) => !field.value);
-
-      if (firstEmptyField && user.emailVerified && inprocess !== "Process") {
-        setTourVisible(true);
-      } else {
-        //      setTourVisible(false);
-      }
-    }
+    setTourVisible(false);
   }, [
     isDriverView,
     user.verifyIdImage,
@@ -445,16 +482,53 @@ const MapScreen = () => {
     dispatch(listenToSettingsChanges());
   }, [dispatch]);
 
-  useEffect(() => {
-    if (user?.uid) {
-      dispatch(fetchMemberships(user.uid));
-      dispatch(fetchKilometers(user.uid));
-    }
-  }, [dispatch, user?.uid]);
-
-  const activeMembership = memberships.find(
-    (membership) => membership.status === "ACTIVA"
+  // El FK de memberships.conductor referencia auth.users(id), o sea el auth_id del conductor.
+  // Probamos auth_id primero, con fallbacks por compatibilidad con datos legacy creados con users.id.
+  const driverIdCandidates = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
+            .map((v) => (v ? String(v) : ''))
+            .filter(Boolean),
+        ),
+      ),
+    [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
   );
+  const driverConductorId = driverIdCandidates[0];
+  // Marca el id para el cual ya completó (ok o error) el fetch inicial de membresías.
+  // Sin esto, en el primer render con driverConductorId presente, membershipsLoading sigue
+  // siendo `false` (estado inicial) en el closure del effect del popup, así que el modal
+  // se disparaba antes de que el fetch terminara. Esperamos a que resuelva.
+  const [membershipFetchedFor, setMembershipFetchedFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (driverConductorId) {
+      // Un único fetch con el id canónico (igual que WalletDetails). Hacer fetch en paralelo
+      // por cada candidato sobreescribe state.memberships y borraba la membresía activa.
+      const promise = dispatch(fetchMemberships(driverConductorId));
+      Promise.resolve(promise as unknown as Promise<unknown>).finally(() => {
+        setMembershipFetchedFor(driverConductorId);
+      });
+      dispatch(fetchKilometers(driverConductorId));
+    }
+  }, [dispatch, driverConductorId]);
+
+  // El API ya filtra por conductor; basta con detectar una membresía con status ACTIVA y vigente.
+  const activeMembership = memberships.find((membership) => {
+    if (membership?.status?.toString().toUpperCase() !== "ACTIVA") return false;
+    if (!membership?.fecha_terminada) return true;
+    return differenceInDays(new Date(membership.fecha_terminada), new Date()) >= 0;
+  });
+
+  useEffect(() => {
+    console.log('[Membership] check', {
+      driverIdCandidates,
+      memberships: memberships.length,
+      activeMembership: activeMembership?.uid || null,
+      isDriverView,
+    });
+  }, [driverIdCandidates, memberships, activeMembership, isDriverView]);
 
   useEffect(() => {
     if (activeMembership) {
@@ -474,6 +548,50 @@ const MapScreen = () => {
     }
   }, [activeMembership, user?.kilometers]);
 
+  // Recordatorio amigable de renovación al iniciar sesión (una vez por sesión)
+  useEffect(() => {
+    if (!isDriverView) return;
+    if (membershipsLoading) return;
+    if (!driverConductorId) return;
+    // Espera a que el primer fetch de membresías para este conductor haya resuelto.
+    // Sin esto, el modal podía dispararse en el render donde driverConductorId aparece
+    // pero el thunk aún no había marcado loading=true.
+    if (membershipFetchedFor !== driverConductorId) return;
+    // Solo mostramos el aviso si el conductor NO tiene ninguna membresía.
+    // Si ya tiene una (activa, vencida o pendiente), se omite.
+    if (activeMembership) return;
+    if (memberships.length > 0) return;
+    if (driversShownRenewalReminder.has(driverConductorId)) return;
+
+    driversShownRenewalReminder.add(driverConductorId);
+    const driverFirst = (dbFirstName || user?.firstName || user?.first_name || '').toString().trim();
+    const greeting = driverFirst ? `¡Hola ${driverFirst}! ` : '¡Hola! ';
+    showAlert(
+      'info',
+      '¡Te extrañamos en la ruta! 🚗',
+      `${greeting}Notamos que tu membresía no está activa. Mientras tanto puedes ver los servicios disponibles, pero para tomarlos y seguir generando ingresos necesitas renovar tu membresía.\n\nRenuévala ahora y vuelve a ganar con T+Plus. ¡Tus pasajeros te esperan!`,
+      [
+        { text: 'Más tarde', style: 'cancel', onPress: () => setAlertVisible(false) },
+        {
+          text: 'Renovar ahora',
+          onPress: () => {
+            setAlertVisible(false);
+            navigation.navigate('Wallet');
+          },
+        },
+      ],
+    );
+  }, [
+    isDriverView,
+    membershipsLoading,
+    driverConductorId,
+    membershipFetchedFor,
+    activeMembership,
+    memberships,
+    dbFirstName,
+    navigation,
+  ]);
+
   useEffect(() => {
     if (!user?.carType || !user?.location) {
       // Si falta el carType o la ubicaci�n, mostrar el modal para resolver el problema
@@ -485,66 +603,64 @@ const MapScreen = () => {
       return; // Detener la ejecuci�n si falta el carType o la ubicaci�n
     }
   
-    const database = getDatabase();
-    const bookingsRef = query(
-      ref(database, "bookings"),
-      orderByChild("status"),
-      equalTo("NEW")
-    );
-  
-    const unsubscribe = onValue(bookingsRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const bookingsList = Object.keys(data).map((key) => ({
-          id: key,
-          ...data[key],
-        }));
+    const applyFilter = (bookingsList: any[]) => {
+      const filtered = bookingsList.filter((booking) => {
+        const isCarTypeMatch = booking.carType === user?.carType;
+        if (!isCarTypeMatch || !booking.pickup) return false;
 
-  
-        // Filtrar reservas por carType y distancia
-        const filteredBookings = bookingsList.filter((booking) => {
-          const isCarTypeMatch = booking.carType === user?.carType;
-          
-          // Calcular distancia solo si el pickup location est� disponible
-          if (isCarTypeMatch && booking.pickup) {
-            // Definir el rango din�mico seg�n bookLater
-            let maxDistance = 8000; // Rango por defecto si bookLater es false (5 km)
-  
-            if (booking.bookLater) {
-              // Obtener la diferencia en minutos desde el tripDate
-              const currentTime = Date.now();
-              const tripTime = new Date(booking.bookingDate).getTime();
-              const timeDifferenceInMinutes = Math.floor((currentTime - tripTime) / 60000);
-  
-              // Rango inicial de 40 km y aumentar en 10 km cada 10 minutos, hasta un m�ximo de 100 km
-              maxDistance = Math.min(30000 + Math.floor(timeDifferenceInMinutes / 10) * 10000, 70000); // De 40 km a 100 km m�ximo
-            }
-  
-            // Calcular la distancia entre el usuario y el pickup de la reserva
-            const distance = getDistanceFromLatLonInMeters(
-              user.location.lat,
-              user.location.lng,
-              booking.pickup.lat,
-              booking.pickup.lng
-            );
-            
-            // Filtrar solo las reservas dentro del rango calculado din�micamente
-            console.log("distance", distance, "maxDistance", maxDistance);
-            return distance <= maxDistance;
+        let maxDistance = 8000;
+        if (booking.bookLater) {
+          const timeDiffMin = Math.floor((Date.now() - new Date(booking.bookingDate || booking.created_at).getTime()) / 60000);
+          maxDistance = Math.min(30000 + Math.floor(timeDiffMin / 10) * 10000, 70000);
+        }
+
+        const distance = getDistanceFromLatLonInMeters(
+          user.location.lat, user.location.lng,
+          booking.pickup.lat, booking.pickup.lng
+        );
+        return distance <= maxDistance;
+      });
+      setIsMapVisible(filtered.length > 0);
+      setFilteredBookings(filtered);
+    };
+
+    // Carga inicial desde Supabase
+    supabase
+      .from('bookings')
+      .select('*')
+      .eq('status', 'NEW')
+      .then(({ data }) => {
+        const mapped = (data || []).map(mapSupabaseBooking);
+        applyFilter(mapped);
+      });
+
+    // Realtime: nuevas reservas y cambios de estado
+    const channel = supabase
+      .channel('index-new-bookings')
+      .on(
+        'postgres_changes' as any,
+        { event: 'INSERT', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
+        (payload: any) => {
+          const booking = mapSupabaseBooking(payload.new);
+          setFilteredBookings((prev: any[]) => {
+            const updated = [...prev.filter((b) => b.id !== booking.id), booking];
+            applyFilter(updated);
+            return updated;
+          });
+        }
+      )
+      .on(
+        'postgres_changes' as any,
+        { event: 'UPDATE', schema: 'public', table: 'bookings' },
+        (payload: any) => {
+          if (payload.new.status !== 'NEW') {
+            setFilteredBookings((prev: any[]) => prev.filter((b) => b.id !== payload.new.id));
           }
-  
-          return false;
-        });
-  
+        }
+      )
+      .subscribe();
 
-        setIsMapVisible(true);
-        setFilteredBookings(filteredBookings);
-      } else {
-        setFilteredBookings([]); // Estado vac�o cuando no hay reservas
-      }
-    });
-  
-    return () => unsubscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [user?.carType, user?.location]);
   
   // Funci�n para calcular distancia en metros
@@ -705,22 +821,37 @@ const MapScreen = () => {
   }, [user]);
 
   const handleAccept = (booking: any) => {
-   
-    navigation.navigate("RideList", { booking });
-
-
-
-    if (!activeMembership && settings.Membership && user?.walletBalance === 0) {
-      showAlert('warning', 'Membres�a requerida', 'No tienes una membres�a activa. Debes tener una membres�a activa para aceptar reservas.');
+    // Bloquear toma de servicios si el conductor no tiene membresía ACTIVA.
+    // Regla de negocio: sin membresía activa, puede ver pero no tomar.
+    if (isDriverView && !activeMembership) {
+      console.log('[Membership] handleAccept BLOQUEADO: sin membresía activa', {
+        driverIdCandidates,
+        memberships: memberships.length,
+      });
+      showAlert(
+        'warning',
+        'Membresía requerida',
+        'No tienes una membresía activa. Puedes ver los servicios disponibles, pero para tomarlos necesitas renovar tu membresía.',
+        [
+          { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+          {
+            text: 'Renovar membresía',
+            onPress: () => {
+              setAlertVisible(false);
+              navigation.navigate('Wallet');
+            },
+          },
+        ],
+      );
       return;
     }
 
-    // Si todos los checks pasan, procedemos a aceptar la reserva
     if (!user) {
-      showAlert('error', 'Error', 'No se encontr� el perfil del conductor.');
+      showAlert('error', 'Error', 'No se encontró el perfil del conductor.');
       return;
     }
-    
+
+    navigation.navigate("RideList", { booking });
 
     dispatch(acceptBooking({ booking, driverProfile: user }))
       .unwrap()
@@ -759,8 +890,14 @@ const MapScreen = () => {
   const [driverOnline, setDriverOnline] = useState(Boolean(user?.driverActiveStatus));
   const [showIncomingRequest, setShowIncomingRequest] = useState(false);
   const [showNovedades, setShowNovedades] = useState(false);
+  const [showDriverServicesModal, setShowDriverServicesModal] = useState(false);
+  const [driverImmediateFeedEnabled, setDriverImmediateFeedEnabled] = useState(false);
+  const [driverImmediateLoading, setDriverImmediateLoading] = useState(false);
+  const [driverServicesListReady, setDriverServicesListReady] = useState(false);
+  const ENABLE_DRIVER_MAP_RESERVATIONS = false;
   const [driverTab, setDriverTab] = useState<'home' | 'routes' | 'activity' | 'profile'>('home');
-  const [sheetCollapsed, setSheetCollapsed] = useState(false);
+  const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
+  const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -773,11 +910,82 @@ const MapScreen = () => {
     setAlertButtons(buttons || [{ text: 'OK', onPress: () => setAlertVisible(false) }]);
     setAlertVisible(true);
   };
-  const sheetAnim = useRef(new Animated.Value(0)).current;
   const goPulseAnim = useRef(new Animated.Value(0)).current;
   const goBreathAnim = useRef(new Animated.Value(0)).current;
   const destGlowAnim = useRef(new Animated.Value(0)).current;
-  const driverSheetCollapsedOffset = 100;
+
+  const [driverHasUnreadNotif, setDriverHasUnreadNotif] = useState(false);
+  const [driverActiveBookingId, setDriverActiveBookingId] = useState<string | null>(null);
+  const driverLastBookingIdRef = useRef<string | null>(null);
+  const driverBellAnim = useRef(new Animated.Value(0)).current;
+
+  const shakeDriverBell = useCallback(() => {
+    Animated.sequence([
+      Animated.timing(driverBellAnim, { toValue: -15, duration: 80, useNativeDriver: true }),
+      Animated.timing(driverBellAnim, { toValue: 12, duration: 80, useNativeDriver: true }),
+      Animated.timing(driverBellAnim, { toValue: -10, duration: 80, useNativeDriver: true }),
+      Animated.timing(driverBellAnim, { toValue: 8, duration: 80, useNativeDriver: true }),
+      Animated.timing(driverBellAnim, { toValue: -4, duration: 80, useNativeDriver: true }),
+      Animated.timing(driverBellAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
+    ]).start();
+  }, [driverBellAnim]);
+
+  const onDriverBellPress = useCallback(() => {
+    setDriverHasUnreadNotif(false);
+    shakeDriverBell();
+    navigation.navigate('Notifications' as never);
+  }, [navigation, shakeDriverBell]);
+
+  const driverBellRot = driverBellAnim.interpolate({
+    inputRange: [-15, 0, 15],
+    outputRange: ['-15deg', '0deg', '15deg'],
+  });
+
+  const refreshDriverActiveBooking = useCallback(async () => {
+    if (!isDriverView) return;
+    try {
+      const headers = await getSupabaseAuthHeaders();
+      const candidates = [user?.id, user?.auth_id].filter(Boolean);
+      let driverUsersId: string | null = null;
+      for (const c of candidates) {
+        const r = await fetch(
+          `${SUPABASE_URL}/rest/v1/users?or=(id.eq.${c},auth_id.eq.${c})&select=id&limit=1`,
+          { headers },
+        );
+        if (r.ok) {
+          const rows = await r.json();
+          if (rows?.[0]?.id) { driverUsersId = rows[0].id; break; }
+        }
+      }
+      if (!driverUsersId) return;
+      const statuses = ['ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED']
+        .map(s => `"${s}"`)
+        .join(',');
+      const url = `${SUPABASE_URL}/rest/v1/bookings?driver_id=eq.${driverUsersId}&status=in.(${statuses})&order=created_at.desc&limit=1&select=id,status`;
+      const resp = await fetch(url, { headers });
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      const b = rows?.[0];
+      if (b?.id) {
+        if (driverLastBookingIdRef.current && driverLastBookingIdRef.current !== b.id) {
+          setDriverHasUnreadNotif(true);
+          shakeDriverBell();
+        }
+        driverLastBookingIdRef.current = b.id;
+        setDriverActiveBookingId(b.id);
+      } else {
+        driverLastBookingIdRef.current = null;
+        setDriverActiveBookingId(null);
+      }
+    } catch {}
+  }, [isDriverView, user?.auth_id, user?.id, shakeDriverBell]);
+
+  useEffect(() => {
+    if (!isDriverView) return;
+    refreshDriverActiveBooking();
+    const interval = setInterval(refreshDriverActiveBooking, 15000);
+    return () => clearInterval(interval);
+  }, [isDriverView, refreshDriverActiveBooking]);
 
   useEffect(() => {
     const loop = Animated.loop(
@@ -790,50 +998,215 @@ const MapScreen = () => {
     return () => loop.stop();
   }, []);
 
-  const sheetPanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 6,
-      onPanResponderRelease: (_, g) => {
-        if (g.dy > 40) {
-          Animated.timing(sheetAnim, { toValue: 1, duration: 260, useNativeDriver: true }).start();
-          setSheetCollapsed(true);
-        } else if (g.dy < -40) {
-          Animated.timing(sheetAnim, { toValue: 0, duration: 260, useNativeDriver: true }).start();
-          setSheetCollapsed(false);
-        }
-      },
-    })
-  ).current;
-
   const handleDecline = () => {
     setBookingModalDecline(false); // Cierra el modal
     setLastDeclineTime(Date.now()); // Guarda el tiempo actual
   };
 
+  const immediateBookings = useMemo(() => homeImmediateBookings || [], [homeImmediateBookings]);
+
+  useEffect(() => {
+    if (!ENABLE_DRIVER_MAP_RESERVATIONS) {
+      setDriverImmediateFeedEnabled(false);
+      setDriverImmediateLoading(false);
+      setDriverServicesListReady(false);
+      setHomeImmediateBookings([]);
+      return;
+    }
+
+    if (!driverOnline) {
+      setDriverImmediateFeedEnabled(false);
+      setDriverImmediateLoading(false);
+      setDriverServicesListReady(false);
+      return;
+    }
+
+    setDriverImmediateFeedEnabled(false);
+    setDriverImmediateLoading(true);
+    setDriverServicesListReady(false);
+
+    let cancelled = false;
+    let interactionTask: { cancel?: () => void } | null = null;
+    const timeoutId = setTimeout(() => {
+      interactionTask = InteractionManager.runAfterInteractions(() => {
+        if (!cancelled) {
+          setDriverImmediateFeedEnabled(true);
+        }
+      });
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      interactionTask?.cancel?.();
+    };
+  }, [driverOnline, ENABLE_DRIVER_MAP_RESERVATIONS]);
+
   useEffect(() => {
     const now = Date.now();
 
     if (
-      filteredBookings.length > 0 &&
+      ENABLE_DRIVER_MAP_RESERVATIONS &&
+      driverOnline &&
+      driverImmediateFeedEnabled &&
+      !driverImmediateLoading &&
+      immediateBookings.length > 0 &&
       (!lastDeclineTime || now - lastDeclineTime > 15000)
     ) {
       setBookingModalDecline(true); // Muestra el modal solo si han pasado m�s de 15 segundos
+    } else {
+      setBookingModalDecline(false);
     }
-  }, [filteredBookings, lastDeclineTime]);
-  2;
+  }, [driverImmediateFeedEnabled, driverImmediateLoading, driverOnline, immediateBookings, lastDeclineTime, ENABLE_DRIVER_MAP_RESERVATIONS]);
 
-  const incomingBooking = (filteredBookings && filteredBookings.length > 0
-    ? filteredBookings[0]
+  const fetchHomeImmediateBookings = useCallback(async (silent = false) => {
+    if (!ENABLE_DRIVER_MAP_RESERVATIONS || !driverOnline || !driverImmediateFeedEnabled) {
+      setHomeImmediateBookings([]);
+      if (!silent) {
+        setDriverImmediateLoading(false);
+      }
+      return;
+    }
+
+    if (!silent) {
+      setDriverImmediateLoading(true);
+    }
+
+    try {
+      const headers = await getSupabaseAuthHeaders();
+      const driverCoords = extractImmediateCoords({
+        ...profile,
+        ...user,
+        location: user?.location || profile?.location || currentPosition,
+      });
+      const url = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.immediate&limit=1000&select=*&order=created_at.desc`;
+      const response = await fetch(url, { headers });
+      const rows = response.ok ? await response.json() : [];
+
+      if (!Array.isArray(rows)) {
+        setHomeImmediateBookings([]);
+        return;
+      }
+
+      const nextImmediateBookings = rows.filter((booking: any) => {
+        const status = String(booking?.status || '').toUpperCase();
+        if (status !== 'NEW' && status !== 'PENDING') return false;
+
+        const hasDriverAssigned = Boolean(String(booking?.driver || '').trim()) || Boolean(String(booking?.driver_id || '').trim());
+        if (hasDriverAssigned) return false;
+
+        const bookingCarType = String(booking?.car_type || booking?.carType || '').trim().toLowerCase();
+        const driverCarType = String(user?.carType || user?.car_type || '').trim().toLowerCase();
+        if (bookingCarType && driverCarType && bookingCarType !== driverCarType) return false;
+
+        const pickupCoords = extractImmediateCoords(booking);
+        if (!driverCoords || !pickupCoords) return true;
+
+        const distanceKm = calculateImmediateDistanceKm(
+          driverCoords.lat,
+          driverCoords.lng,
+          pickupCoords.lat,
+          pickupCoords.lng,
+        );
+
+        booking.distance_to_pickup_km = distanceKm;
+        return distanceKm <= 3;
+      });
+
+      setHomeImmediateBookings(nextImmediateBookings);
+    } catch (error) {
+      console.error('Error fetching home immediate bookings:', error);
+      setHomeImmediateBookings([]);
+    } finally {
+      if (!silent) {
+        setDriverImmediateLoading(false);
+      }
+    }
+  }, [currentPosition, driverImmediateFeedEnabled, driverOnline, profile, user, ENABLE_DRIVER_MAP_RESERVATIONS]);
+
+  useEffect(() => {
+    if (!ENABLE_DRIVER_MAP_RESERVATIONS || !driverOnline || !driverImmediateFeedEnabled) {
+      setHomeImmediateBookings([]);
+      return;
+    }
+
+    void fetchHomeImmediateBookings(false);
+    const interval = setInterval(() => {
+      void fetchHomeImmediateBookings(true);
+    }, 7000);
+    return () => clearInterval(interval);
+  }, [driverImmediateFeedEnabled, driverOnline, fetchHomeImmediateBookings, ENABLE_DRIVER_MAP_RESERVATIONS]);
+
+  useEffect(() => {
+    if (!ENABLE_DRIVER_MAP_RESERVATIONS || !showDriverServicesModal) {
+      setDriverServicesListReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (!cancelled) {
+        setDriverServicesListReady(true);
+      }
+    });
+
+    if (driverImmediateFeedEnabled) {
+      void fetchHomeImmediateBookings(true);
+    }
+
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, [driverImmediateFeedEnabled, fetchHomeImmediateBookings, showDriverServicesModal, ENABLE_DRIVER_MAP_RESERVATIONS]);
+
+  const incomingBooking = (homeImmediateBookings && homeImmediateBookings.length > 0
+    ? homeImmediateBookings[0]
     : null) as any;
 
   useEffect(() => {
-    if (!IsMapVisible || !driverOnline || showNovedades) {
+    if (!ENABLE_DRIVER_MAP_RESERVATIONS || !IsMapVisible || !driverOnline || showNovedades || !driverImmediateFeedEnabled || driverImmediateLoading) {
       setShowIncomingRequest(false);
       return;
     }
     setShowIncomingRequest(Boolean(incomingBooking));
-  }, [IsMapVisible, driverOnline, incomingBooking, showNovedades]);
+  }, [IsMapVisible, driverImmediateFeedEnabled, driverImmediateLoading, driverOnline, incomingBooking, showNovedades, ENABLE_DRIVER_MAP_RESERVATIONS]);
+
+  const renderImmediateBookingItem = useCallback(({ item, index }: { item: any; index: number }) => {
+    const pickupText =
+      item?.pickup_address ||
+      item?.pickupAddress ||
+      item?.pickup?.add ||
+      item?.pickup?.address ||
+      'Punto de recogida';
+    const dropText =
+      item?.drop_address ||
+      item?.dropAddress ||
+      item?.drop?.add ||
+      item?.drop?.address ||
+      'Destino';
+    const fareValue = item?.driver_share ?? item?.price ?? item?.estimate ?? item?.tripPrice ?? item?.estimate_fare;
+    const fareText = fareValue !== undefined && fareValue !== null ? `$${fareValue}` : 'Tarifa por confirmar';
+
+    return (
+      <View key={item?.id || `immediate-modal-${index}`} style={nS.driverImmediateCard}>
+        <View style={nS.driverImmediateTopRow}>
+          <Text style={nS.driverImmediateFare} numberOfLines={1}>{fareText}</Text>
+          <TouchableOpacity
+            style={nS.driverImmediateAcceptBtn}
+            onPress={() => {
+              setShowDriverServicesModal(false);
+              navigation.navigate('DriverReservations' as never);
+            }}
+          >
+            <Text style={nS.driverImmediateAcceptText}>Abrir</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={nS.driverImmediateRouteText} numberOfLines={1}>Origen: {pickupText}</Text>
+        <Text style={nS.driverImmediateRouteText} numberOfLines={1}>Destino: {dropText}</Text>
+      </View>
+    );
+  }, [navigation]);
 
   useEffect(() => {
     if (driverOnline) {
@@ -968,8 +1341,10 @@ const MapScreen = () => {
   const toggleDriverOnline = async () => {
     const newStatus = !driverOnline;
     setDriverOnline(newStatus);
+    setDriverReservationsMinimized(!newStatus);
     setShowIncomingRequest(false);
     setShowNovedades(false);
+    setShowDriverServicesModal(false);
     setIsEnabled(newStatus);
 
     if (newStatus) {
@@ -990,14 +1365,7 @@ const MapScreen = () => {
   const handleAcceptIncoming = () => {
     if (!incomingBooking) return;
     setShowIncomingRequest(false);
-    setShowNovedades(true);
-    handleAccept(incomingBooking);
-    // Update persistent notification
-    const pickup = incomingBooking.pickup_address || incomingBooking.pickup?.address || 'punto de recogida';
-    updateDriverNotification(
-      '?? En camino al punto de recogida',
-      `Recogiendo pasajero en ${pickup}`,
-    ).catch(() => {});
+    navigation.navigate('DriverReservations' as never);
   };
 
   const handleRejectIncoming = () => {
@@ -1046,7 +1414,10 @@ const MapScreen = () => {
   });
 
   useEffect(() => {
-    dispatch(listenForNewBookings() as any);
+    const unsubscribe = dispatch(listenForNewBookings() as any) as unknown as (() => void) | undefined;
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, [dispatch]);
 
   //-----------------..........................................................................................................................................................................................................
@@ -1062,23 +1433,26 @@ const MapScreen = () => {
 
 
   useEffect(() => {
-    if (user) {
-      const database = getDatabase();
-      const userRef = ref(database, `users/${user.id}`);
+    if (!user) return;
+    const userId = user.id || user.auth_id;
+    if (!userId) return;
 
-      const unsubscribe = onValue(userRef, (snapshot) => {
-        try {
-          const updatedUser = snapshot.val();
-          if (updatedUser) {
-            dispatch(updateProfile(updatedUser));
+    const channel = supabase
+      .channel(`user-profile-${userId}`)
+      .on(
+        'postgres_changes' as any,
+        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
+        (payload: any) => {
+          try {
+            if (payload.new) dispatch(updateProfile(payload.new));
+          } catch (e) {
+            console.error('Error procesando cambio de perfil:', e);
           }
-        } catch (e) {
-          console.error("Error processing snapshot data:", e);
         }
-      });
+      )
+      .subscribe();
 
-      return () => unsubscribe();
-    }
+    return () => { supabase.removeChannel(channel); };
   }, [dispatch, user]);
 
   const takePhoto = async (variable: "profile" | "verifyId") => {
@@ -1668,243 +2042,115 @@ const MapScreen = () => {
     },
   });
 
+  // En bookings.driver se guarda users.id (UUID interno), que en Redux corresponde
+  // a profile.id. user.id puede ser el auth_id de Supabase y no coincidir.
+  const driverIdForBalance = profile?.id ?? user?.id;
+
+  // Replica el cálculo del Historial (DriverActivityScreen): fetch REST con
+  // getSupabaseAuthHeaders, status=COMPLETE, filtrado por día en cliente
+  // sobre `booking_date`, sumando driver_share (con fallback a estimate/price).
   const fetchBalanceBookings = async () => {
-    if (!user || !user.id) {
-      console.warn("Usuario no autenticado.");
-      return;
-    }
-
-   // console.log("Iniciando fetchBalanceBookings para el usuario:", user.id);
-
     try {
-      const bookingsRef = ref(database, "bookings");
-      const statuses = ["ACCEPTED", "REACHED", "NEW", "STARTED", "ARRIVED"];
-      let balance = 0;
+      const headers = await getSupabaseAuthHeaders();
+      const url =
+        `${SUPABASE_URL}/rest/v1/bookings` +
+        `?status=eq.COMPLETE` +
+        `&order=created_at.desc&limit=200`;
+      console.log('[HOY] driverIdForBalance:', driverIdForBalance, '| profile.id:', profile?.id, '| user.id:', user?.id, '| user.auth_id:', user?.auth_id);
+      const res = await fetch(url, { headers });
+      if (!res.ok) {
+        console.warn('[HOY] fetch failed:', res.status, await res.text());
+        return;
+      }
+      const data: any[] = await res.json();
+      console.log('[HOY] total COMPLETE bookings:', data.length);
+      const now = new Date();
+      const isSameDay = (a: Date, b: Date) =>
+        a.getFullYear() === b.getFullYear() &&
+        a.getMonth() === b.getMonth() &&
+        a.getDate() === b.getDate();
 
-      //console.log("Estados a consultar:", statuses);
-
-      // Crear todas las consultas de manera concurrente
-      const queries = statuses.map((status) => {
-        const q = query(
-          bookingsRef,
-          orderByChild("driver_status"),
-          equalTo(`${user.id}_${status}`)
-        );
-        // console.log(`Creando consulta para estado: ${status}`);
-        return q;
+      const todayRows = data.filter(b => {
+        const ts = b.booking_date ? new Date(b.booking_date) : null;
+        return !!ts && !isNaN(ts.getTime()) && isSameDay(ts, now);
       });
+      const total = todayRows.reduce((sum, b) => {
+        const amount = parseFloat(b.driver_share ?? b.estimate ?? b.price ?? 0);
+        return sum + (isNaN(amount) ? 0 : amount);
+      }, 0);
 
-      // Ejecutar todas las consultas en paralelo
-     // console.log("Ejecutando consultas concurrentes...");
-      const snapshots = await Promise.all(queries.map((q) => get(q)));
-    //  console.log("Consultas completadas. Procesando resultados...");
-
-      snapshots.forEach((snapshot, index) => {
-        const status = statuses[index];
-        if (snapshot.exists()) {
-          const bookings = snapshot.val();
-          Object.entries(bookings).forEach(([bookingId, booking]: [string, any]) => {
-            if (
-              booking.trip_cost !== undefined &&
-              booking.trip_cost !== null
-            ) {
-              const tripCost = parseFloat(booking.trip_cost);
-              if (!isNaN(tripCost)) {
-                balance += tripCost;
-              }
-            }
-          });
-        }
-      });
-
-      const roundedBalance = Math.round(balance * 100) / 100;
-      setBalance(roundedBalance);
-     // console.log("Balance calculado:", roundedBalance);
+      setBalance(Math.round(total * 100) / 100);
     } catch (error) {
-      console.error("Error al obtener las ganancias:", error);
+      console.error('Error al obtener las ganancias:', error);
     }
   };
 
   useEffect(() => {
-    if (!user) return;
-
-    const fetchData = async () => {
-      await fetchBalanceBookings();
-    };
-
-    fetchData();
-  }, [dispatch, user?.uid, user?.uid]);
+    if (!driverIdForBalance) return;
+    fetchBalanceBookings();
+  }, [driverIdForBalance]);
 
   useEffect(() => {
-    if (!user || !user.id) return;
-
-    const bookingsRef = ref(database, "bookings");
-    const statuses = ["ACCEPTED", "COMPLETE"];
-    let balance = 0;
-
-    const listeners = statuses.map((status) => {
-      const bookingsQuery = query(
-        bookingsRef,
-        orderByChild("driver_status"),
-        equalTo(`${user.id}_${status}`)
+    if (!driverIdForBalance) return;
+    const channelName = `balance-realtime-${driverIdForBalance}`;
+    try {
+      const existing = (supabase.getChannels?.() ?? []).filter(
+        (c: any) => c.topic === `realtime:${channelName}`
       );
-      return onValue(bookingsQuery, (snapshot) => {
-        let currentBalance = 0;
-        if (snapshot.exists()) {
-          const bookings = snapshot.val();
-          Object.values(bookings).forEach((booking: any) => {
-            const tripCost = parseFloat(booking.trip_cost);
-            if (!isNaN(tripCost)) {
-              currentBalance += tripCost;
-            }
-          });
-        }
-        // Actualizar el balance acumulado
-        setBalance((prevBalance) => prevBalance + currentBalance);
-      });
-    });
+      existing.forEach((c: any) => supabase.removeChannel(c));
+    } catch {}
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes' as any,
+        { event: '*', schema: 'public', table: 'bookings', filter: `driver=eq.${driverIdForBalance}` },
+        () => { fetchBalanceBookings(); }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [driverIdForBalance]);
 
-    // Limpieza de listeners al desmontar el componente
-    return () => {
-      listeners.forEach((unsub) => unsub());
-    };
+  useEffect(() => {
+    if (!user?.id) return;
+    const now = new Date();
+    const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+    const msUntilMidnight = nextMidnight.getTime() - now.getTime();
+    const timeout = setTimeout(() => {
+      setBalance(0);
+      fetchBalanceBookings();
+    }, msUntilMidnight);
+    return () => clearTimeout(timeout);
   }, [user?.id]);
-
   //-----------------..........................................................................................................................................................................................................
 
   const [balance, setBalance] = useState(0);
 
- 
-    useEffect(() => {
-      const fetchActiveBookings = async () => {
-        try {
-  
-          const bookingsRef = ref(database, 'bookings');
-          const statuses = ['ACCEPTED', 'REACHED', 'NEW', 'STARTED', 'ARRIVED'];
-          let count = 0;
-          let closestBooking = null;
-          let closestDifference = Number.MAX_SAFE_INTEGER;
-          const currentTime = Date.now();
-  
-          for (const status of statuses) {
-            const bookingsQuery = query(
-              bookingsRef,
-              orderByChild("driver_status"),
-              equalTo(`${user.id}_${status}`)
-            );
-  
-            const snapshot = await get(bookingsQuery);
-            if (snapshot.exists()) {
-              const bookings = snapshot.val();
-              count += Object.keys(bookings).length;
-  
-              Object.values(bookings).forEach((booking: any) => {
-                if (booking.tripdate) {
-                  const difference = Math.abs(new Date(booking.tripdate).getTime() - currentTime);
-                  if (difference < closestDifference) {
-                    closestDifference = difference;
-                    closestBooking = booking;
-                  }
-                }
-              });
-            }
-          }
-  
-          setActiveBookingsCount(count);
-          setClosestBooking(closestBooking);
-        } catch (error) {
-  
-          console.error('Error al obtener las reservas activas:', error);
-  
-        }
-      };
-  
-      fetchActiveBookings();
-  
-  
 
-    const fetchBalanceBookings = async () => {
-      if (!user || !user.id) {
-        console.warn("Usuario no autenticado.");
-        return;
-      }
-
-      //console.log("Iniciando fetchBalanceBookings para el usuario:", user.id);
-
+  useEffect(() => {
+    const fetchActiveBookings = async () => {
       try {
-        const bookingsRef = ref(database, "bookings");
-        const statuses = ["ACCEPTED", "REACHED", "NEW", "STARTED", "ARRIVED"];
-        let balance = 0;
-
-        //console.log("Estados a consultar:", statuses);
-
-        // Crear todas las consultas de manera concurrente
-        const queries = statuses.map((status) => {
-          const q = query(
-            bookingsRef,
-            orderByChild("driver_status"),
-            equalTo(`${user.id}_${status}`)
-          );
-          // console.log(`Creando consulta para estado: ${status}`);
-          return q;
+        const statuses = ['ACCEPTED', 'REACHED', 'NEW', 'STARTED', 'ARRIVED'];
+        const { data, error } = await supabase
+          .from('bookings')
+          .select('id, booking_date, created_at')
+          .eq('driver', user.id)
+          .in('status', statuses);
+        if (error) throw error;
+        const currentTime = Date.now();
+        let closestBooking = null;
+        let closestDiff = Number.MAX_SAFE_INTEGER;
+        (data || []).forEach((booking: any) => {
+          const t = new Date(booking.booking_date || booking.created_at).getTime();
+          const diff = Math.abs(t - currentTime);
+          if (diff < closestDiff) { closestDiff = diff; closestBooking = booking; }
         });
-
-        // Ejecutar todas las consultas en paralelo
-      //  console.log("Ejecutando consultas concurrentes...");
-        const snapshots = await Promise.all(queries.map((q) => get(q)));
-      //  console.log("Consultas completadas. Procesando resultados...");
-
-        snapshots.forEach((snapshot, index) => {
-          const status = statuses[index];
-          // console.log(`Procesando snapshot para estado "${status}":`, snapshot.exists());
-
-          if (snapshot.exists()) {
-            const bookings = snapshot.val();
-            console.log(
-              `Bookings encontrados para estado "${status}":`, bookings
-            );
-
-            Object.entries(bookings).forEach(
-              ([bookingId, booking]: [string, any]) => {
-                console.log(`Procesando booking ID: ${bookingId}`, booking);
-
-                if (
-                  booking.trip_cost !== undefined &&
-                  booking.trip_cost !== null
-                ) {
-                  const tripCost = parseFloat(booking.trip_cost);
-                  if (!isNaN(tripCost)) {
-                    console.log(
-                      `Trip cost v�lido para booking ID ${bookingId}: ${tripCost}`
-                    );
-                    balance += tripCost;
-                  } else {
-                    console.warn(
-                      `trip_cost inv�lido para booking ID: ${bookingId}`,
-                      booking.trip_cost
-                    );
-                  }
-                } else {
-                  console.warn(
-                    `trip_cost no est� definido para booking ID: ${bookingId}`,
-                    booking
-                  );
-                }
-              }
-            );
-          } else {
-          //  console.log(`No se encontraron bookings para estado "${status}".`);
-          }
-        });
-
-        const roundedBalance = Math.round(balance * 100) / 100;
-        setBalance(roundedBalance);
-      //  console.log("Balance calculado:", roundedBalance);
+        setActiveBookingsCount((data || []).length);
+        setClosestBooking(closestBooking);
       } catch (error) {
-        console.error("Error al obtener las ganancias:", error);
+        console.error('Error al obtener las reservas activas:', error);
       }
     };
-
+    fetchActiveBookings();
     fetchBalanceBookings();
   }, []);
 
@@ -2238,9 +2484,10 @@ const MapScreen = () => {
     <View style={styles.container}>
 
       {(IsMapVisible || isDriverView) ? (
-        <View style={nS.mapStage}>
-          {(!isDriverView || driverOnline) && <MapSensor currentPosition={currentPosition} />}
-          <View pointerEvents="box-none" style={nS.driverOverlay}>
+        <View style={isDriverView ? nS.driverSplitRoot : nS.mapStage}>
+          <View style={isDriverView ? nS.driverMapHalf : nS.mapStage}>
+            <MapSensor currentPosition={currentPosition} />
+            <View pointerEvents="box-none" style={nS.driverOverlay}>
             <View style={nS.driverTopBar}>
               <TouchableOpacity
                 style={nS.driverCircleBtn}
@@ -2256,6 +2503,17 @@ const MapScreen = () => {
                 <Text style={nS.driverEarningsAmount}>$ {Number(balance || 0).toLocaleString('es-CO')}</Text>
               </View>
 
+              <TouchableOpacity
+                style={nS.driverNotifBtn}
+                onPress={onDriverBellPress}
+                activeOpacity={0.8}
+              >
+                <Animated.View style={{ transform: [{ rotate: driverBellRot }] }}>
+                  <Ionicons name="notifications-outline" size={22} color="rgba(255,255,255,0.85)" />
+                </Animated.View>
+                {(driverHasUnreadNotif || !!driverActiveBookingId) && <View style={nS.driverNotifDot} />}
+              </TouchableOpacity>
+
               <View style={nS.driverMiniAvatarRing}>
                 {user?.profile_image ? (
                   <Image source={{ uri: user.profile_image }} style={nS.driverMiniAvatarImg} />
@@ -2265,7 +2523,7 @@ const MapScreen = () => {
               </View>
             </View>
 
-            {showIncomingRequest && incomingBooking && (
+            {ENABLE_DRIVER_MAP_RESERVATIONS && showIncomingRequest && incomingBooking && (
               <View style={nS.incomingRequestCard}>
                 <View style={nS.incomingHeader}>
                   <Text style={nS.incomingType}>T+Plus Servicio</Text>
@@ -2306,43 +2564,12 @@ const MapScreen = () => {
             )}
 
             {!showNovedades && (
-              <Animated.View
-                style={[
-                  nS.driverBottomSheet,
-                  {
-                    transform: [{
-                      translateY: sheetAnim.interpolate({
-                        inputRange: [0, 1],
-                        outputRange: [0, driverSheetCollapsedOffset],
-                      }),
-                    }],
-                  },
-                ]}
-                {...sheetPanResponder.panHandlers}
-              >
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => {
-                    if (sheetCollapsed) {
-                      Animated.timing(sheetAnim, { toValue: 0, duration: 260, useNativeDriver: true }).start();
-                      setSheetCollapsed(false);
-                    }
-                  }}
-                >
-                  <View style={nS.driverSheetHandle} />
-                </TouchableOpacity>
-                <Text style={nS.driverStatusText}>
-                  {driverOnline ? 'Buscando servicios...' : 'Buscar servicios'}
-                </Text>
-                <Text style={nS.driverStatusSub}>
-                  {driverOnline
-                    ? 'Conectado y esperando una solicitud'
-                    : 'Activa tu estado para iniciar a recibir solicitudes de pasajeros'}
+              <View style={nS.driverMiniPanel}>
+                <Text style={nS.driverMiniPanelTitle}>{driverOnline ? 'Buscando servicios...' : 'Buscar servicios'}</Text>
+                <Text style={nS.driverMiniPanelSub}>
+                  {driverOnline ? 'Conectado y esperando solicitudes' : 'Activa GO para iniciar'}
                 </Text>
 
-
-
-                {/* Acceso rapido a Reservas */}
                 <TouchableOpacity
                   style={nS.driverReservasBtn}
                   activeOpacity={0.82}
@@ -2357,7 +2584,7 @@ const MapScreen = () => {
                   </View>
                   <Ionicons name="chevron-forward" size={20} color="rgba(0,229,255,0.7)" />
                 </TouchableOpacity>
-              </Animated.View>
+              </View>
             )}
 
             <View style={nS.driverBottomNav}>
@@ -2434,8 +2661,85 @@ const MapScreen = () => {
                 </TouchableOpacity>
               </View>
             </View>
+
+            <Modal
+              visible={showDriverServicesModal}
+              transparent
+              animationType="slide"
+              onRequestClose={() => setShowDriverServicesModal(false)}
+            >
+              {ENABLE_DRIVER_MAP_RESERVATIONS ? (
+              <View style={nS.driverServicesModalOverlay}>
+                <View style={nS.driverServicesModalPanel}>
+                  <View style={nS.driverServicesModalHeader}>
+                    <Text style={nS.driverServicesModalTitle}>Servicios inmediatos</Text>
+                    <TouchableOpacity onPress={() => setShowDriverServicesModal(false)} style={nS.driverServicesModalCloseBtn}>
+                      <Ionicons name="close" size={20} color="#FFF" />
+                    </TouchableOpacity>
+                  </View>
+
+                  {!driverImmediateFeedEnabled || driverImmediateLoading || !driverServicesListReady ? (
+                    <View style={nS.driverServicesLoadingWrap}>
+                      <ActivityIndicator size="small" color="#00E5FF" />
+                      <Text style={nS.driverServicesLoadingText}>Cargando servicios inmediatos...</Text>
+                    </View>
+                  ) : immediateBookings.length === 0 ? (
+                    <Text style={nS.driverImmediateEmpty}>Aun no hay servicios inmediatos en tu zona.</Text>
+                  ) : (
+                    <FlatList
+                      data={immediateBookings}
+                      keyExtractor={(item: any, index) => String(item?.id || `immediate-modal-${index}`)}
+                      renderItem={renderImmediateBookingItem}
+                      style={nS.driverServicesModalList}
+                      contentContainerStyle={nS.driverServicesModalListContent}
+                      showsVerticalScrollIndicator={false}
+                      initialNumToRender={6}
+                      maxToRenderPerBatch={6}
+                      windowSize={5}
+                      removeClippedSubviews={Platform.OS === 'android'}
+                    />
+                  )}
+                </View>
+              </View>
+              ) : null}
+            </Modal>
+            </View>
           </View>
-        </View>
+
+          {isDriverView && (
+            <View
+              style={[
+                nS.driverReservationsHalf,
+                { height: driverReservationsExpandedHeight },
+                driverReservationsMinimized && nS.driverReservationsHalfMinimized,
+              ]}
+            >
+              <View style={nS.driverReservationsHeaderRow}>
+                <View style={nS.driverReservationsHandle} />
+                <TouchableOpacity
+                  style={nS.driverReservationsToggleBtn}
+                  activeOpacity={0.85}
+                  onPress={() => setDriverReservationsMinimized((prev) => !prev)}
+                >
+                  <Ionicons
+                    name={driverReservationsMinimized ? 'chevron-up' : 'chevron-down'}
+                    size={17}
+                    color="#00E5FF"
+                  />
+                  <Text style={nS.driverReservationsToggleText}>
+                    {driverReservationsMinimized ? 'Maximizar servicios' : 'Minimizar servicios'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {!driverReservationsMinimized && (
+                <View style={nS.driverReservationsBody}>
+                  <DriverReservationsScreen embedded />
+                </View>
+              )}
+            </View>
+          )}
+          </View>
       ) : (
         <View style={nS.wrap}>
           <View pointerEvents="none" style={nS.orbTop} />
@@ -4011,6 +4315,68 @@ const darkStyles = StyleSheet.create({
 });
 
 const nS = StyleSheet.create({
+  driverSplitRoot: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#051A26',
+  },
+  driverMapHalf: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#051A26',
+  },
+  driverReservationsHalf: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 126,
+    zIndex: 20,
+    elevation: 20,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.24)',
+    backgroundColor: 'rgba(8,33,46,0.95)',
+    overflow: 'hidden',
+  },
+  driverReservationsHalfMinimized: {
+    height: 62,
+  },
+  driverReservationsHeaderRow: {
+    height: 62,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(6,27,38,0.98)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,229,255,0.16)',
+    paddingHorizontal: 12,
+  },
+  driverReservationsHandle: {
+    width: 52,
+    height: 5,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+    marginBottom: 8,
+  },
+  driverReservationsToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+  },
+  driverReservationsToggleText: {
+    color: '#00E5FF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  driverReservationsBody: {
+    flex: 1,
+    backgroundColor: '#051A26',
+  },
   mapStage: {
     flex: 1,
     width: '100%',
@@ -4297,12 +4663,14 @@ const nS = StyleSheet.create({
   },
   driverOverlay: {
     ...StyleSheet.absoluteFillObject,
-    justifyContent: 'space-between',
-    paddingTop: 50,
-    paddingBottom: 22,
     paddingHorizontal: 16,
   },
   driverTopBar: {
+    position: 'absolute',
+    top: 50,
+    left: 16,
+    right: 16,
+    zIndex: 30,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -4351,21 +4719,159 @@ const nS = StyleSheet.create({
     justifyContent: 'center',
     overflow: 'hidden',
   },
+  driverNotifBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(10,46,61,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverNotifDot: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#E91E63',
+    shadowColor: '#E91E63',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 4,
+    elevation: 2,
+  },
   driverMiniAvatarImg: {
     width: '100%',
     height: '100%',
   },
-  driverBottomSheet: {
+  driverMiniPanel: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 108,
+    zIndex: 20,
+    elevation: 20,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.24)',
+    backgroundColor: 'rgba(8,33,46,0.88)',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  driverMiniPanelTitle: {
+    color: '#00E5FF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  driverMiniPanelSub: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  driverMiniPanelBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#00E5FF',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  driverMiniPanelBtnText: {
+    color: '#051A26',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  driverServicesModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'flex-end',
+  },
+  driverServicesModalPanel: {
+    maxHeight: '74%',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.2)',
+    backgroundColor: 'rgba(8,33,46,0.98)',
+    paddingTop: 12,
+    paddingHorizontal: 14,
+    paddingBottom: 20,
+  },
+  driverServicesModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  driverServicesModalTitle: {
+    color: '#00E5FF',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  driverServicesModalCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  driverServicesModalList: {
+    width: '100%',
+  },
+  driverServicesModalListContent: {
+    gap: 8,
+    paddingBottom: 8,
+  },
+  driverServicesLoadingWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 26,
+    gap: 10,
+  },
+  driverServicesLoadingText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  driverBottomSheetContainer: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 92,
+    zIndex: 20,
+    elevation: 20,
+  },
+  driverBottomSheetContainerCollapsed: {
+    height: 176,
+  },
+  driverBottomSheetContainerExpanded: {
+    height: 420,
+  },
+  driverBottomSheetBackground: {
+    flex: 1,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
     backgroundColor: 'rgba(8,33,46,0.88)',
     borderWidth: 1,
     borderColor: 'rgba(0,229,255,0.22)',
+    overflow: 'hidden',
+  },
+  driverBottomSheet: {
+    flex: 1,
+    width: '100%',
     paddingTop: 10,
-    paddingBottom: 20,
+    paddingBottom: 12,
     paddingHorizontal: 16,
     alignItems: 'center',
-    marginBottom: 95,
   },
   driverSheetHandle: {
     width: 44,
@@ -4426,6 +4932,72 @@ const nS = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 14,
     marginTop: 10,
+  },
+  driverImmediateListWrap: {
+    width: '100%',
+    marginTop: 4,
+    marginBottom: 6,
+    gap: 8,
+  },
+  driverImmediateScroll: {
+    width: '100%',
+    maxHeight: 420,
+  },
+  driverImmediateScrollContent: {
+    gap: 8,
+    paddingBottom: 2,
+  },
+  driverImmediateTitle: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  driverImmediateEmpty: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  driverImmediateCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.16)',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    minHeight: 64,
+  },
+  driverImmediateTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 5,
+    gap: 10,
+  },
+  driverImmediateFare: {
+    color: '#00E5FF',
+    fontSize: 12,
+    fontWeight: '800',
+    flex: 1,
+  },
+  driverImmediateAcceptBtn: {
+    backgroundColor: '#00E5FF',
+    borderRadius: 9,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    minWidth: 58,
+    alignItems: 'center',
+  },
+  driverImmediateAcceptText: {
+    color: '#051A26',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  driverImmediateRouteText: {
+    color: 'rgba(255,255,255,0.76)',
+    fontSize: 11,
+    marginTop: 1,
+    paddingRight: 4,
   },
   driverReservasBtnIcon: {
     width: 40,
@@ -4559,6 +5131,8 @@ const nS = StyleSheet.create({
     left: 0,
     right: 0,
     bottom:  32,
+    zIndex: 40,
+    elevation: 40,
     paddingHorizontal: 12,
   },
   driverNavItems: {

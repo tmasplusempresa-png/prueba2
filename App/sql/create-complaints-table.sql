@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS public.complaints (
   -- Relación con el usuario que crea la queja
   user_id         UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
 
+  -- Tipo de usuario (denormalizado para consultas eficientes)
+  user_type       VARCHAR(20) NOT NULL DEFAULT 'customer'
+                    CHECK (user_type IN ('customer', 'driver', 'admin')),
+
   -- Relación opcional con un viaje específico
   booking_id      UUID REFERENCES public.bookings(id) ON DELETE SET NULL,
 
@@ -52,9 +56,9 @@ CREATE TABLE IF NOT EXISTS public.complaints (
 -- ÍNDICES PARA OPTIMIZACIÓN
 -- =====================================================
 
--- Buscar quejas por usuario (pantalla de historial)
-CREATE INDEX IF NOT EXISTS idx_complaints_user_id
-  ON public.complaints(user_id);
+-- Buscar quejas por tipo de usuario (filtrado admin)
+CREATE INDEX IF NOT EXISTS idx_complaints_user_type
+  ON public.complaints(user_type);
 
 -- Buscar quejas por booking (incidentes de viaje)
 CREATE INDEX IF NOT EXISTS idx_complaints_booking_id
@@ -89,6 +93,30 @@ CREATE TRIGGER trg_complaints_updated_at
   BEFORE UPDATE ON public.complaints
   FOR EACH ROW
   EXECUTE FUNCTION public.update_complaints_updated_at();
+
+-- TRIGGER: actualizar user_type automáticamente desde tabla users
+CREATE OR REPLACE FUNCTION public.update_complaints_user_type()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Obtener el user_type del usuario que crea la queja
+  SELECT user_type INTO NEW.user_type
+  FROM public.users
+  WHERE id = NEW.user_id;
+
+  -- Si no se encuentra, usar 'customer' por defecto
+  IF NEW.user_type IS NULL THEN
+    NEW.user_type = 'customer';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_complaints_user_type ON public.complaints;
+CREATE TRIGGER trg_complaints_user_type
+  BEFORE INSERT ON public.complaints
+  FOR EACH ROW
+  EXECUTE FUNCTION public.update_complaints_user_type();
 
 -- =====================================================
 -- RLS (Row Level Security)

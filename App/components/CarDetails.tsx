@@ -8,8 +8,7 @@ import {
   TouchableOpacity,
   ScrollView,
 } from "react-native";
-import { database } from "@/config/SupabaseConfig";
-import { ref, get } from "firebase/database";
+import supabase from "@/config/SupabaseConfig";
 import { FareCalculator } from "@/common/actions/FareCalculator";
 
 const roundPrice = (price) => {
@@ -34,66 +33,56 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
 
   const fetchTaxiOptionsFromFirebase = async () => {
     try {
-      const cartypesRef = ref(database, "cartypes");
-      const snapshot = await get(cartypesRef);
+      const { data: carTypes, error } = await supabase
+        .from('car_types')
+        .select('*')
+        .eq('is_active', true);
 
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-    const options = await Promise.all(Object.keys(data).map(async (key) => {
+      if (!error && carTypes?.length) {
+        const options = carTypes.map((ct: any) => {
   const vehicle = {
-    value: key,
-    name: data[key].name,
-    capacity: data[key].typeService,
-    service: data[key].extra_info,
-    carImage: data[key].image || "",
-    base_fare: data[key].base_fare || 0,
-    rate_per_unit_distance: data[key].rate_per_unit_distance || 0,
-    rate_per_hour: data[key].rate_per_hour || 0,
-    min_fare: data[key].min_fare || 0,
-    convenience_fees: data[key].convenience_fees || 0,
-    convenience_fee_type: data[key].convenience_fee_type || "flat",
+    value: ct.id,
+    name: ct.name,
+    capacity: ct.capacity || 0,
+    service: ct.description || '',
+    carImage: ct.image || '',
+    base_fare: parseFloat(ct.base_price) || 0,
+    base_fare_inter: parseFloat(ct.base_price_inter) || 0,
+    rate_per_unit_distance: parseFloat(ct.price_per_km) || 0,
+    rate_per_unit_distance_inter: parseFloat(ct.price_per_km_inter) || 0,
+    rate_per_hour: parseFloat(ct.rate_per_hour) || 0,
+    rate_per_hour_inter: parseFloat(ct.rate_per_hour_inter) || 0,
+    min_fare: parseFloat(ct.min_fare) || 0,
+    min_fare_inter: parseFloat(ct.min_fare_inter) || 0,
+    delta_aeropuerto: parseFloat(ct.delta_aeropuerto) || 0,
+    delta_aeropuerto_prog: parseFloat(ct.delta_aeropuerto_prog) || 0,
+    convenience_fees: parseFloat(ct.convenience_fee) || 0,
+    convenience_fee_type: ct.convenience_fee_type || 'flat',
+    umbral_intermunicipal_km: parseFloat(ct.umbral_intermunicipal_km) || 29,
   };
 
-  const response = await fetch('https://us-central1-treasupdate.cloudfunctions.net/calculatePrice2', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      bookingData: {
-        roundedDistance: parseFloat(distance)/1000,
-        durationMinutes: parseFloat(duration)/60,
-        carType: vehicle,
-      },
-      tolls: [],
-      isScheduled,
-      settings: {
-        decimal: 2,
-        distanceIntermunicipal: 50,
-      },
-      addressOrigin: "Origen",
-      addressDestination: "Destino",
-      selectedPaymentMethod: "cash",
-      selectedUser: null,
-      authState: null,
-      filteredUsers: [],
-    }),
-  });
+  const distKm  = parseFloat(distance) / 1000;
+  const durMin  = parseFloat(duration) / 60;
+  const isIntermunicipal = distKm > vehicle.umbral_intermunicipal_km;
 
-  const fareDetails = await response.json();
-  console.log(distance,"jansjkasnjdsanjasbn")
+  const { grandTotal } = FareCalculator(
+    distKm,
+    durMin * 60,
+    vehicle,
+    null,
+    2,
+    { isScheduled, isIntermunicipal }
+  );
+
   return {
     ...vehicle,
-    estimatedPrice: fareDetails ? fareDetails.estimateFare : 0,
+    estimatedPrice: grandTotal,
   };
-}));
+});
 
 
         setTaxiOptions(options);
-        console.log(options,"options")
-        if (options.length > 0) {
-          setSelectedTaxi(options[0].value);
-        }
+        if (options.length > 0) setSelectedTaxi(options[0].value);
       }
     } catch (error) {
       console.error("Error obteniendo datos:", error);
@@ -108,12 +97,16 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
       return null;
     }
 
-    let { totalCost, grandTotal, convenience_fees } = FareCalculator(
+    const tollsCost = tolls.reduce((acc, toll) => acc + toll.PriceToll, 0);
+    const isIntermunicipal = roundedDistance > (carType.umbral_intermunicipal_km || 29);
+
+    let { totalCost, grandTotal, clientTotal, convenience_fees } = FareCalculator(
       roundedDistance,
       durationMinutes * 60,
       carType,
       {},
-      2
+      2,
+      { isScheduled, isIntermunicipal, tollsTotal: tollsCost }
     );
 
     if (isNaN(totalCost) || isNaN(grandTotal) || isNaN(convenience_fees)) {
@@ -125,20 +118,14 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
       return null;
     }
 
-    const tollsCost = tolls.reduce((acc, toll) => acc + toll.PriceToll, 0);
-    grandTotal += tollsCost * 2;
-
-    if (isScheduled) {
-      grandTotal += 4000;
-    }
-
     return {
-      totalCost: totalCost,
+      totalCost,
       estimateFare: grandTotal,
+      clientFare: clientTotal,
       estimateTime: durationMinutes,
       convenienceFees: convenience_fees,
-      driverShare: grandTotal - convenience_fees,
-      tollsCost: tollsCost,
+      driverShare: totalCost,
+      tollsCost,
     };
   };
 

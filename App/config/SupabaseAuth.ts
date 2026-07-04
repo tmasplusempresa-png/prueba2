@@ -1,5 +1,6 @@
 import { AuthError, AuthTokenResponsePassword, Session, User } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
+import * as ExpoLinking from 'expo-linking';
 import { supabase } from './SupabaseConfig';
 
 // ==================== INTERFACES TYPESCRIPT ====================
@@ -175,9 +176,7 @@ export const SupabaseAuth = {
       const expoConfig = Constants.expoConfig as any;
       const manifest = Constants.manifest as any;
       const extra = expoConfig?.extra || manifest?.extra || {};
-      const defaultRedirect = __DEV__
-        ? 'http://localhost:5173/register-driver'
-        : 'https://dashboard.tmasplus.com/register-driver';
+      const defaultRedirect = 'https://dashboard.tmasplus.com/welcome';
       const emailRedirectTo =
         extra?.SUPABASE_EMAIL_REDIRECT_TO ||
         (process.env?.SUPABASE_EMAIL_REDIRECT_TO as string | undefined) ||
@@ -316,10 +315,15 @@ export const SupabaseAuth = {
         return { data: null, error: AUTH_ERRORS.INVALID_EMAIL, success: false };
       }
 
+      // El enlace de recuperacion debe abrir la app (deep link) y NO el dashboard web.
+      // tmasplus://reset-password lo maneja LoginScreen -> pantalla ResetPassword.
+      const defaultRedirect = ExpoLinking.createURL('reset-password');
+      const redirectTo = request.redirectTo || defaultRedirect;
+
       const response = await supabase.auth.resetPasswordForEmail(
         request.email.toLowerCase().trim(),
         {
-          redirectTo: request.redirectTo
+          redirectTo
         }
       );
 

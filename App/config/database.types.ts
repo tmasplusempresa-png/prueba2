@@ -29,6 +29,9 @@ export interface Database {
           approved: boolean
           blocked: boolean
           referral_id: string | null
+          referred_by_code: string | null
+          document_type: string | null
+          document_number: string | null
           city: string | null
           driver_active_status: boolean
           license_number: string | null
@@ -61,6 +64,9 @@ export interface Database {
           approved?: boolean
           blocked?: boolean
           referral_id?: string | null
+          referred_by_code?: string | null
+          document_type?: string | null
+          document_number?: string | null
           city?: string | null
           driver_active_status?: boolean
           license_number?: string | null
@@ -93,6 +99,9 @@ export interface Database {
           approved?: boolean
           blocked?: boolean
           referral_id?: string | null
+          referred_by_code?: string | null
+          document_type?: string | null
+          document_number?: string | null
           city?: string | null
           driver_active_status?: boolean
           license_number?: string | null
@@ -185,6 +194,19 @@ export interface Database {
           capacity: number
           is_active: boolean
           created_at: string
+          updated_at: string
+          base_price_inter: number
+          price_per_km_inter: number
+          rate_per_hour: number
+          rate_per_hour_inter: number
+          valor_hora: number
+          min_fare: number
+          min_fare_inter: number
+          delta_aeropuerto: number
+          delta_aeropuerto_prog: number
+          convenience_fee: number
+          convenience_fee_type: string
+          umbral_intermunicipal_km: number
         }
         Insert: {
           id?: string
@@ -196,6 +218,19 @@ export interface Database {
           capacity?: number
           is_active?: boolean
           created_at?: string
+          updated_at?: string
+          base_price_inter?: number
+          price_per_km_inter?: number
+          rate_per_hour?: number
+          rate_per_hour_inter?: number
+          valor_hora?: number
+          min_fare?: number
+          min_fare_inter?: number
+          delta_aeropuerto?: number
+          delta_aeropuerto_prog?: number
+          convenience_fee?: number
+          convenience_fee_type?: string
+          umbral_intermunicipal_km?: number
         }
         Update: {
           id?: string
@@ -207,6 +242,19 @@ export interface Database {
           capacity?: number
           is_active?: boolean
           created_at?: string
+          updated_at?: string
+          base_price_inter?: number
+          price_per_km_inter?: number
+          rate_per_hour?: number
+          rate_per_hour_inter?: number
+          valor_hora?: number
+          min_fare?: number
+          min_fare_inter?: number
+          delta_aeropuerto?: number
+          delta_aeropuerto_prog?: number
+          convenience_fee?: number
+          convenience_fee_type?: string
+          umbral_intermunicipal_km?: number
         }
       }
       bookings: {
@@ -236,6 +284,9 @@ export interface Database {
           driver_contact: string | null
           driver_rating: number | null
           car_image: string | null
+          car_model: string | null
+          car_color: string | null
+          plate_number: string | null
           vehicle_number: string | null
           vehicle_model: string | null
           vehicle_make: string | null
@@ -283,6 +334,9 @@ export interface Database {
           driver_contact?: string | null
           driver_rating?: number | null
           car_image?: string | null
+          car_model?: string | null
+          car_color?: string | null
+          plate_number?: string | null
           vehicle_number?: string | null
           vehicle_model?: string | null
           vehicle_make?: string | null
@@ -330,6 +384,9 @@ export interface Database {
           driver_contact?: string | null
           driver_rating?: number | null
           car_image?: string | null
+          car_model?: string | null
+          car_color?: string | null
+          plate_number?: string | null
           vehicle_number?: string | null
           vehicle_model?: string | null
           vehicle_make?: string | null

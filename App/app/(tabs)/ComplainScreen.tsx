@@ -35,6 +35,8 @@ const Complain = ({ navigation }: Props) => {
   const user = useSelector((state: RootState) => state.auth.user);
   const userAny = user as any;
   const complains = useSelector((state: RootState) => state.complains.list) || [];
+  const complainLoading = useSelector((state: RootState) => state.complains.loading);
+  const complainError = useSelector((state: RootState) => state.complains.error);
 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -66,6 +68,13 @@ const Complain = ({ navigation }: Props) => {
       dispatch(fetchComplains(user.id));
     }
   }, [dispatch, user?.id]);
+
+  // Manejar errores del Redux
+  useEffect(() => {
+    if (complainError) {
+      showAlert('error', 'Error', complainError);
+    }
+  }, [complainError]);
 
   useEffect(() => {
     Animated.loop(
@@ -265,8 +274,14 @@ const Complain = ({ navigation }: Props) => {
       evidenceUrls,
     };
 
-    dispatch(addComplain(complainData));
-    setShowSuccess(true);
+    try {
+      // Dispatch y esperar a que se complete
+      await dispatch(addComplain(complainData)).unwrap();
+      setShowSuccess(true);
+    } catch (error: any) {
+      // El error ya se maneja en el useEffect arriba, no necesitamos hacer nada más aquí
+      console.error('Error enviando queja:', error);
+    }
   };
 
   const resetAndCloseSuccess = () => {
@@ -466,17 +481,19 @@ const Complain = ({ navigation }: Props) => {
 
         <View style={styles.ctaSection}>
           <TouchableOpacity
-            style={[styles.submitBtn, uploadingImages && { opacity: 0.7 }]}
+            style={[styles.submitBtn, (uploadingImages || complainLoading) && { opacity: 0.7 }]}
             onPress={submitComplain}
             activeOpacity={0.9}
-            disabled={uploadingImages}
+            disabled={uploadingImages || complainLoading}
           >
             <Animated.View style={[styles.submitGlow, { opacity: ctaGlowOpacity }]} />
             <View style={styles.submitContent}>
-              {uploadingImages ? (
+              {uploadingImages || complainLoading ? (
                 <>
                   <ActivityIndicator size="small" color="#051A26" />
-                  <Text style={styles.submitText}>Subiendo imágenes...</Text>
+                  <Text style={styles.submitText}>
+                    {uploadingImages ? 'Subiendo imágenes...' : 'Enviando solicitud...'}
+                  </Text>
                 </>
               ) : (
                 <>

@@ -18,6 +18,18 @@ import Constants from 'expo-constants';
 import { login, logout } from "@/common/reducers/authReducer";
 import { checkAppVersion } from "@/hooks/UpdateVersionApp";
 import { Linking } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { 
+  restoreAppState, 
+  clearActiveTripId, 
+  setDriverModeActive 
+} from '@/common/services/AppStateRestoration';
+import { 
+  cancelActiveTripNotification 
+} from '@/common/services/ActiveTripNotificationService';
+import { 
+  dismissDriverNotification 
+} from '@/hooks/DriverNotificationService';
 // AsyncStorage/router/auth helper imports removed (no longer needed here)
 
 // TODO: Sentry disabled for build testing - uncomment after successful build
@@ -264,21 +276,25 @@ const RootLayout = () => {
           return;
         }
 
-        // Si tenemos tokens en el fragmento, setear la sesión manualmente
-        if (params.access_token) {
+        // Si tenemos tokens en el fragmento, setear la sesión manualmente.
+        // Solo lo hacemos cuando tenemos refresh_token para evitar dejar una sesión incompleta.
+        if (params.access_token && params.refresh_token) {
           try {
             await supabase.auth.setSession({
               access_token: params.access_token,
               refresh_token: params.refresh_token,
             });
             console.log('Sesión iniciada desde deep link');
-            // Mostrar mensaje de confirmación breve en UI
             setConfirmationMessage('Email confirmado. ¡Bienvenido!');
           } catch (e) {
             console.warn('No se pudo establecer la sesión desde el deep link:', e);
             setConfirmationMessage('Confirmación completada. Puedes cerrar esta ventana.');
           }
           return;
+        }
+
+        if (params.access_token && !params.refresh_token) {
+          console.warn('Deep link de auth no incluyó refresh_token. Se omite setSession manual y se usa getSessionFromUrl si está disponible.');
         }
 
         // Fallback: intentar que supabase procese la URL (en caso de que la SDK lo soporte)
@@ -335,11 +351,19 @@ const RootLayout = () => {
 
         foregroundSubscription = Notifications.addNotificationReceivedListener(() => {});
         backgroundSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-          // Tapping any notification brings the app to the foreground automatically.
+          // ✅ Tapping any notification brings the app to the foreground automatically.
           // For driver-active notifications, the OS foregrounds the app on tap.
           const data = response.notification.request.content.data as Record<string, unknown> | undefined;
           if (data?.type === 'driver-active') {
             // App is now foregrounded — no extra navigation needed
+            console.log('[_layout] Notificación de conductor activo tocada');
+          }
+          if ((data?.type === 'active-trip' || data?.type === 'customer-active-trip') && typeof data?.bookingId === 'string') {
+            // ✅ Guardar para navegación — se procesa en AppStateRestoration
+            AsyncStorage.setItem('pending_customer_active_trip', data.bookingId).catch(() => {
+              // ignore storage errors
+            });
+            console.log('[_layout] Notificación de viaje activo guardada para navegación');
           }
         });
 
@@ -421,10 +445,30 @@ const RootLayout = () => {
         // Profile data will be fetched as needed in individual screens
         const token = (await GetPushToken()) || "token_error";
         dispatch(updatePushToken(token, Platform.OS === "ios" ? "IOS" : "ANDROID"));
-        await startBackgroundLocation();
+        // La ubicación en SEGUNDO PLANO ya NO se solicita aquí: violaba la
+        // Prominent Disclosure de Google (se pedía a todos al iniciar sesión,
+        // sin explicación previa). Ahora solo se solicita a los conductores,
+        // tras aceptar la divulgación, cuando empieza un viaje activo
+        // (ver DriverLocationDisclosureGate y driverLocationTask).
         await startForegroundLocationUpdates(dispatch);
+        
+        // ✅ RESTAURAR ESTADO DE VIAJES ACTIVOS Y NOTIFICACIONES
+        await restoreAppState(user.id);
       } else {
         dispatch(logout());
+
+        // ✅ LIMPIAR NOTIFICACIONES Y ESTADO AL CERRAR SESIÓN
+        await cancelActiveTripNotification();
+        await dismissDriverNotification();
+        await clearActiveTripId();
+        await setDriverModeActive(false);
+
+        // Limpiar flags de saludo por voz para que se vuelva a saludar en el próximo login
+        try {
+          const keys = await AsyncStorage.getAllKeys();
+          const greetedKeys = keys.filter((k) => k.startsWith('greeted_'));
+          if (greetedKeys.length > 0) await AsyncStorage.multiRemove(greetedKeys);
+        } catch {}
       }
       setAuthStateChecked(true);
     });

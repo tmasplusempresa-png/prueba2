@@ -1,0 +1,32 @@
+# Flujo E2E: Login de usuario
+# Requisito: app instalada con `expo run:android` o `expo run:ios`
+# Ejecución: maestro test .maestro/login.yaml
+
+appId: com.tmasplus.tmasplus
+---
+- launchApp:
+    clearState: true
+
+# Espera a que la pantalla de login esté visible
+- assertVisible:
+    text: "Iniciar Sesión"
+    timeout: 10000
+
+# Ingresa credenciales
+- tapOn:
+    text: "Correo electrónico"
+- inputText: "${EMAIL:-test@example.com}"
+
+- tapOn:
+    text: "Contraseña"
+- inputText: "${PASSWORD:-Test1234!}"
+
+# Oculta el teclado y presiona el botón
+- hideKeyboard
+- tapOn:
+    text: "Iniciar Sesión"
+
+# Verifica que el login fue exitoso (pantalla principal o tabs visibles)
+- assertVisible:
+    text: "Inicio"
+    timeout: 15000

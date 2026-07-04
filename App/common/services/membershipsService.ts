@@ -4,7 +4,7 @@
  */
 
 import Constants from 'expo-constants';
-import { supabase } from '@/config/SupabaseConfig';
+import { supabase, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 
 const extra = Constants.expoConfig?.extra || {};
 const SUPABASE_URL = extra.SUPABASE_URL as string;
@@ -40,12 +40,12 @@ export const getMembershipsViaREST = async (conductorId: string): Promise<Member
 
     console.log('📡 GET:', url.substring(0, 100) + '...');
 
+    // Usa el JWT del usuario autenticado para que RLS (conductor = auth.uid()) permita ver sus filas.
+    const authHeaders = await getSupabaseAuthHeaders(true);
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
+        ...authHeaders,
         'Prefer': 'return=representation',
       },
     });
@@ -84,7 +84,7 @@ export const getMembershipsViaSDK = async (conductorId: string): Promise<Members
   try {
     console.log('🔷 [SDK] Obteniendo memberships via SDK para:', conductorId);
 
-    const { data, error, status } = await supabase
+    const { data, error } = await supabase
       .from('memberships')
       .select('uid, conductor, status, costo, fecha_inicio, fecha_terminada, periodo, created_at, updated_at')
       .eq('conductor', conductorId)

@@ -417,7 +417,7 @@ const DaviplataPayment = (props) => {
     return (<ScrollView>
         <View style={styles.container}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-                <AntDesign name="arrowleft" size={24} color="#000" />
+                <AntDesign name="arrow-left" size={24} color="#000" />
             </TouchableOpacity>
             <Image source={require('./../../assets/payment-icons/daviplata-logo.png')}
                 style={{ width: '80%', height: 100 }} />
