@@ -1,0 +1,11 @@
+[**TmasPlus — Referencia de código**](../../../../README.md)
+
+***
+
+[TmasPlus — Referencia de código](../../../../README.md) / [common/store/types](../README.md) / CHANGE\_PASSWORD\_FAILED
+
+# Variable: CHANGE\_PASSWORD\_FAILED
+
+> `const` **CHANGE\_PASSWORD\_FAILED**: `"CHANGE_PASSWORD_FAILED"` = `"CHANGE_PASSWORD_FAILED"`
+
+Defined in: [common/store/types.ts:179](https://github.com/tmasplusempresa-png/prueba2/blob/4901cd1d9dfde0ca0fccf524b740edfeb7ef3df7/App/common/store/types.ts#L179)
