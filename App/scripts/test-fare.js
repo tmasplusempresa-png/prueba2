@@ -9,10 +9,13 @@
 
 const readline = require('readline');
 
-// ─── Constantes del negocio ────────────────────────────────────────────────
-const DELTA_PROGRAMADO_FIJO = 4_000;   // recargo programado sin aeropuerto
-const DELTA_PROTOCOLO       = 5_000;   // recargo bioseguridad
-const MARGEN_CLIENTE        = 1.25;    // conductor recibe 80 %, cliente paga 25 % más
+// ─── Constantes del negocio (alineadas con App/constants/fare.ts) ────────
+// Conceptos independientes y aditivos. Si dos coinciden (ej. aeropuerto +
+// programado), suman naturalmente. Sin pre-suma `delta_aeropuerto_prog`.
+const DELTA_AEROPUERTO = 12_000;
+const DELTA_PROGRAMADO = 4_800;        // antes 4_000, alineado con Excel oficial
+const DELTA_PROTOCOLO  = 5_000;
+const MARGEN_CLIENTE   = 1.25;
 
 // ─── Formato moneda colombiana ─────────────────────────────────────────────
 const fmt = (v) => `$${Math.round(v).toLocaleString('es-CO')}`;
@@ -40,15 +43,18 @@ function calcularTarifa(rates, params) {
 
   const costoKm        = pricePerKm  * distanceKm;
   const costoTiempo    = pricePerMin * durationMin;
-  const dAeropuerto    = isAirport   ? rates.delta_aeropuerto : 0;
-  const dProgramado    = isScheduled ? (isAirport ? rates.delta_aeropuerto_prog : DELTA_PROGRAMADO_FIJO) : 0;
-  const dProtocolo     = isProtocol  ? DELTA_PROTOCOLO : 0;
+  // Conceptos independientes (sin rama aero+prog). Si ambos: suma natural = 16800.
+  const dAeropuerto    = isAirport   ? DELTA_AEROPUERTO : 0;
+  const dProgramado    = isScheduled ? DELTA_PROGRAMADO : 0;
+  const dProtocolo     = isProtocol  ? DELTA_PROTOCOLO  : 0;
 
   const suma           = baseFare + costoKm + costoTiempo + dAeropuerto + dProgramado + dProtocolo + tolls + parking;
-  const rawTotal       = Math.max(suma, minFare);
-  let   totalConductor = Math.ceil(rawTotal / 100) * 100;
+  // ROUNDUP centena primero, luego aplicar piso min_fare (alineado con backendRemoto).
+  let   totalConductor = Math.ceil(suma / 100) * 100;
+  if (totalConductor < minFare) totalConductor = minFare;
 
-  const valorCliente   = Math.ceil(rawTotal * MARGEN_CLIENTE / 100) * 100;
+  // Margen sobre total_conductor post-roundup, post-min (alineado con Excel Tapa!F13-F14).
+  const valorCliente   = Math.ceil(totalConductor * MARGEN_CLIENTE / 100) * 100;
 
   return {
     cobertura,

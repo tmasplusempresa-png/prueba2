@@ -1,20 +1,38 @@
 /**
- * Fórmula alineada con la hoja "board" del Excel:
- *   precio = base_fare + (price_per_km × km) + (rate_per_hour × minutos)
- *            + delta_aeropuerto + delta_programado + protocolo + peajes + parqueadero
- *   total  = max(precio, min_fare)  →  redondeado al 100 más cercano por arriba
+ * Fórmula alineada con la hoja "board" del Excel oficial y con los demás
+ * canales (Agente/backendRemoto, AplicacionWebTmasplus, sistema_calculo).
  *
- * NOTA: rate_per_hour es una tarifa POR MINUTO (columna "Rate_per_Hour" del Excel).
- *       El campo valor_hora (opcional) contiene la tarifa real por hora = rate_per_hour × 60.
+ *   total_conductor = ROUNDUP((base + km*precio_km + min*precio_min
+ *                              + delta_aeropuerto + delta_programado
+ *                              + delta_protocolo + peajes + parqueadero
+ *                              + extras) / 100) * 100
+ *   total_conductor = MAX(total_conductor, min_fare)     ← piso post-roundup
+ *   valor_cliente   = ROUNDUP(total_conductor * 1.25 / 100) * 100   ← margen Erixon
+ *
+ * NOTA: la tarifa por minuto se deriva de `valor_hora / 60`. El campo legacy
+ *       `rate_per_hour` (que en BD también representa precio/min) se mantiene
+ *       como fallback únicamente.
+ *
+ * Conceptos independientes y aditivos. Si dos aplican (ej. aeropuerto +
+ * programado), se SUMAN naturalmente en el subtotal — no hay columna BD
+ * pre-sumada `delta_aeropuerto_prog`.
  *
  * context:
- *   isAirport       - true si origen o destino es aeropuerto → suma delta_aeropuerto
- *   isScheduled     - true si el viaje es programado        → suma delta_aeropuerto_prog
- *   isProtocol      - true si aplica protocolo              → suma 5 000 fijo
- *   tollsTotal      - total de peajes (ya calculado)
- *   parking         - costo de parqueadero
- *   isIntermunicipal- true si distancia > 50 km → usa tarifas _inter
+ *   isAirport       - true si origen o destino es aeropuerto (detección
+ *                     Haversine recomendada vía common/utils/airports.ts).
+ *   isScheduled     - true si el viaje es programado.
+ *   isProtocol      - true si aplica protocolo.
+ *   tollsTotal      - total de peajes (ya calculado).
+ *   parking         - costo de parqueadero.
+ *   isIntermunicipal- true si distancia > umbral (default 29 km) → usa tarifas _inter.
  */
+import {
+  DELTA_AEROPUERTO,
+  DELTA_PROGRAMADO,
+  DELTA_PROTOCOLO,
+  MARGEN_CLIENTE,
+} from '@/constants/fare';
+
 export const FareCalculator = (
   distance: number,
   time: number,
@@ -39,16 +57,30 @@ export const FareCalculator = (
     isIntermunicipal = false,
   } = context;
 
+  // pick: si es intermunicipal y existe el valor inter (incluso 0 explícito),
+  // usar inter. `!= null` cubre null/undefined; 0 legítimo no cae a urbano.
   const pick = (urban: any, inter: any) =>
-    isIntermunicipal && inter ? inter : urban;
+    isIntermunicipal && inter != null ? inter : urban;
 
   const ratePerUnitDistance = Math.round(
     parseFloat(pick(rateDetails.rate_per_unit_distance, rateDetails.rate_per_unit_distance_inter))
   );
-  // rate_per_hour es tarifa por MINUTO (no por hora)
-  const ratePerMinute = Math.round(
-    parseFloat(pick(rateDetails.rate_per_hour, rateDetails.rate_per_hour_inter))
-  );
+
+  // Precio por minuto: derivado de `valor_hora / 60` (fuente canónica). Si la
+  // categoría no expone `valor_hora`, fallback a `rate_per_hour` legacy.
+  const valorHora = parseFloat(rateDetails.valor_hora || 0);
+  let ratePerMinute: number;
+  if (valorHora > 0) {
+    const ratePerMinuteUrban = valorHora / 60;
+    ratePerMinute = Math.round(
+      isIntermunicipal ? ratePerMinuteUrban / 0.5 : ratePerMinuteUrban
+    );
+  } else {
+    ratePerMinute = Math.round(
+      parseFloat(pick(rateDetails.rate_per_hour, rateDetails.rate_per_hour_inter) || 0)
+    );
+  }
+
   const baseFare = Math.round(
     parseFloat(pick(rateDetails.base_fare, rateDetails.base_fare_inter) || 0)
   );
@@ -56,8 +88,13 @@ export const FareCalculator = (
     parseFloat(pick(rateDetails.min_fare, rateDetails.min_fare_inter) || 0)
   );
   const convenienceFees = Math.round(parseFloat(rateDetails.convenience_fees || 0));
-  const deltaAeropuerto = Math.round(parseFloat(rateDetails.delta_aeropuerto || 0));
-  const deltaProgramado = Math.round(parseFloat(rateDetails.delta_aeropuerto_prog || 0));
+
+  if (minFare <= 0) {
+    console.warn(
+      '[FareCalculator] min_fare=0 o ausente para categoría',
+      rateDetails.id ?? rateDetails.name
+    );
+  }
 
   if (
     isNaN(distance) || isNaN(time) || isNaN(ratePerUnitDistance) ||
@@ -66,48 +103,47 @@ export const FareCalculator = (
     console.error('Invalid numeric value in FareCalculator:', {
       distance, time, ratePerUnitDistance, ratePerMinute, baseFare, minFare, convenienceFees,
     });
-    return { totalCost: 0, grandTotal: 0, convenience_fees: 0 };
+    return { totalCost: 0, grandTotal: 0, clientTotal: 0, convenience_fees: 0 };
   }
 
-  // time está en segundos; dividimos por 60 para obtener minutos
-  let baseCalculated = Math.round(
+  // Componentes (time entra en segundos; convertir a minutos para precio/min)
+  let sumaComponentes = Math.round(
     (ratePerUnitDistance * distance) + (ratePerMinute * (time / 60))
   );
 
-  if (baseFare > 0) baseCalculated += baseFare;
+  if (baseFare > 0) sumaComponentes += baseFare;
 
-  if (instructionData?.parcelTypeSelected) baseCalculated += instructionData.parcelTypeSelected.amount;
-  if (instructionData?.optionSelected) baseCalculated += instructionData.optionSelected.amount;
+  if (instructionData?.parcelTypeSelected) sumaComponentes += instructionData.parcelTypeSelected.amount;
+  if (instructionData?.optionSelected) sumaComponentes += instructionData.optionSelected.amount;
 
-  // Recargos leídos de car_types
-  if (isAirport && deltaAeropuerto > 0) baseCalculated += deltaAeropuerto;
-  // Programado: aeropuerto usa delta_aeropuerto_prog de BD; sin aeropuerto usa $4.000 fijo
-  if (isScheduled) baseCalculated += isAirport ? deltaProgramado : 4_000;
-  if (isProtocol) baseCalculated += 5000;
-  if (tollsTotal > 0) baseCalculated += tollsTotal;
-  if (parking > 0) baseCalculated += parking;
+  // Recargos: conceptos independientes, aditivos. Si coinciden, suman naturalmente.
+  if (isAirport) sumaComponentes += DELTA_AEROPUERTO;       // 12 000
+  if (isScheduled) sumaComponentes += DELTA_PROGRAMADO;     //  4 800
+  if (isProtocol) sumaComponentes += DELTA_PROTOCOLO;       //  5 000
+  if (tollsTotal > 0) sumaComponentes += tollsTotal;
+  if (parking > 0) sumaComponentes += parking;
 
-  // Aplicar cobro mínimo y redondear al 100 superior (ROUNDUP(-2) del Excel)
-  // rawTotal se conserva sin redondear para calcular el precio cliente correctamente.
-  const rawTotal = Math.max(baseCalculated, minFare);
-  let total = Math.ceil(rawTotal / 100) * 100;
+  // ROUNDUP centena (Excel J25), luego aplicar piso min_fare.
+  let totalConductor = Math.ceil(sumaComponentes / 100) * 100;
+  if (totalConductor < minFare) totalConductor = minFare;
 
+  // Margen Erixon sobre total_conductor (Tapa!F13-F14).
+  const clientTotal = Math.ceil((totalConductor * (1 + MARGEN_CLIENTE)) / 100) * 100;
+
+  // Convenience fee: 'flat' = literal; otro = porcentaje sobre total_conductor.
   let convenienceFee = 0;
   if (rateDetails.convenience_fee_type === 'flat') {
     convenienceFee = convenienceFees;
   } else {
-    convenienceFee = Math.round((total * convenienceFees) / 100);
+    convenienceFee = Math.round((totalConductor * convenienceFees) / 100);
   }
 
-  const grand = total + convenienceFee;
-  // Precio cliente: se aplica el margen sobre el subtotal ANTES del ROUNDUP del conductor.
-  // Usar rawTotal evita redondear doble (+$100 de error cuando suma no es múltiplo de 100).
-  const clientTotal = Math.ceil(rawTotal * 1.25 / 100) * 100;
+  const grand = totalConductor + convenienceFee;
 
   return {
-    totalCost: total,        // precio conductor
-    grandTotal: grand,       // precio conductor + fee de conveniencia
-    clientTotal,             // precio que paga el cliente final
+    totalCost: totalConductor,   // precio conductor (post-roundup, post-min)
+    grandTotal: grand,           // precio conductor + fee de conveniencia
+    clientTotal,                 // precio que paga el cliente final
     convenience_fees: Math.round(convenienceFee),
   };
 };

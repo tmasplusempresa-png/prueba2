@@ -25,6 +25,7 @@ import * as Location from "expo-location";
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
 import supabase from "@/config/SupabaseConfig";
+import { isNearAirport } from "@/common/utils/airports";
 import { API_KEY } from "@/config/AppConfig";
 import * as Animatable from "react-native-animatable";
 import { LinearGradient } from "expo-linear-gradient";
@@ -173,9 +174,12 @@ const TripPreviewScreen = () => {
 
   const styles = colorScheme === "dark" ? darkStyles : lightStyles;
   const isDark = colorScheme === "dark";
+  // Detección automática aeropuerto por coordenadas (Haversine + 40 aeropuertos Colombia).
   const hasAirportFee =
-    (origin?.title || "").toLowerCase().includes("aero") ||
-    (destination?.title || "").toLowerCase().includes("aero");
+    !!(origin && (origin as any).latitude != null &&
+       isNearAirport((origin as any).latitude, (origin as any).longitude)) ||
+    !!(destination && (destination as any).latitude != null &&
+       isNearAirport((destination as any).latitude, (destination as any).longitude));
 
   const vehiclePriceRanges = useMemo(() => {
     const stopFees = stops.length > 0 ? stops.length * 2500 : 0;

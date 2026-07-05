@@ -27,6 +27,7 @@ import { useOtpTimer } from '@/hooks/useOtpTimer';
 // import { useAgoraCall } from '@/hooks/useAgoraCall'; // COMENTADO PARA EXPO GO
 import { notifyIncomingCall } from '@/common/services/NotificationService';
 import { shareTrip } from '@/common/utils/tripShare';
+import { addActualsToBooking } from '@/common/other/sharedFunctions';
 import StarRating from 'react-native-star-rating-widget';
 
 const { width, height } = Dimensions.get('window');
@@ -145,6 +146,9 @@ const ReservationTripScreen = () => {
   const [driverCountdown, setDriverCountdown] = useState<number | null>(null);
   const localTimerStart = useRef<number | null>(null); // Fallback local timestamp
   const voiceReminderSent = useRef(false);
+  // Timestamp (ms epoch) de inicio real del viaje — insumo de `addActualsToBooking`
+  // para calcular `total_trip_time`. Se fija en handleStartTrip.
+  const tripStartTimestamp = useRef<number>(0);
   
   // ✅ OTP State
   const [otpModalVisible, setOtpModalVisible] = useState(false);
@@ -508,6 +512,7 @@ const ReservationTripScreen = () => {
             setAlertVisible(false);
             setLoading(true);
             try {
+              tripStartTimestamp.current = Date.now();
               await updateBookingStatus('STARTED', {
                 trip_start_time: new Date().toISOString(),
               });
@@ -825,15 +830,24 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // Actually complete the trip (shared by both cash and transfer flows)
+  // Actually complete the trip (shared by both cash and transfer flows).
+  // Recalcula distancia/tiempo/precio reales (incluye desvíos) vía
+  // `addActualsToBooking` en vez de solo marcar status — ver [[21-calculo-tarifa]].
   const completeTrip = async () => {
     setLoading(true);
     try {
-      const updated = await updateBookingStatus('COMPLETE', {
-        trip_end_time: new Date().toISOString(),
+      const bookingForActuals = {
+        ...reservation,
+        id: reservation.id,
+        startTime: tripStartTimestamp.current || Date.now(),
+        carType: reservation.car_type,
+        status: 'COMPLETE',
         driver_status: 'COMPLETE',
         customer_status: 'COMPLETE',
-      });
+      };
+      // isScheduled: true — todo viaje en esta pantalla es una reserva programada.
+      // isProtocol/tollsTotal/parking: deuda pendiente, ver [[10-deuda-tecnica]] #26.
+      await addActualsToBooking(bookingForActuals, { isScheduled: true });
       setPhase('TRIP_COMPLETE');
       // Restore the default driver-online notification
       showDriverActiveNotification().catch(() => {});
