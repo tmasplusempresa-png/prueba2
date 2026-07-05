@@ -26,7 +26,7 @@ export const GetTripDistance = async (data) => {
     if (data) {
         const arr = Object.keys(data)
             .filter(function (i) {
-                return data[i].status == 'ACCPETED' || data[i].status == 'STARTED' || data[i].status == 'REACHED'
+                return data[i].status == 'ACCEPTED' || data[i].status == 'STARTED' || data[i].status == 'REACHED'
             })
             .map(i => {
                 data[i].id = i

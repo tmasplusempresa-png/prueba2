@@ -297,16 +297,23 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
     try {
       const headers = await getSupabaseAuthHeaders();
       const driverId = await resolveDriverId();
-      const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=features,is_active&limit=1`;
+      // Prioridad: service_type (columna canónica que actualiza el dashboard web)
+      // Fallback: features.carType (formato legacy del móvil).
+      // Este orden permite que la corrección hecha en web se refleje al conductor
+      // sin backfill de BD; si en el futuro se elimina features.carType, seguirá OK.
+      const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=service_type,features,is_active&limit=1`;
       const res = await fetch(url, { headers });
       if (res.ok) {
         const data = await res.json();
         const row = Array.isArray(data) ? data[0] : null;
-        const fromCar = row?.features?.carType;
-        if (fromCar && String(fromCar).trim()) {
-          const value = String(fromCar).trim();
-          setActiveCarType(value);
-          return value;
+        const fromServiceType = row?.service_type;
+        const fromFeatures = row?.features?.carType;
+        const raw = (fromServiceType && String(fromServiceType).trim())
+          || (fromFeatures && String(fromFeatures).trim())
+          || '';
+        if (raw) {
+          setActiveCarType(raw);
+          return raw;
         }
       }
     } catch (e) {

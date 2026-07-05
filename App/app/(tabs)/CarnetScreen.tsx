@@ -96,17 +96,20 @@ const CarnetScreen = ({ navigation }: Props) => {
           try {
             const { data: carData } = await supabase
               .from('cars')
-              .select('car_type, service_type, vehicle_type, category')
+              .select('service_type, car_type, vehicle_type, category, features')
               .eq('driver_id', String(row.id))
               .limit(1)
               .maybeSingle();
 
             if (carData) {
+              // service_type = columna canónica (dashboard web escribe aquí).
+              // features.carType queda como fallback legacy.
               vehicleCategory =
-                (carData as any)?.car_type ||
                 (carData as any)?.service_type ||
+                (carData as any)?.car_type ||
                 (carData as any)?.vehicle_type ||
                 (carData as any)?.category ||
+                (carData as any)?.features?.carType ||
                 null;
             }
           } catch {

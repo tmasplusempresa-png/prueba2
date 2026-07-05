@@ -11,6 +11,7 @@ import { login, logout, setProfile } from '@/common/reducers/authReducer';
 import '@/common/services/driverLocationTask';
 import { useGlobalDriverTracking } from '@/hooks/useGlobalDriverTracking';
 import { useWalletAndMembershipSync } from '@/hooks/useWalletAndMembershipSync';
+import { useDriverCarSync } from '@/hooks/useDriverCarSync';
 import CancellationNotifier from '@/components/CancellationNotifier';
 import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
 
@@ -143,5 +144,6 @@ export default function RootLayout() {
 function GlobalServices() {
   useGlobalDriverTracking();
   useWalletAndMembershipSync();
+  useDriverCarSync();
   return null;
 }

@@ -55,6 +55,7 @@ export const saveBooking = async (bookingData: any) => {
       trip_cost: parseFloat(bookingData.trip_cost) || 0,
       convenience_fees: parseFloat(bookingData.convenience_fees) || 0,
       discount: parseFloat(bookingData.discount) || 0,
+      min_fare_snapshot: parseFloat(bookingData.min_fare_snapshot) || 0,
       driver_share: bookingData.driver_share || null,
       
       // Pago

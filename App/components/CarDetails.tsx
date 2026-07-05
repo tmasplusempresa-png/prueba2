@@ -53,6 +53,7 @@ const CarDetails = ({ visible, onSelectVehicle, distance, duration, tolls, isSch
     rate_per_unit_distance_inter: parseFloat(ct.price_per_km_inter) || 0,
     rate_per_hour: parseFloat(ct.rate_per_hour) || 0,
     rate_per_hour_inter: parseFloat(ct.rate_per_hour_inter) || 0,
+    valor_hora: parseFloat(ct.valor_hora) || 0,
     min_fare: parseFloat(ct.min_fare) || 0,
     min_fare_inter: parseFloat(ct.min_fare_inter) || 0,
     delta_aeropuerto: parseFloat(ct.delta_aeropuerto) || 0,

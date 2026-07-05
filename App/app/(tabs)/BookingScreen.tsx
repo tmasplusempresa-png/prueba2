@@ -893,6 +893,11 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       tripType: tripType,
       tripUrban: "Urbano",
       trip_cost: fd.totalCost,
+      // Piso de cobro capturado al momento de reservar — usado por el trigger
+      // SQL `calculate_total_cost` para que un descuento/promo no deje
+      // total_cost por debajo del mínimo de la categoría. Ver migración
+      // `min_fare_snapshot` en [[22-plan-fix-bug-min-fare]].
+      min_fare_snapshot: selectedVehicle?.min_fare || 0,
       tripdate: isScheduled ? date : new Date().getTime(),
       cost_corp: 0,
       company: "",
@@ -1300,16 +1305,25 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
                       showAlert('warning', 'Campos faltantes', 'Selecciona vehículo, origen y destino antes de reservar.');
                       return;
                     }
-                    const baseFare = fareDetails ? fareDetails.estimateFare : 0;
+                    const distKm = typeof distance === 'number' ? distance : parseFloat(distance as any) || 0;
+                    const durMin = typeof duration === 'number' ? duration : parseFloat(duration as any) || 0;
                     const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
                     const isAirportNav = detectAirport();
-                    const deltaAerop = isAirportNav ? (selectedVehicle?.delta_aeropuerto || 0) : 0;
-                    const deltaProg = isScheduled ? (selectedVehicle?.delta_aeropuerto_prog || 0) : 0;
-                    const driverP = roundPrice(baseFare * mult + deltaAerop + deltaProg);
-                    const clientP = Math.ceil(driverP / 0.8 / 100) * 100;
+                    const isIntermunicipal = distKm > (selectedVehicle?.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
+                    // Recalcula con FareCalculator (fuente única) en vez de sumar deltas ad-hoc:
+                    // fareDetails.estimateFare ya incluye delta aeropuerto/programado, sumarlos
+                    // de nuevo aquí duplicaba el recargo. Ver [[21-calculo-tarifa]].
+                    const { totalCost, clientTotal } = FareCalculator(
+                      distKm * mult,
+                      durMin * 60 * mult,
+                      selectedVehicle,
+                      null,
+                      2,
+                      { isAirport: isAirportNav, isScheduled, isIntermunicipal }
+                    );
                     navigation.navigate('CreateReservation', {
                       origin, destination, distance, duration,
-                      driverPrice: driverP, clientPrice: clientP,
+                      driverPrice: totalCost, clientPrice: clientTotal,
                       carType: selectedVehicle?.name || '',
                     });
                   }}

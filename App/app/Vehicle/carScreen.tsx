@@ -74,7 +74,9 @@ const mapCarRow = (row: any) => ({
   vehicleModel: row.model || row.vehicle_model || '',
   vehicleNumber: row.plate || row.vehicle_number || '',
   vehicleColor: row.color || row.vehicle_color || '',
-  carType: row.features?.carType || '',
+  // service_type es la columna canónica (actualizada por dashboard web).
+  // features.carType queda como fallback legacy para vehículos no migrados.
+  carType: row.service_type || row.features?.carType || '',
   car_image: row.car_image || null,
   active: row.is_active ?? false,
   vehicleFuel: row.fuel_type || '',
