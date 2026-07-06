@@ -68,13 +68,15 @@ export const FareCalculator = (
 
   // Precio por minuto: derivado de `valor_hora / 60` (fuente canónica). Si la
   // categoría no expone `valor_hora`, fallback a `rate_per_hour` legacy.
+  // NO redondear aquí (alineado con AddBookingPage.tsx de la web, que usa el
+  // float completo) — redondear antes de multiplicar por los minutos
+  // introducía una divergencia de precio entre canales para categorías cuyo
+  // valor_hora/60 no cae en un entero exacto (ej. XPlus: 666.667).
   const valorHora = parseFloat(rateDetails.valor_hora || 0);
   let ratePerMinute: number;
   if (valorHora > 0) {
     const ratePerMinuteUrban = valorHora / 60;
-    ratePerMinute = Math.round(
-      isIntermunicipal ? ratePerMinuteUrban / 0.5 : ratePerMinuteUrban
-    );
+    ratePerMinute = isIntermunicipal ? ratePerMinuteUrban / 0.5 : ratePerMinuteUrban;
   } else {
     ratePerMinute = Math.round(
       parseFloat(pick(rateDetails.rate_per_hour, rateDetails.rate_per_hour_inter) || 0)

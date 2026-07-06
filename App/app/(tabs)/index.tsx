@@ -598,15 +598,32 @@ const MapScreen = () => {
       const hasUnresolvedIssues = Object.values(checks).some(
         (value) => value === false
       );
-      console.log("entro", hasUnresolvedIssues);
+      console.log('[DRIVER-FEED] Sin carType o location — no se suscribe a bookings NEW.', {
+        carType: user?.carType,
+        location: user?.location,
+      });
       setIsModalVisible(hasUnresolvedIssues);
       return; // Detener la ejecuci�n si falta el carType o la ubicaci�n
     }
-  
+
     const applyFilter = (bookingsList: any[]) => {
       const filtered = bookingsList.filter((booking) => {
         const isCarTypeMatch = booking.carType === user?.carType;
-        if (!isCarTypeMatch || !booking.pickup) return false;
+        const normalizedMatch = String(booking.carType || '').trim().toLowerCase() ===
+          String(user?.carType || '').trim().toLowerCase();
+        if (isCarTypeMatch !== normalizedMatch) {
+          console.warn('[DRIVER-FEED] carType difiere solo por mayúsculas/espacios — booking:', booking.carType, 'driver:', user?.carType);
+        }
+        if (!isCarTypeMatch || !booking.pickup) {
+          console.log('[DRIVER-FEED] booking descartado', {
+            id: booking.id,
+            bookingCarType: booking.carType,
+            driverCarType: user?.carType,
+            isCarTypeMatch,
+            hasPickup: !!booking.pickup,
+          });
+          return false;
+        }
 
         let maxDistance = 8000;
         if (booking.bookLater) {
@@ -618,8 +635,13 @@ const MapScreen = () => {
           user.location.lat, user.location.lng,
           booking.pickup.lat, booking.pickup.lng
         );
-        return distance <= maxDistance;
+        const withinRange = distance <= maxDistance;
+        if (!withinRange) {
+          console.log('[DRIVER-FEED] booking fuera de rango', { id: booking.id, distance, maxDistance });
+        }
+        return withinRange;
       });
+      console.log(`[DRIVER-FEED] ${filtered.length}/${bookingsList.length} bookings pasaron el filtro.`);
       setIsMapVisible(filtered.length > 0);
       setFilteredBookings(filtered);
     };
@@ -629,7 +651,11 @@ const MapScreen = () => {
       .from('bookings')
       .select('*')
       .eq('status', 'NEW')
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) {
+          console.error('[DRIVER-FEED] Error consultando bookings NEW:', error);
+        }
+        console.log(`[DRIVER-FEED] Supabase devolvió ${data?.length || 0} bookings en status NEW.`);
         const mapped = (data || []).map(mapSupabaseBooking);
         applyFilter(mapped);
       });
@@ -641,6 +667,7 @@ const MapScreen = () => {
         'postgres_changes' as any,
         { event: 'INSERT', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
         (payload: any) => {
+          console.log('[DRIVER-FEED] Realtime INSERT recibido:', payload.new?.id, payload.new?.car_type);
           const booking = mapSupabaseBooking(payload.new);
           setFilteredBookings((prev: any[]) => {
             const updated = [...prev.filter((b) => b.id !== booking.id), booking];
@@ -894,7 +921,12 @@ const MapScreen = () => {
   const [driverImmediateFeedEnabled, setDriverImmediateFeedEnabled] = useState(false);
   const [driverImmediateLoading, setDriverImmediateLoading] = useState(false);
   const [driverServicesListReady, setDriverServicesListReady] = useState(false);
-  const ENABLE_DRIVER_MAP_RESERVATIONS = false;
+  // Antes en `false` — apagaba por completo el modal de solicitud entrante
+  // (`bookingModalDecline`), ya que solo se activa dentro del efecto gateado
+  // por este flag. `filteredBookings` (búsqueda realtime real) seguía activo
+  // e independiente, pero el modal para mostrarlo nunca se abría. Ver
+  // [[10-deuda-tecnica]].
+  const ENABLE_DRIVER_MAP_RESERVATIONS = true;
   const [driverTab, setDriverTab] = useState<'home' | 'routes' | 'activity' | 'profile'>('home');
   const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
   const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
