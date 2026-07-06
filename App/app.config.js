@@ -48,6 +48,7 @@ module.exports = {
     orientation: "portrait",
     icon: AppConfig.icon_app,
     splash: {
+        "image": "./assets/images/logo1024x1024.png",
         "resizeMode": 'contain',
         "backgroundColor": "#051A26"
     },
@@ -205,14 +206,14 @@ module.exports = {
                 "userTrackingPermission": "This identifier will be used to deliver personalized ads to you."
             }
         ],
-        // [
-        //     "@rnmapbox/maps",
-        //     {
-        //         "RNMapboxMapsVersion": "11.0.0",
-        //         "RNMapboxMapsImpl": "mapbox",
-        //         "RNMapboxMapsDownloadToken": RNMAPBOX_MAPS_DOWNLOAD_TOKEN
-        //     }
-        // ],
+        [
+            "@rnmapbox/maps",
+            {
+                "RNMapboxMapsVersion": "11.18.2",
+                "RNMapboxMapsImpl": "mapbox",
+                "RNMapboxMapsDownloadToken": RNMAPBOX_MAPS_DOWNLOAD_TOKEN
+            }
+        ],
         "expo-router"
     ]
 }

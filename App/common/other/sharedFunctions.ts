@@ -1,6 +1,8 @@
 import { GetTripDistance } from "../other/GeoFunctions";
 import { settings } from '@/scripts/settings';
 import { FareCalculator } from "../actions/FareCalculator";
+import { isNearAirport } from "../utils/airports";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
 
@@ -35,13 +37,23 @@ export const saveAddresses = async (booking: any, driverLocation: any) => {
 
 export const checkSearchPhrase = (_str: string) => '';
 
-export const addActualsToBooking = async (booking: any) => {
+export const addActualsToBooking = async (
+  booking: any,
+  // Contexto que FareCalculator necesita y que NO se puede derivar de la fila
+  // `bookings` (hoy no existen columnas is_scheduled/is_protocol/tolls_total/
+  // parking en BD — ver [[21-calculo-tarifa]] deuda técnica). El llamador debe
+  // pasarlo explícito si aplica (ej. ReservationTripScreen siempre isScheduled=true).
+  extraFareContext: { isScheduled?: boolean; isProtocol?: boolean; tollsTotal?: number; parking?: number } = {}
+) => {
   console.log('Inicio de addActualsToBooking con booking:', booking);
 
   const end_time = new Date();
   const totalTimeTaken = Math.abs(Math.round((end_time.getTime() - parseFloat(booking.startTime)) / 1000));
 
-  booking.trip_end_time = `${end_time.getHours()}:${end_time.getMinutes()}:${end_time.getSeconds()}`;
+  // bookings.trip_end_time es `timestamp with time zone` — un string "H:M:S"
+  // sin padding ni fecha no es un timestamptz válido y Postgres rechaza el
+  // UPDATE completo (silenciado por el catch de abajo). Usar ISO.
+  booking.trip_end_time = end_time.toISOString();
   booking.endTime = end_time.getTime();
   booking.total_trip_time = totalTimeTaken;
 
@@ -62,6 +74,7 @@ export const addActualsToBooking = async (booking: any) => {
         rate_per_unit_distance_inter: parseFloat(ct.price_per_km_inter) || 0,
         rate_per_hour:              parseFloat(ct.rate_per_hour)       || 0,
         rate_per_hour_inter:        parseFloat(ct.rate_per_hour_inter) || 0,
+        valor_hora:                 parseFloat(ct.valor_hora)          || 0,
         base_fare:                  parseFloat(ct.base_price)          || 0,
         base_fare_inter:            parseFloat(ct.base_price_inter)    || 0,
         min_fare:                   parseFloat(ct.min_fare)            || 0,
@@ -73,12 +86,20 @@ export const addActualsToBooking = async (booking: any) => {
       };
     }
 
-    // Tracking desde Supabase
-    const { data: trackingRows } = await supabase
+    // Tracking desde Supabase. `booking_tracking` no tiene columna `timestamp`
+    // (solo `created_at`/`updated_at` — ver `App/supabase/BBDDRemota.sql`).
+    // El select/order anterior por `timestamp` fallaba en PostgREST (columna
+    // inexistente); el error no se chequeaba, así que `trackingRows` quedaba
+    // undefined y `distance` siempre daba 0 sin ningún error visible.
+    const { data: trackingRows, error: trackingError } = await supabase
       .from('booking_tracking' as any)
-      .select('lat, lng, timestamp')
+      .select('lat, lng, created_at')
       .eq('booking_id', booking.id)
-      .order('timestamp', { ascending: true });
+      .order('created_at', { ascending: true });
+
+    if (trackingError) {
+      console.error('[addActualsToBooking] error leyendo booking_tracking:', trackingError);
+    }
 
     const trackingVal: Record<string, any> = {};
     (trackingRows || []).forEach((row: any, idx: number) => {
@@ -88,10 +109,16 @@ export const addActualsToBooking = async (booking: any) => {
     const res = await GetTripDistance(trackingVal);
     const distance = settings.convert_to_mile ? res.distance / 1.609344 : res.distance;
 
-    const isAirport =
-      (booking.pickupAddress || '').toLowerCase().includes('aero') ||
-      (booking.dropAddress || '').toLowerCase().includes('aero');
-    const isIntermunicipal = distance > 50;
+    // Detección por coords (Haversine + 40 aeropuertos Colombia).
+    // booking.pickup / booking.drop traen { lat, lng } desde el INSERT original.
+    const pickupLat = parseFloat(booking.pickup?.lat ?? booking.pickup_lat);
+    const pickupLng = parseFloat(booking.pickup?.lng ?? booking.pickup_lng);
+    const dropLat = parseFloat(booking.drop?.lat ?? booking.drop_lat);
+    const dropLng = parseFloat(booking.drop?.lng ?? booking.drop_lng);
+    const oAir = !isNaN(pickupLat) && !isNaN(pickupLng) ? isNearAirport(pickupLat, pickupLng) : null;
+    const dAir = !isNaN(dropLat) && !isNaN(dropLng) ? isNearAirport(dropLat, dropLng) : null;
+    const isAirport = !!(oAir || dAir);
+    const isIntermunicipal = distance > DEFAULT_UMBRAL_INTERMUNICIPAL_KM;
 
     const { totalCost, grandTotal, convenience_fees } = FareCalculator(
       distance,
@@ -99,7 +126,7 @@ export const addActualsToBooking = async (booking: any) => {
       rates,
       null,
       settings.decimal,
-      { isAirport, isIntermunicipal }
+      { isAirport, isIntermunicipal, ...extraFareContext }
     );
 
     console.log('Tarifas calculadas:', { totalCost, grandTotal, convenience_fees });

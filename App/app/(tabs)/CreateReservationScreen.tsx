@@ -19,6 +19,8 @@ import { RootState } from '@/common/store';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { FareCalculator } from '@/common/actions/FareCalculator';
+import { isNearAirport } from '@/common/utils/airports';
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
 
 const { width: SW } = Dimensions.get('window');
 
@@ -190,7 +192,7 @@ const CreateReservationScreen = () => {
       try {
         const { data, error } = await supabase
           .from('car_types')
-          .select('name,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,rate_per_hour_inter,min_fare,min_fare_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_type,umbral_intermunicipal_km')
+          .select('name,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,rate_per_hour_inter,valor_hora,min_fare,min_fare_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_type,umbral_intermunicipal_km')
           .eq('is_active', true)
           .order('created_at', { ascending: true });
         if (error || !data?.length) return;
@@ -206,6 +208,7 @@ const CreateReservationScreen = () => {
             rate_per_unit_distance_inter:parseFloat(car.price_per_km_inter) || 0,
             rate_per_hour:               parseFloat(car.rate_per_hour) || 0,
             rate_per_hour_inter:         parseFloat(car.rate_per_hour_inter) || 0,
+            valor_hora:                  parseFloat(car.valor_hora) || 0,
             min_fare:                    parseFloat(car.min_fare) || 0,
             min_fare_inter:              parseFloat(car.min_fare_inter) || 0,
             delta_aeropuerto:            parseFloat(car.delta_aeropuerto) || 0,
@@ -362,10 +365,14 @@ const CreateReservationScreen = () => {
     if (!rates) return;
 
     const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
-    const isAirport = (origin?.title || '').toLowerCase().includes('aero') ||
-                      (destination?.title || '').toLowerCase().includes('aero');
+    // Detección automática aeropuerto por coords (Haversine + 40 aeropuertos Colombia).
+    const oAir = origin && (origin as any).latitude != null
+      ? isNearAirport((origin as any).latitude, (origin as any).longitude) : null;
+    const dAir = destination && (destination as any).latitude != null
+      ? isNearAirport((destination as any).latitude, (destination as any).longitude) : null;
+    const isAirport = !!(oAir || dAir);
     const isScheduled = serviceType === 'reservation';
-    const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || 29);
+    const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
 
     const { totalCost, clientTotal } = FareCalculator(
       distance * mult,
@@ -646,7 +653,11 @@ const CreateReservationScreen = () => {
         car_type: carType,
         estimate: clientPrice || 0,
         price: clientPrice || 0,
+        trip_cost: driverPrice || 0,
         driver_share: driverPrice || 0,
+        // Piso de cobro (car_types.min_fare de la categoría elegida) para el
+        // trigger `calculate_total_cost`. Ver [[22-plan-fix-bug-min-fare]].
+        min_fare_snapshot: vehicleRates?.[carType]?.min_fare || 0,
         payment_mode: paymentMode,
         prepaid: false,
         observations: observations || null,
