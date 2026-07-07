@@ -47,6 +47,7 @@ import ReservationDetailScreen from '../(tabs)/ReservationDetailScreen';
 import ReservationTripScreen from '../(tabs)/ReservationTripScreen';
 import CustomerActiveTripScreen from '../(tabs)/CustomerActiveTripScreen';
 import DriverActivityScreen from '../(tabs)/DriverActivityScreen';
+import DriverActiveReservationsScreen from '../(tabs)/DriverActiveReservationsScreen';
 import NotificationsScreen from '../(tabs)/NotificationsScreen';
 import PlateTrackingScreen from '../Booking/PlateTrackingScreen';
 import ChangePasswordScreen from '../(tabs)/ChangePasswordScreen';
@@ -113,6 +114,8 @@ const Navigation = () => {
           <Stack.Screen name="ReservationTrip" component={ReservationTripScreen} />
           <Stack.Screen name="CustomerActiveTrip" component={CustomerActiveTripScreen} />
           <Stack.Screen name="DriverActivity" component={DriverActivityScreen} />
+          <Stack.Screen name="DriverActiveReservations" component={DriverActiveReservationsScreen} />
+          <Stack.Screen name="RideList" component={DriverActiveReservationsScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="PlateTracking" component={PlateTrackingScreen} />
           <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
