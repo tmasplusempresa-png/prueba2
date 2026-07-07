@@ -357,6 +357,12 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
     <View style={styles.container}>
       {console.log('[GO-DEBUG][MapSensor] rendering MapView, locationReady:', locationReady, 'region:', region)}
       <MapView
+        // liteMode: bitmap estático en vez de superficie GL — desbloquea el
+        // emulador Android/Apple Silicon donde el GLSurface no renderiza.
+        // Solo __DEV__ + Android; producción sigue con mapa interactivo
+        // completo. Contra: sin animateCamera/seguimiento de cámara mientras
+        // esté activo. Ver [[03-app-movil]] §Emulador Android Apple Silicon.
+        liteMode={__DEV__ && Platform.OS === 'android'}
         onMapReady={() => console.log('[GO-DEBUG][MapSensor] onMapReady disparado — la superficie nativa confirmo estar lista')}
         onLayout={() => console.log('[GO-DEBUG][MapSensor] onLayout disparado')}
         ref={mapRef}
