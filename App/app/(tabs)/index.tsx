@@ -1371,6 +1371,7 @@ const MapScreen = () => {
   }, [dbFirstName, dbLastName, profile?.first_name, profile?.firstName, profile?.last_name, profile?.lastName, resolveDriverName]);
 
   const toggleDriverOnline = async () => {
+    console.log('[GO-DEBUG] toggleDriverOnline start, driverOnline actual:', driverOnline);
     const newStatus = !driverOnline;
     setDriverOnline(newStatus);
     setDriverReservationsMinimized(!newStatus);
@@ -1378,20 +1379,26 @@ const MapScreen = () => {
     setShowNovedades(false);
     setShowDriverServicesModal(false);
     setIsEnabled(newStatus);
+    console.log('[GO-DEBUG] newStatus:', newStatus);
 
     if (newStatus) {
+      console.log('[GO-DEBUG] antes de speakDriverGreeting()');
       await speakDriverGreeting();
+      console.log('[GO-DEBUG] despues de speakDriverGreeting(), antes de setIsMapVisible(true)');
       setIsMapVisible(true);
+      console.log('[GO-DEBUG] setIsMapVisible(true) llamado — MapSensor deberia montar ahora');
       // Show persistent notification
       const name = dbFirstName || user?.firstName || user?.first_name || '';
-      showDriverActiveNotification(name).catch(() => {});
+      showDriverActiveNotification(name).catch((e) => console.log('[GO-DEBUG] showDriverActiveNotification error:', e));
     } else {
       setIsMapVisible(false);
       // Dismiss persistent notification
       dismissDriverNotification().catch(() => {});
     }
 
+    console.log('[GO-DEBUG] antes de handleSwipeSuccess');
     await handleSwipeSuccess(newStatus);
+    console.log('[GO-DEBUG] toggleDriverOnline FIN');
   };
 
   const handleAcceptIncoming = () => {

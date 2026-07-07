@@ -230,6 +230,7 @@ type CameraSnapshot = {
 };
 
 const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null }) => {
+  console.log('[GO-DEBUG][MapSensor] render/mount, currentPosition:', currentPosition);
   const mapRef = useRef<MapView>(null);
   const headingRef = useRef(0);
   const lastCameraRef = useRef<CameraSnapshot | null>(null);
@@ -276,6 +277,7 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
     }
 
     lastCameraRef.current = { latitude, longitude, heading: nextHeading };
+    console.log('[GO-DEBUG][MapSensor] syncCamera -> animateCamera', { latitude, longitude, nextHeading, duration, force, hasMapRef: !!mapRef.current });
     mapRef.current?.animateCamera(
       {
         center: { latitude, longitude },
@@ -288,10 +290,13 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
   };
 
   useEffect(() => {
+    console.log('[GO-DEBUG][MapSensor] useEffect startTracking MONTADO');
     let subscription: Location.LocationSubscription | null = null;
 
     const startTracking = async () => {
+      console.log('[GO-DEBUG][MapSensor] pidiendo permiso foreground location...');
       const { status } = await Location.requestForegroundPermissionsAsync();
+      console.log('[GO-DEBUG][MapSensor] permiso status:', status);
       if (status !== 'granted') {
         showAlert('warning', 'Permiso denegado', 'No se puede acceder a la ubicación.');
         setLocationReady(true);
@@ -299,9 +304,11 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
       }
 
       try {
+        console.log('[GO-DEBUG][MapSensor] pidiendo getCurrentPositionAsync...');
         const first = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.High,
         });
+        console.log('[GO-DEBUG][MapSensor] primera posicion recibida:', first.coords);
         const { latitude, longitude, heading: h } = first.coords;
         const resolvedHeading = h || 0;
         setRegion(prev => ({ ...prev, latitude, longitude }));
@@ -310,13 +317,16 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
         setLocationReady(true);
         syncCamera(latitude, longitude, resolvedHeading, 400, true);
         hasMountedCameraRef.current = true;
-      } catch {
+      } catch (e) {
+        console.log('[GO-DEBUG][MapSensor] ERROR getCurrentPositionAsync:', e);
         setLocationReady(true);
       }
 
+      console.log('[GO-DEBUG][MapSensor] iniciando watchPositionAsync...');
       subscription = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Highest, distanceInterval: 2, timeInterval: 1500 },
         (loc) => {
+          console.log('[GO-DEBUG][MapSensor] watchPositionAsync update:', loc.coords);
           const { latitude, longitude, heading: h } = loc.coords;
           const newHeading = (h !== null && !isNaN(h)) ? h : headingRef.current;
           setRegion(prev => ({ ...prev, latitude, longitude }));
@@ -326,14 +336,16 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
           hasMountedCameraRef.current = true;
         }
       );
+      console.log('[GO-DEBUG][MapSensor] watchPositionAsync suscrito OK');
     };
 
-    startTracking();
+    startTracking().catch((e) => console.log('[GO-DEBUG][MapSensor] ERROR startTracking:', e));
     return () => { subscription?.remove(); };
   }, []);
 
   useEffect(() => {
     if (currentPosition) {
+      console.log('[GO-DEBUG][MapSensor] useEffect currentPosition prop cambio:', currentPosition);
       const [longitude, latitude] = currentPosition;
       setRegion(prev => ({ ...prev, latitude, longitude }));
       syncCamera(latitude, longitude, headingRef.current, 400, true);
@@ -343,7 +355,10 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
 
   return (
     <View style={styles.container}>
+      {console.log('[GO-DEBUG][MapSensor] rendering MapView, locationReady:', locationReady, 'region:', region)}
       <MapView
+        onMapReady={() => console.log('[GO-DEBUG][MapSensor] onMapReady disparado — la superficie nativa confirmo estar lista')}
+        onLayout={() => console.log('[GO-DEBUG][MapSensor] onLayout disparado')}
         ref={mapRef}
         style={styles.map}
         provider={PROVIDER_GOOGLE}
