@@ -356,9 +356,9 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
         pitchEnabled={true}
         initialCamera={{
           center: { latitude: region.latitude, longitude: region.longitude },
-          pitch: 68,
+          pitch: 0,
           heading,
-          zoom: 19,
+          zoom: 15,
           altitude: 200,
         }}
       >
