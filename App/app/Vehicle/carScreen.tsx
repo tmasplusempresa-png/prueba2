@@ -24,6 +24,7 @@ import { useIsFocused } from "@react-navigation/native";
 
 import { RootState } from "@/common/store";
 import { VEHICLE_RULES } from "@/common/utils/vehicleRules";
+import { toCanonicalCarType } from "@/common/utils/carType";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -31,6 +32,12 @@ const BG_IMAGE = require("../../assets/images/bg.png");
 const FALLBACK_CAR_IMAGE = require("../../assets/images/iconos3d/12.png");
 
 const CATEGORY_IMAGES: Record<string, any> = {
+  // Nombres canónicos actuales
+  "TaxiPlus": require("../../assets/images/categoryTaxi.png"),
+  "VanPlus": require("../../assets/images/categoryVan.png"),
+  "XPlus": require("../../assets/images/categoryParticular.png"),
+  "ConfortPlus": require("../../assets/images/categoryEspecial.png"),
+  // Alias legacy para vehículos creados con el formato anterior
   "T+Plus Taxi": require("../../assets/images/categoryTaxi.png"),
   "T+Plus Van": require("../../assets/images/categoryVan.png"),
   "T+Plus Particular": require("../../assets/images/categoryParticular.png"),
@@ -76,7 +83,9 @@ const mapCarRow = (row: any) => ({
   vehicleColor: row.color || row.vehicle_color || '',
   // service_type es la columna canónica (actualizada por dashboard web).
   // features.carType queda como fallback legacy para vehículos no migrados.
-  carType: row.service_type || row.features?.carType || '',
+  // Se canonicaliza a los nombres oficiales (ConfortPlus/TaxiPlus/VanPlus/XPlus)
+  // solo para mostrar; no se reescribe la BD.
+  carType: toCanonicalCarType(row.service_type || row.features?.carType || ''),
   car_image: row.car_image || null,
   active: row.is_active ?? false,
   vehicleFuel: row.fuel_type || '',
