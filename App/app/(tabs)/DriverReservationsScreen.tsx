@@ -15,6 +15,7 @@ import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
+import { toCanonicalCarType } from '@/common/utils/carType';
 
 const IMMEDIATE_RANGE_KM = 3;
 
@@ -272,26 +273,14 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
     throw new Error('No se encontró el perfil del conductor en users.');
   }, [profile?.auth_id, profile?.id, user?.auth_id, user?.id]);
 
-  // Los nombres entre la app del cliente (car_types.name) y la del conductor
-  // (cars.features.carType) divergieron históricamente. Esta tabla los reconcilia
-  // a un canónico para comparar correctamente.
-  const CAR_TYPE_ALIASES: Record<string, string> = {
-    'taxiplus': 't+plus taxi',
-    't+plus taxi': 't+plus taxi',
-    'vanplus': 't+plus van',
-    't+plus van': 't+plus van',
-    'xplus': 't+plus particular',
-    't+plus particular': 't+plus particular',
-    'confortplus': 't+plus especial',
-    'comfortplus': 't+plus especial',
-    't+plus especial': 't+plus especial',
-  };
-
-  const normalizeCarType = (value: any): string => {
-    const raw = String(value || '').trim().toLowerCase();
-    if (!raw) return '';
-    return CAR_TYPE_ALIASES[raw] || raw;
-  };
+  // Los nombres entre la app del cliente (car_types.name), la del conductor
+  // (cars.features.carType) y el dashboard web (cars.service_type)
+  // divergieron históricamente. Usar SIEMPRE la tabla canónica compartida
+  // (`common/utils/carType.ts`) en vez de reinventar una local — la tabla
+  // local anterior no incluía valores reales del registro web (ej.
+  // "servicio_especial"), dejando a esos conductores sin ver reservas nunca.
+  // Ver [[10-deuda-tecnica]].
+  const normalizeCarType = (value: any): string => toCanonicalCarType(value).toLowerCase();
 
   const fetchActiveCarType = useCallback(async (): Promise<string | null> => {
     try {
