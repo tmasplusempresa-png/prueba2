@@ -921,12 +921,16 @@ const MapScreen = () => {
   const [driverImmediateFeedEnabled, setDriverImmediateFeedEnabled] = useState(false);
   const [driverImmediateLoading, setDriverImmediateLoading] = useState(false);
   const [driverServicesListReady, setDriverServicesListReady] = useState(false);
-  // Antes en `false` — apagaba por completo el modal de solicitud entrante
-  // (`bookingModalDecline`), ya que solo se activa dentro del efecto gateado
-  // por este flag. `filteredBookings` (búsqueda realtime real) seguía activo
-  // e independiente, pero el modal para mostrarlo nunca se abría. Ver
-  // [[10-deuda-tecnica]].
-  const ENABLE_DRIVER_MAP_RESERVATIONS = true;
+  // Vuelto a `false` temporalmente (2026-07-04) para aislar la causa de la
+  // pantalla en blanco al presionar GO durante debug remoto — con `true` se
+  // activa un pipeline extra (polling cada 7s + logs pesados con JSON
+  // completo de bookings) que la versión estable (commit 1da2d02) nunca
+  // ejecutaba, y que podía competir por memoria/CPU justo cuando el mapa
+  // nativo intenta inicializar. `filteredBookings` (búsqueda realtime real,
+  // el mecanismo que sí encuentra bookings — ver [[10-deuda-tecnica]] #29)
+  // sigue activo e independiente de este flag. Volver a `true` cuando se
+  // necesite el modal de solicitud entrante, una vez descartado el GL.
+  const ENABLE_DRIVER_MAP_RESERVATIONS = false;
   const [driverTab, setDriverTab] = useState<'home' | 'routes' | 'activity' | 'profile'>('home');
   const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
   const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
