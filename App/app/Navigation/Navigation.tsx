@@ -47,6 +47,7 @@ import ReservationDetailScreen from '../(tabs)/ReservationDetailScreen';
 import ReservationTripScreen from '../(tabs)/ReservationTripScreen';
 import CustomerActiveTripScreen from '../(tabs)/CustomerActiveTripScreen';
 import DriverActivityScreen from '../(tabs)/DriverActivityScreen';
+import DriverActiveReservationsScreen from '../(tabs)/DriverActiveReservationsScreen';
 import NotificationsScreen from '../(tabs)/NotificationsScreen';
 import PlateTrackingScreen from '../Booking/PlateTrackingScreen';
 import ChangePasswordScreen from '../(tabs)/ChangePasswordScreen';

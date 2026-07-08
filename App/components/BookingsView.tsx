@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import React from "react";
 import moment from "moment/min/moment-with-locales";
 import { roundPrice } from "@/hooks/roundPrice";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "@/constants/fare";
 import {
   View,
   Text,
@@ -37,39 +38,21 @@ const BookingsView: React.FC<BookingsViewProps> = ({
     ? styles.containerView
     : [styles.containerView, { backgroundColor: "transparent" }];
 
-  const determineTripType = (coords) => {
-    if (!coords || coords.length < 2 || !coords[0] || !coords[1]) {
-      return "Coordenadas no disponibles";
-    }
-
-    const cityLimits = {
-      northEast: { latitude: 4.8, longitude: -73.9 },
-      southWest: { latitude: 4.5, longitude: -74.2 },
-    };
-
-    const isWithinCityLimits = (coord) => {
-      return (
-        coord?.latitude >= cityLimits.southWest.latitude &&
-        coord?.latitude <= cityLimits.northEast.latitude &&
-        coord?.longitude >= cityLimits.southWest.longitude &&
-        coord?.longitude <= cityLimits.northEast.longitude
-      );
-    };
-
-    const isUrban = isWithinCityLimits(coords[0]) && isWithinCityLimits(coords[1]);
-    return isUrban ? "Urbano" : "Intermunicipal";
+  // Clasificación real (umbral por distancia, igual que FareCalculator/BD)
+  // en vez de un bounding-box hardcodeado a Bogotá que mal-clasificaba
+  // cualquier viaje en otra ciudad.
+  const determineTripType = (distanceKm: number, umbral?: number) => {
+    if (!distanceKm || isNaN(distanceKm)) return "Sin datos";
+    return distanceKm > (umbral || DEFAULT_UMBRAL_INTERMUNICIPAL_KM) ? "Intermunicipal" : "Urbano";
   };
 
-  const calculateEstimatedCost = (estimate: number, isPeakHour: boolean) => {
-    if (isPeakHour) {
-      return `${roundPrice(estimate + 5000)} - ${roundPrice(estimate + 5000 + (estimate * 0.3))}`;
-    }
-    return `${roundPrice(estimate)} - ${roundPrice(estimate + (estimate * 0.3))}`;
-  };
-
-  const isPeakHour = (tripDate: string) => {
-    const hour = moment(tripDate).hour();
-    return (hour >= 5 && hour < 8) || (hour >= 16 && hour < 20);
+  // Rango real: mínimo = trip_cost (precio conductor), máximo = estimate
+  // (clientFare, +25% ya calculado por FareCalculator al crear la reserva).
+  // Antes se fabricaba un +30%/+$5.000 "hora pico" desconectado del cálculo real.
+  const calculateEstimatedCost = (tripCost: number, estimate: number) => {
+    const low = roundPrice(tripCost || 0);
+    const high = roundPrice(estimate || tripCost || 0);
+    return `$${low.toLocaleString('es-CO')} - $${high.toLocaleString('es-CO')}`;
   };
 
   return (
@@ -175,7 +158,7 @@ const BookingsView: React.FC<BookingsViewProps> = ({
                 <View style={{ width: "50%", alignItems: "flex-end" }}>
                   <Text style={styles.tripDetail}>
                     <Text style={[styles.price, { fontSize: 18, fontWeight: 'bold', }]}>
-                      {roundPrice(calculateEstimatedCost(parseInt(booking.estimate, 10), isPeakHour(booking.tripdate)))}
+                      {calculateEstimatedCost(parseFloat(booking.trip_cost), parseFloat(booking.estimate))}
                     </Text>
                   </Text>
                   <Text style={styles.tripDetail}>
@@ -188,7 +171,7 @@ const BookingsView: React.FC<BookingsViewProps> = ({
                     <Text style={styles.tripDetail}>{booking.tripType}</Text>
                   </Text>
                   <Text style={styles.tripDetail}>
-                    <Text style={styles.tripDetail}>{determineTripType(booking?.coords)}</Text>
+                    <Text style={styles.tripDetail}>{determineTripType(parseFloat(booking?.distance), booking?.umbral_intermunicipal_km)}</Text>
                   </Text>
                   <Text style={styles.tripDetail}>{booking.Observations}</Text>
                 </View>

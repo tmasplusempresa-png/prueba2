@@ -598,15 +598,32 @@ const MapScreen = () => {
       const hasUnresolvedIssues = Object.values(checks).some(
         (value) => value === false
       );
-      console.log("entro", hasUnresolvedIssues);
+      console.log('[DRIVER-FEED] Sin carType o location — no se suscribe a bookings NEW.', {
+        carType: user?.carType,
+        location: user?.location,
+      });
       setIsModalVisible(hasUnresolvedIssues);
       return; // Detener la ejecuci�n si falta el carType o la ubicaci�n
     }
-  
+
     const applyFilter = (bookingsList: any[]) => {
       const filtered = bookingsList.filter((booking) => {
         const isCarTypeMatch = booking.carType === user?.carType;
-        if (!isCarTypeMatch || !booking.pickup) return false;
+        const normalizedMatch = String(booking.carType || '').trim().toLowerCase() ===
+          String(user?.carType || '').trim().toLowerCase();
+        if (isCarTypeMatch !== normalizedMatch) {
+          console.warn('[DRIVER-FEED] carType difiere solo por mayúsculas/espacios — booking:', booking.carType, 'driver:', user?.carType);
+        }
+        if (!isCarTypeMatch || !booking.pickup) {
+          console.log('[DRIVER-FEED] booking descartado', {
+            id: booking.id,
+            bookingCarType: booking.carType,
+            driverCarType: user?.carType,
+            isCarTypeMatch,
+            hasPickup: !!booking.pickup,
+          });
+          return false;
+        }
 
         let maxDistance = 8000;
         if (booking.bookLater) {
@@ -618,8 +635,13 @@ const MapScreen = () => {
           user.location.lat, user.location.lng,
           booking.pickup.lat, booking.pickup.lng
         );
-        return distance <= maxDistance;
+        const withinRange = distance <= maxDistance;
+        if (!withinRange) {
+          console.log('[DRIVER-FEED] booking fuera de rango', { id: booking.id, distance, maxDistance });
+        }
+        return withinRange;
       });
+      console.log(`[DRIVER-FEED] ${filtered.length}/${bookingsList.length} bookings pasaron el filtro.`);
       setIsMapVisible(filtered.length > 0);
       setFilteredBookings(filtered);
     };
@@ -629,7 +651,11 @@ const MapScreen = () => {
       .from('bookings')
       .select('*')
       .eq('status', 'NEW')
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) {
+          console.error('[DRIVER-FEED] Error consultando bookings NEW:', error);
+        }
+        console.log(`[DRIVER-FEED] Supabase devolvió ${data?.length || 0} bookings en status NEW.`);
         const mapped = (data || []).map(mapSupabaseBooking);
         applyFilter(mapped);
       });
@@ -641,6 +667,7 @@ const MapScreen = () => {
         'postgres_changes' as any,
         { event: 'INSERT', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
         (payload: any) => {
+          console.log('[DRIVER-FEED] Realtime INSERT recibido:', payload.new?.id, payload.new?.car_type);
           const booking = mapSupabaseBooking(payload.new);
           setFilteredBookings((prev: any[]) => {
             const updated = [...prev.filter((b) => b.id !== booking.id), booking];
@@ -894,6 +921,15 @@ const MapScreen = () => {
   const [driverImmediateFeedEnabled, setDriverImmediateFeedEnabled] = useState(false);
   const [driverImmediateLoading, setDriverImmediateLoading] = useState(false);
   const [driverServicesListReady, setDriverServicesListReady] = useState(false);
+  // Vuelto a `false` temporalmente (2026-07-04) para aislar la causa de la
+  // pantalla en blanco al presionar GO durante debug remoto — con `true` se
+  // activa un pipeline extra (polling cada 7s + logs pesados con JSON
+  // completo de bookings) que la versión estable (commit 1da2d02) nunca
+  // ejecutaba, y que podía competir por memoria/CPU justo cuando el mapa
+  // nativo intenta inicializar. `filteredBookings` (búsqueda realtime real,
+  // el mecanismo que sí encuentra bookings — ver [[10-deuda-tecnica]] #29)
+  // sigue activo e independiente de este flag. Volver a `true` cuando se
+  // necesite el modal de solicitud entrante, una vez descartado el GL.
   const ENABLE_DRIVER_MAP_RESERVATIONS = false;
   const [driverTab, setDriverTab] = useState<'home' | 'routes' | 'activity' | 'profile'>('home');
   const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
@@ -1339,6 +1375,7 @@ const MapScreen = () => {
   }, [dbFirstName, dbLastName, profile?.first_name, profile?.firstName, profile?.last_name, profile?.lastName, resolveDriverName]);
 
   const toggleDriverOnline = async () => {
+    console.log('[GO-DEBUG] toggleDriverOnline start, driverOnline actual:', driverOnline);
     const newStatus = !driverOnline;
     setDriverOnline(newStatus);
     setDriverReservationsMinimized(!newStatus);
@@ -1346,20 +1383,26 @@ const MapScreen = () => {
     setShowNovedades(false);
     setShowDriverServicesModal(false);
     setIsEnabled(newStatus);
+    console.log('[GO-DEBUG] newStatus:', newStatus);
 
     if (newStatus) {
+      console.log('[GO-DEBUG] antes de speakDriverGreeting()');
       await speakDriverGreeting();
+      console.log('[GO-DEBUG] despues de speakDriverGreeting(), antes de setIsMapVisible(true)');
       setIsMapVisible(true);
+      console.log('[GO-DEBUG] setIsMapVisible(true) llamado — MapSensor deberia montar ahora');
       // Show persistent notification
       const name = dbFirstName || user?.firstName || user?.first_name || '';
-      showDriverActiveNotification(name).catch(() => {});
+      showDriverActiveNotification(name).catch((e) => console.log('[GO-DEBUG] showDriverActiveNotification error:', e));
     } else {
       setIsMapVisible(false);
       // Dismiss persistent notification
       dismissDriverNotification().catch(() => {});
     }
 
+    console.log('[GO-DEBUG] antes de handleSwipeSuccess');
     await handleSwipeSuccess(newStatus);
+    console.log('[GO-DEBUG] toggleDriverOnline FIN');
   };
 
   const handleAcceptIncoming = () => {
@@ -2492,6 +2535,12 @@ const MapScreen = () => {
               <TouchableOpacity
                 style={nS.driverCircleBtn}
                 onPress={() => {
+                  // Antes no hacía nada para conductor (isDriverView=true) —
+                  // botón visible pero muerto. Ahora navega atrás siempre.
+                  if (navigation.canGoBack()) {
+                    navigation.goBack();
+                    return;
+                  }
                   if (!isDriverView) setIsMapVisible(false);
                 }}
               >

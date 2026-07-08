@@ -2282,7 +2282,7 @@ const BottomSheetContent = ({
         <Text style={styles.amountText}>
           <Text style={{ fontWeight: "bold" }}>Costo Estimado:</Text> $
           {roundPrice(parseFloat(currentBooking.trip_cost))} - $
-          {roundPrice(parseFloat(currentBooking.trip_cost) + 7000)}
+          {roundPrice(parseFloat(currentBooking.estimate) || parseFloat(currentBooking.trip_cost))}
         </Text>
 
         {/* Tipo de viaje y otros detalles */}

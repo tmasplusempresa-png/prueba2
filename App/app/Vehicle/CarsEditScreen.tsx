@@ -30,6 +30,12 @@ const BG_IMAGE = require("../../assets/images/bg.png");
 const DEFAULT_CAR_IMAGE = require("../../assets/images/TREAS-X.png");
 
 const CATEGORY_IMAGES: Record<string, any> = {
+  // Nombres canónicos actuales
+  "TaxiPlus": require("../../assets/images/categoryTaxi.png"),
+  "VanPlus": require("../../assets/images/categoryVan.png"),
+  "XPlus": require("../../assets/images/categoryParticular.png"),
+  "ConfortPlus": require("../../assets/images/categoryEspecial.png"),
+  // Alias legacy para vehículos creados con el formato anterior
   "T+Plus Taxi": require("../../assets/images/categoryTaxi.png"),
   "T+Plus Van": require("../../assets/images/categoryVan.png"),
   "T+Plus Particular": require("../../assets/images/categoryParticular.png"),
@@ -240,10 +246,10 @@ const CarsEditScreen = ({ navigation }: any) => {
 
   const vehicleTypes = ["Automovil", "Camioneta", "VAN", "Microbus", "Campero"];
   const serviceTypes = [
-    { description: "TaxiPlus (Vehículo tipo Taxi)", value: "T+Plus Taxi" },
-    { description: "VanPlus (Van Pax 11 Servicio Especial)", value: "T+Plus Van" },
-    { description: "XPlus (Vehículo Particular Sedan o Hatchback 2006 en adelante)", value: "T+Plus Particular" },
-    { description: "ConfortPlus (Camioneta o Automóvil Servicio de Especial)", value: "T+Plus Especial" },
+    { description: "ConfortPlus (Camioneta o Automóvil Servicio Especial)", value: "ConfortPlus" },
+    { description: "TaxiPlus (Vehículo tipo Taxi)", value: "TaxiPlus" },
+    { description: "VanPlus (Van Pax 11 Servicio Especial)", value: "VanPlus" },
+    { description: "XPlus (Vehículo Particular Sedan o Hatchback 2006 en adelante)", value: "XPlus" },
   ];
   const bodyworkTypes = ["VAN", "4x4", "Cerrada", "Coupe", "Doble Cabina", "Hatch Back", "MiniVan", "CROSSOVER", "Sedan", "Station Wagon"];
   const marcasDeVehiculos = [
