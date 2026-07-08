@@ -2531,6 +2531,12 @@ const MapScreen = () => {
               <TouchableOpacity
                 style={nS.driverCircleBtn}
                 onPress={() => {
+                  // Antes no hacía nada para conductor (isDriverView=true) —
+                  // botón visible pero muerto. Ahora navega atrás siempre.
+                  if (navigation.canGoBack()) {
+                    navigation.goBack();
+                    return;
+                  }
                   if (!isDriverView) setIsMapVisible(false);
                 }}
               >
