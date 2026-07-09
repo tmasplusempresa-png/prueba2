@@ -884,7 +884,12 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       estimate: fd.clientFare,
       estimateDistance: distance || 0,
       estimateTime: duration || 0,
-      otp: generatedOtp,
+      // OTP de self-confirm del cliente: se usa solo en el modal local
+      // (state `otp`). NO se persiste en bookings.otp — esa columna es del
+      // OTP conductor↔cliente que el conductor genera cuando confirma llegada
+      // en ReservationTripScreen. Persistir el self-confirm aquí causaba
+      // desincronización: al llegar, el conductor pisaba el OTP viejo con
+      // uno nuevo y el cliente seguía viendo el viejo cacheado.
       payment_mode: selectedPaymentType || "cash",
       driver_share: fd.driverShare,
       reference: [...Array(6)].map(() => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[Math.floor(Math.random() * 26)]).join(""),
