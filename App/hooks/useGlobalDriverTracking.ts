@@ -105,7 +105,13 @@ export function useGlobalDriverTracking() {
           console.log('[GlobalDriverTracking] active booking found:', activeBookingId, rows[0].status);
           const ok = await startDriverLocationTracking(activeBookingId, publicDriverId);
           if (!ok) {
-            console.error('[GlobalDriverTracking] startDriverLocationTracking returned false (permisos?)');
+            // No es un error: startDriverLocationTracking devuelve false cuando aún
+            // faltan permisos/consentimiento de ubicación en segundo plano (en cuyo
+            // caso ya se disparó la pantalla de divulgación) o cuando el usuario los
+            // negó. El único fallo real (startLocationUpdatesAsync lanza) ya se
+            // registra con console.error dentro de driverLocationTask. Aquí solo
+            // avisamos —si fuera error, este hook lo repetiría cada 15s (poll).
+            console.warn('[GlobalDriverTracking] tracking no iniciado: permisos/consentimiento de ubicación en segundo plano pendientes');
           }
         } else {
           await stopDriverLocationTracking();
