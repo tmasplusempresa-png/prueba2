@@ -363,7 +363,15 @@ export default function PaymentScreen(props) {
   // que efectivamente recibió el dinero. Si no lo recibió, se le redirige a la
   // pantalla de Quejas y Reclamos para reportar el incidente.
   const handleCashButton = () => {
-    if (user && user.usertype === "driver" && booking.payment_mode === "cash") {
+    // Determinamos "conductor" por descarte (no-cliente), igual que el resto de
+    // la pantalla (ver "Tarifa Total"). Usar `usertype === "driver"` era frágil:
+    // al restaurar sesión, loadSession deja `user` como el objeto crudo de
+    // Supabase Auth SIN `usertype`, y el modo de pago cash saltaba la
+    // confirmación pagando directo. Soportamos también `user_type` por si el
+    // objeto trae ese nombre de campo.
+    const roleField = (user as any)?.usertype ?? (user as any)?.user_type;
+    const isCustomer = roleField === "customer";
+    if (user && !isCustomer && booking.payment_mode === "cash") {
       showAlert(
         'confirm',
         'Confirmar pago en efectivo',

@@ -114,6 +114,8 @@ const Navigation = () => {
           <Stack.Screen name="ReservationTrip" component={ReservationTripScreen} />
           <Stack.Screen name="CustomerActiveTrip" component={CustomerActiveTripScreen} />
           <Stack.Screen name="DriverActivity" component={DriverActivityScreen} />
+          <Stack.Screen name="DriverActiveReservations" component={DriverActiveReservationsScreen} />
+          <Stack.Screen name="RideList" component={DriverActiveReservationsScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="PlateTracking" component={PlateTrackingScreen} />
           <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />

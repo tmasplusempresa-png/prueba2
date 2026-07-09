@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Text, TextInput } from 'react-native';
+import { Text, TextInput, LogBox } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Constants from 'expo-constants';
 import Navigation from './Navigation/Navigation';
@@ -14,6 +14,19 @@ import { useWalletAndMembershipSync } from '@/hooks/useWalletAndMembershipSync';
 import { useDriverCarSync } from '@/hooks/useDriverCarSync';
 import CancellationNotifier from '@/components/CancellationNotifier';
 import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
+
+// El SDK de Supabase, al arrancar, intenta refrescar la sesión guardada. Si el
+// refresh token fue revocado en el servidor (p. ej. tras un reset de contraseña,
+// signOut en otro dispositivo o rotación del token), responde "Refresh Token Not
+// Found" y GoTrueClient hace console.error(error) por su cuenta, mostrando una
+// pantalla roja de LogBox en dev. Es benigno y se autocorrige: el SDK borra la
+// sesión y emite SIGNED_OUT (ver setupAuthListeners en SupabaseConfig), que
+// limpia el storage. Silenciamos solo ese error concreto para no asustar en dev.
+LogBox.ignoreLogs([
+  /Invalid Refresh Token/,
+  /Refresh Token Not Found/,
+  /AuthApiError/,
+]);
 
 // Desactivar el escalado de fuente del sistema — la app usa su propio tamaño fijo
 if ((Text as any).defaultProps == null) (Text as any).defaultProps = {};

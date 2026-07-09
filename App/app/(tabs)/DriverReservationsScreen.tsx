@@ -170,10 +170,14 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
   );
 
   useEffect(() => {
+    // Un solo fetch con el id canónico (auth_id). Disparar uno por cada
+    // candidato hacía que los ids equivocados (users.id / uid) resolvieran []
+    // y, al llegar de últimos, borraban la membresía buena de la cache →
+    // activeMembership undefined → la app pide "renovar" teniendo membresía.
     if (driverConductorId) {
-      driverIdCandidates.forEach((id) => dispatch(fetchMemberships(id)));
+      dispatch(fetchMemberships(driverConductorId));
     }
-  }, [dispatch, driverConductorId, driverIdCandidates]);
+  }, [dispatch, driverConductorId]);
 
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);

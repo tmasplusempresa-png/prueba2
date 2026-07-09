@@ -13,6 +13,7 @@ import {
 import { database } from "@/config/SupabaseConfig";
 import { supabase } from "@/config/SupabaseConfig";
 import { getMemberships } from "@/common/services/membershipsService";
+import { logout } from "@/common/reducers/authReducer";
 
 // Función para generar un UID aleatorio similar a los de Firebase
 const generateUID = () => {
@@ -194,9 +195,16 @@ const initialState: MembershipState = {
 const membershipSlice = createSlice({
   name: "memberships",
   initialState,
-  reducers: {},
+  reducers: {
+    // Limpia la cache de membresías. Necesario porque fetchMemberships.fulfilled
+    // ya no deja que un [] pise una lista cargada: sin este reset, el próximo
+    // conductor que inicie sesión heredaría la membresía del anterior.
+    resetMemberships: () => initialState,
+  },
   extraReducers: (builder) => {
     builder
+      // Al cerrar sesión, vaciar la cache de membresías del conductor saliente.
+      .addCase(logout, () => initialState)
       // Fetching memberships
       .addCase(fetchMemberships.pending, (state) => {
       //  console.log("fetchMemberships.pending");
@@ -206,7 +214,16 @@ const membershipSlice = createSlice({
       .addCase(fetchMemberships.fulfilled, (state, action) => {
        // console.log("fetchMemberships.fulfilled", action.payload);
         state.loading = false;
-        state.memberships = action.payload;
+        // No sobreescribir una lista ya cargada con [] : las filas de
+        // membership nunca se borran físicamente (cancelar/renovar cambian
+        // status o agregan filas), así que un payload vacío = fetch fallido o
+        // con id equivocado. Si lo dejáramos pisar la membresía buena,
+        // activeMembership queda undefined y la app pide "renovar" de nuevo.
+        const payload = action.payload || [];
+        if (payload.length === 0 && state.memberships.length > 0) {
+          return;
+        }
+        state.memberships = payload;
       })
       .addCase(fetchMemberships.rejected, (state, action) => {
        // console.log("fetchMemberships.rejected", action.error.message);
@@ -270,6 +287,8 @@ const membershipSlice = createSlice({
       });
   },
 });
+
+export const { resetMemberships } = membershipSlice.actions;
 
 // Selector para obtener las membresías activas del conductor autenticado
 export const selectActiveMemberships = (state: RootState, uid: string) =>
