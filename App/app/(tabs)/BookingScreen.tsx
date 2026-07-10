@@ -971,9 +971,12 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       
       if (result.success) {
         console.log("✅ [BOOKING SAVED] ID:", result.uid);
-        await OtpService.saveOtp(result.uid, bookingObject.otp);
-        console.log("💾 [OTP SERVICE] OTP guardado en Supabase para booking:", result.uid);
-        
+        // NO llamamos OtpService.saveOtp aquí. El OTP conductor↔cliente lo
+        // genera y persiste ReservationTripScreen cuando el conductor confirma
+        // llegada. Antes esta línea seteaba otp_generated_at=NOW sin OTP real,
+        // marcando el booking como "OTP en curso" antes de tiempo y causando
+        // desincronización con el OTP posterior del conductor.
+
         const bookingWithUid = { ...bookingObject, id: result.uid };
         console.log("✅ [NAVIGATION] Navegando a pantalla Booking...");
         setIsButtonDisabled(false);
