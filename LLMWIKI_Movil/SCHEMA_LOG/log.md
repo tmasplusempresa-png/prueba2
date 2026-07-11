@@ -9,6 +9,27 @@
 > propias de esta copia** y deben ser exclusivamente sobre
 > `AplicacionMovilTmasplus`.
 
+## 2026-07-10 (2) — Corrección: margen 25% solo se apaga al finalizar, no en el pronóstico
+
+**Agente:** Claude Code (Sonnet 5)
+Usuario reportó que el pronóstico al cliente pasó a mostrar un rango
+"175.600 - 175.600" (mismo valor repetido) — efecto colateral no deseado
+del fix anterior (entrada previa de este log). Aclaró: el rango del
+pronóstico debía quedar intacto; lo que pedía alinear era solo el **precio
+final** al completar el servicio.
+
+**Revertido:** `constants/fare.ts` `MARGEN_CLIENTE` de vuelta a `0.25`
+(pronóstico normal, con rango).
+
+**Corregido en el lugar correcto:** `sharedFunctions.ts`
+`addActualsToBooking` — quitada la multiplicación `×(1+MARGEN_CLIENTE)` del
+cálculo de precio final; ahora `finalClientCost = finalCost` directo (mismo
+número que el conductor, con el piso ya aplicado). El margen del 25% queda
+limitado exclusivamente al pronóstico inicial, tal como pidió el usuario.
+
+[[21-calculo-tarifa]] §Actualización 2026-07-04 (5) y [[10-deuda-tecnica]]
+#35 reescritos para reflejar el diseño correcto.
+
 ## 2026-07-10 — Margen cliente 25% apagado (decisión de negocio, temporal) + alineación cliente/conductor
 
 **Agente:** Claude Code (Sonnet 5)

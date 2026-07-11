@@ -2,7 +2,7 @@ import { GetTripDistance } from "../other/GeoFunctions";
 import { settings } from '@/scripts/settings';
 import { FareCalculator } from "../actions/FareCalculator";
 import { isNearAirport } from "../utils/airports";
-import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM, MARGEN_CLIENTE } from "../../constants/fare";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
 import { getLocalTrackingBackup, clearLocalTrackingBackup } from "@/common/services/driverLocationTask";
@@ -71,17 +71,13 @@ export const addActualsToBooking = async (
       parseFloat(booking.trip_cost) ||
       parseFloat(booking.driver_share) ||
       0;
-    // Mismo invariante pero del lado cliente: lo que el cliente paga (con el
-    // margen Erixon del 25% ya incluido) tampoco puede bajar de lo cotizado.
-    // `price` es el campo que realmente lee la pantalla del cliente
-    // (`booking.price || booking.estimate`, ver CustomerActiveTripScreen.tsx) —
-    // se popula UNA sola vez al crear la reserva (`CreateReservationScreen.tsx`)
-    // y nunca se recalculaba acá, quedando desalineado del precio real del
-    // conductor cuando el viaje terminaba distinto a lo cotizado.
-    const quotedClientMin =
-      parseFloat(booking.price) ||
-      parseFloat(booking.estimate) ||
-      0;
+    // Nota: `price`/`estimate` (lo que lee CustomerActiveTripScreen.tsx) se
+    // popula UNA sola vez al crear la reserva con el máximo del rango
+    // (`clientPrice`, con margen) y nunca se recalculaba acá — quedaba
+    // desalineado del precio real del conductor. Ahora, al finalizar,
+    // cliente y conductor reciben el MISMO valor final (ver `finalClientCost`
+    // abajo) — no hace falta un piso propio del lado cliente, hereda el de
+    // `finalCost`.
 
     // Leer tarifas desde Supabase car_types (fuente única de verdad)
     let rates: any = {};
@@ -210,18 +206,14 @@ export const addActualsToBooking = async (
       );
     }
 
-    // Precio cliente: mismo margen Erixon (25%) que usa FareCalculator,
-    // aplicado sobre el precio conductor YA con el piso puesto — alineado
-    // con la arquitectura oficial (Excel Tapa!F13-F14, ver [[21-calculo-tarifa]]).
-    // Piso propio del lado cliente: nunca por debajo de lo cotizado.
-    const recalculatedClientCost = Math.ceil((finalCost * (1 + MARGEN_CLIENTE)) / 100) * 100;
-    const finalClientCost = Math.max(recalculatedClientCost, quotedClientMin);
-    const clientFloorApplied = finalClientCost > recalculatedClientCost;
-    if (clientFloorApplied) {
-      console.log(
-        `[addActualsToBooking] Piso aplicado (cliente): recalculado ${recalculatedClientCost} < cotizado ${quotedClientMin}. Se cobra lo cotizado ${finalClientCost}.`
-      );
-    }
+    // Precio cliente AL FINALIZAR: alineado 1:1 con el precio conductor —
+    // sin margen acá (el margen del 25% solo aplica al PRONÓSTICO inicial,
+    // ver `MARGEN_CLIENTE` en `constants/fare.ts`). El piso ya está puesto
+    // en `finalCost` (nunca por debajo del mínimo cotizado al crear la
+    // reserva) — el cliente paga exactamente lo mismo que recibe el
+    // conductor al cierre del servicio, ese valor o superior si el viaje
+    // real salió más largo.
+    const finalClientCost = finalCost;
 
     booking.drop = { add: booking.drop?.add, lat: booking.drop?.lat, lng: booking.drop?.lng };
     booking.dropAddress = booking.drop.add;

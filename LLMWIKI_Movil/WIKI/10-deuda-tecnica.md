@@ -541,29 +541,37 @@ sin tocar el otro. Ver [[06-flujos-negocio]] y [[21-calculo-tarifa]] para el
 mismo patrón de "dos fuentes de verdad que divergen" en otras áreas del
 sistema.
 
-## 35. Margen cliente 25% apagado — pendiente reactivar solo para modelo empresarial
+## 35. Margen cliente 25% — solo aplica al pronóstico, no al precio final (corregido)
 
-**Estado: implementado a propósito, no cerrar como "bug".** `MARGEN_CLIENTE`
-(`App/constants/fare.ts`) está en `0` desde 2026-07-04 por decisión de
-negocio — el 25% de margen (cliente paga más que lo que recibe el
-conductor) **solo debería aplicar a reservas empresariales**, que hoy no
-existen como flujo distinto en el código (`FareCalculator` no distingue
-retail vs. corporativo, aplica lo mismo a todo). Mientras tanto, cliente =
-conductor en el 100% de las reservas.
+**Estado: implementado a propósito, no cerrar como "bug".** Corrección
+2026-07-04: el primer intento apagó `MARGEN_CLIENTE=0` **globalmente**
+(rompió el rango del pronóstico al cliente, colapsó a un solo valor
+repetido). Diseño correcto ya implementado:
+- **Pronóstico** (cotizar/durante el viaje): `MARGEN_CLIENTE=0.25` sin
+  tocar, sigue mostrando rango mínimo-máximo normal.
+- **Precio final** (`addActualsToBooking`, al completar el servicio):
+  cliente y conductor reciben el **mismo número** (`finalClientCost =
+  finalCost`, sin margen en ese punto específico), con el piso al mínimo
+  cotizado ya aplicado.
+
+El 25% para modelo empresarial (`payment_mode='corp'`) sigue sin
+implementar como flujo distinto — hoy el margen del pronóstico aplica igual
+a toda reserva retail o corporativa por igual.
 
 **Trabajo pendiente para cuando se implemente el modelo empresarial:**
 1. Definir cómo se marca una reserva como empresarial (columna nueva en
    `bookings`, o derivarlo de `payment_mode='corp'`/`users.user_type='company'`
    que ya existen en el schema — ver [[07-entidades-bd]] item 10 de este
    catálogo).
-2. Condicionar `MARGEN_CLIENTE` por ese flag en `FareCalculator.tsx` —
-   pasar como parte de `context` (mismo patrón que `isAirport`/`isScheduled`),
-   no como constante global. Retail = 0, empresarial = 0.25 (o el % que
-   defina negocio, podría no ser fijo).
-3. Revisar `AplicacionWebTmasplus/.../utils/fareConstants.ts` (otro proyecto,
-   no tocado en esta sesión) — sigue en 0.25 ahí, decidir si debe alinearse.
-4. Actualizar [[21-calculo-tarifa]] cuando se reactive — tiene el detalle
-   completo de esta decisión y su fecha.
+2. Condicionar `MARGEN_CLIENTE` del **pronóstico** por ese flag en
+   `FareCalculator.tsx` — pasar como parte de `context` (mismo patrón que
+   `isAirport`/`isScheduled`). Retail = 0.25 actual (o el % que se decida),
+   empresarial = otro %.
+3. Decidir si el **precio final** también debería diferir para empresarial
+   (hoy siempre cliente=conductor sin margen al finalizar, para todos).
+4. Revisar `AplicacionWebTmasplus/.../utils/fareConstants.ts` (otro proyecto,
+   no tocado en esta sesión) para consistencia cross-canal si aplica.
+5. Actualizar [[21-calculo-tarifa]] cuando se implemente esta distinción.
 
 ## Cómo cerrar un ítem
 

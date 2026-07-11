@@ -569,51 +569,46 @@ botón "Cancelar" del cliente se oculta tras `ACCEPTED`
 admin en el dashboard web (`AplicacionWebTmasplus`, fuera de este proyecto) o
 un job de timeout — pendiente de decisión de negocio.
 
-## Actualización 2026-07-04 (5) — Margen cliente 25% APAGADO por decisión de negocio (temporal)
+## Actualización 2026-07-04 (5) — Cliente=conductor SOLO al finalizar (no en el pronóstico)
 
-**⚠️ Cambio de modelo de negocio, no un bug fix.** El margen Erixon del 25%
-(`MARGEN_CLIENTE`, `App/constants/fare.ts`) documentado arriba y en
-[23-modelo-pricing-excel-oficial] **solo aplica al modelo empresarial**
-(reservas corporativas, `payment_mode='corp'` o similar), que hoy **no está
-implementado como flujo separado** en este proyecto — la app no distingue
-entre reserva retail y empresarial al calcular tarifa, aplica el mismo
-`FareCalculator` a todas.
+**⚠️ Primer intento (revertido) — lección aprendida:** se probó apagar
+`MARGEN_CLIENTE=0` globalmente en `constants/fare.ts`. Eso rompió el
+**pronóstico** al cliente (el rango mínimo-máximo mostrado al cotizar/durante
+el viaje colapsó a un solo valor repetido, ej. "$175.600 - $175.600") —
+usuario aclaró que el rango del pronóstico debe seguir existiendo tal cual
+estaba; lo que pedía alinear era **solo el precio final al completar el
+servicio**. `MARGEN_CLIENTE` se revirtió a `0.25`.
 
-Hasta que exista esa distinción real, negocio pidió apagar el margen para
-**todas** las reservas: cliente paga exactamente lo mismo que recibe el
-conductor (sin comisión de plataforma visible en el cálculo).
+**Diseño correcto, implementado:**
+- **Pronóstico** (cotizar / durante el viaje): sigue mostrando rango
+  min-max con el margen del 25% normal, sin cambios — `FareCalculator`
+  (`clientTotal = totalConductor × (1+MARGEN_CLIENTE)`) intacto.
+- **Precio final** (`addActualsToBooking`, al completar el servicio): el
+  margen del 25% **no se aplica en este punto**. El precio final que paga
+  el cliente es el **mismo número** que recibe el conductor
+  (`finalClientCost = finalCost`), con el piso ya aplicado (nunca por
+  debajo del mínimo cotizado al crear la reserva — ver sección anterior).
 
-**Implementación:**
 ```ts
-// App/constants/fare.ts
-export const MARGEN_CLIENTE = 0; // antes 0.25 — ver nota arriba
+// sharedFunctions.ts — addActualsToBooking, después de aplicar el piso conductor
+const finalCost = Math.max(totalCost, quotedMinFare);       // piso conductor
+const finalClientCost = finalCost;                          // = mismo valor, sin margen acá
+booking.trip_cost = booking.driver_share = finalCost;
+booking.price = booking.estimate = finalClientCost;
 ```
 
-Al ser la **única** fuente de esa constante (`FareCalculator.tsx` la importa
-y todo lo demás —`CreateReservationScreen.tsx`, `BookingScreen.tsx`,
-`sharedFunctions.ts` `addActualsToBooking`— pasa por `FareCalculator`), este
-único cambio alinea cliente = conductor en **todo** el flujo: cotización al
-crear la reserva Y recálculo al finalizar. No se tocó ninguna otra lógica —
-ni el piso al mínimo cotizado (sección anterior), ni el ROUNDUP, ni los
-recargos (aeropuerto/programado/protocolo).
-
-**Pendiente para cuando se implemente el modelo empresarial real:**
-1. Agregar distinción explícita reserva retail vs. empresarial (columna
-   `bookings` o `car_types`, o flag en el flujo de creación).
-2. Reactivar `MARGEN_CLIENTE=0.25` **condicionado** a ese flag, no
-   incondicional como estaba antes — retail sigue en 0, empresarial en 0.25
-   (o el % que negocio defina).
-3. Revisar si `AplicacionWebTmasplus` (`utils/fareConstants.ts`, fuera de
-   este proyecto) necesita el mismo apagado para consistencia cross-canal —
-   no se tocó en esta sesión, sigue en 0.25 ahí salvo que se decida lo
-   contrario.
+`MARGEN_CLIENTE` (`constants/fare.ts`) queda en `0.25` sin cambios — solo se
+usa para el pronóstico, `FareCalculator` en sí no se tocó. El margen del 25%
+para modelo empresarial (`payment_mode='corp'`) sigue siendo tema aparte, no
+implementado — ver [[10-deuda-tecnica]] #35 (actualizado con este alcance
+corregido).
 
 ## Fuentes
-- `App/common/actions/FareCalculator.tsx` (algoritmo completo)
-- `App/constants/fare.ts` (`MARGEN_CLIENTE` — hoy en `0`, ver nota arriba)
+- `App/common/actions/FareCalculator.tsx` (algoritmo completo, pronóstico)
+- `App/constants/fare.ts` (`MARGEN_CLIENTE=0.25` — solo pronóstico, sin cambios)
 - `App/components/CarDetails.tsx:53-118` (invocación y selección urbana/intermunicipal)
-- `App/app/(tabs)/CreateReservationScreen.tsx`, `BookingScreen.tsx` (consumo en UI)
-- `App/common/other/sharedFunctions.ts` (utilidades comparativas)
+- `App/app/(tabs)/CreateReservationScreen.tsx`, `BookingScreen.tsx` (consumo en UI, pronóstico)
+- `App/common/other/sharedFunctions.ts` (`addActualsToBooking` — precio final, sin margen)
 - `App/app/Booking/BookingCabScren.tsx` (pantalla "esperando conductor")
 - `App/components/BookingsView.tsx` (lista de solicitudes entrantes del conductor)
 - `App/hooks/roundPrice.ts` (redondeo de display, distinto al del motor)
