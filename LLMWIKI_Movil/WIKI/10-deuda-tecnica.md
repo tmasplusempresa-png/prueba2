@@ -456,6 +456,91 @@ probablemente un frame de transición/medición de altura, no reproducido de
 forma aislada. Sin fix aplicado, requiere captura de pantalla completa (sin
 recortar) para diagnosticar bien.
 
+## 33. `endBooking` tronaba por `driverProfile.location` vacío → confirmación de pago nunca aparecía — cerrado
+
+**✅ Cerrado 2026-07-09.** Síntoma reportado: al finalizar un viaje
+**on-demand con pago en efectivo**, no aparecía la confirmación
+*"¿Confirmas que recibiste el pago en efectivo del cliente?"* (ver
+[[06-flujos-negocio]] §5.1).
+
+El bug **no estaba en el modal** sino antes, en la cadena que lleva a la
+pantalla Payment. `finalizarReserva` (`app/Booking/BookingCabScren.tsx`) llama
+`endBooking(...).unwrap()` y solo navega a `"Payment"` si el resultado es
+`REACHED`. `endBooking` (`common/store/bookingsSlice.ts`) tomaba la ubicación
+de `driverProfile.location` (= `state.auth.user.location`) y lanzaba
+`throw new Error("Driver location data is missing")` si venía vacía o sin
+lat/lng. Pero `state.auth.user.location` es poco fiable: el auth slice **no
+maneja** `UPDATE_USER_LOCATION` (despachado desde `_layout.tsx`), así que casi
+siempre es `undefined` — y **garantizado** en emulador sin GPS. Resultado:
+`endBooking` truena → `finalizarReserva` cae al `catch` → error genérico →
+**nunca navega a Payment → nunca se ve la confirmación de pago**.
+
+**Fix:** `endBooking` ahora replica el patrón que ya usaba `updateLocation`
+(misma raíz de bug documentada como comentario ahí): lee GPS en vivo con
+`Location.getCurrentPositionAsync({ accuracy: High })` (si hay permiso),
+fallback a `driverProfile.location` de Redux, y solo lanza el error si **ambos**
+fallan. Así el flujo llega a Payment y la confirmación aparece.
+
+**Nota:** el sistema de "conductor confirma pago" NO fue eliminado por versiones
+recientes (verificado contra HEAD, working tree limpio). El commit
+`f11c7a6 "comprobaciòn bug modal recibo de pago"` había arreglado un bug
+**distinto** del mismo flujo: el gate `user.usertype === "driver"` fallaba tras
+restaurar sesión (user crudo de Supabase Auth sin `usertype`) → se cambió a
+`!isCustomer` por descarte.
+
+## 34. Conductor no veía ningún servicio — dato inconsistente `cars.service_type` vs `features.carType`, no bug de código
+
+**✅ Diagnosticado y corregido en datos, 2026-07-10.** Reporte del usuario:
+*"al conductor no le aparecen los servicios"*. Se descartó primero que fuera
+regresión del código de esa misma sesión (fix de piso `min_fare` en
+`sharedFunctions.ts`/`bookingsSlice.ts`) — esos archivos no tocan `cars`,
+`service_type` ni `DriverReservationsScreen.tsx` en absoluto.
+
+**Método de diagnóstico** (reutilizable para casos similares):
+1. `adb devices` → identificar emuladores conectados.
+2. `adb -s <device> logcat -d ReactNativeJS:V "*:S" | grep "RESERVAS\|INMEDIATOS"`
+   → leer directamente los logs `[RESERVAS]`/`[INMEDIATOS]` ya instrumentados
+   en `DriverReservationsScreen.tsx` (no requiere Metro corriendo en foreground,
+   el buffer de logcat persiste).
+3. Con los IDs de los bookings candidatos de los logs, consultar Supabase
+   **con `service_role` key** (el `anon` key sin sesión no ve nada por RLS,
+   devuelve `[]` silencioso — no confundir con "no hay datos").
+4. Cruzar contra `cars.service_type` / `cars.features->>carType` del driver.
+
+**Causa raíz encontrada:** la cuenta de prueba `demo conductor`
+(`fcc57421-e298-4365-88c0-087b575ff4a2`) tenía su única fila `cars` con:
+```
+service_type: "particular"        → canónico XPlus
+features.carType: "ConfortPlus"   → canónico ConfortPlus
+```
+`fetchActiveCarType()` (`DriverReservationsScreen.tsx:289-317`) prioriza
+`service_type` sobre `features.carType` por diseño (refleja ediciones del
+dashboard web sin depender de un formato legado — ver ítem #31 de este mismo
+catálogo). Con `service_type` ganando, el conductor quedaba categorizado como
+**XPlus**, mientras el booking de prueba `3B8ZJV` (pickup a 0km exactos del
+conductor, sin conductor asignado, `status=PENDING`) era `car_type=ConfortPlus`
+→ no coincidía → filtrado silenciosamente, `Total: 0` en el log
+`[INMEDIATOS] Tras filtrar`.
+
+No era bug de `RESERVAS` tampoco: 0 filas crudas con `booking_type=reservation
+AND status=PENDING` en ese momento — sencillamente no había reservas
+programadas creadas, comportamiento correcto.
+
+**Fix aplicado:** `PATCH cars.service_type = 'servicio_especial'` (mapea a
+ConfortPlus en `toCanonicalCarType`) en la fila del driver de prueba, para que
+coincida con su `features.carType` real. Confirmado end-to-end: tras el
+siguiente ciclo de `fetchActiveCarType` (cada 30s), el log pasó de
+`Total: 0` a `Total: 1, PENDING: 1`.
+
+**Lección para operaciones:** si un conductor real reporta "no me llegan
+servicios" y su vehículo/ubicación/categoría de reserva parecen correctos a
+simple vista, revisar si `cars.service_type` (el que edita el dashboard web)
+y `cars.features.carType` (legado móvil) **divergen** — el primero siempre
+gana y puede estar desactualizado si alguien tocó el registro por un canal
+sin tocar el otro. Ver [[06-flujos-negocio]] y [[21-calculo-tarifa]] para el
+mismo patrón de "dos fuentes de verdad que divergen" en otras áreas del
+sistema.
+
 ## Cómo cerrar un ítem
 
 1. Abrir PR.

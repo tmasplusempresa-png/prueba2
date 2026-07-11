@@ -9,6 +9,91 @@
 > propias de esta copia** y deben ser exclusivamente sobre
 > `AplicacionMovilTmasplus`.
 
+## 2026-07-10 (16) — "Conductor no ve servicios" — dato inconsistente cars.service_type vs features.carType, no bug de código
+
+**Agente:** Claude Code (Opus 4.8)
+Reporte del usuario: *"al conductor no le aparecen los servicios"*, pidiendo
+descartar primero si algo se rompió con el fix del piso `min_fare` de esta
+misma sesión (entrada 15). Confirmado que no: ese fix toca
+`sharedFunctions.ts`/`bookingsSlice.ts`, sin relación con
+`DriverReservationsScreen.tsx` ni con `cars`.
+
+**Diagnóstico en vivo** (sin Metro corriendo, vía `adb logcat -d
+ReactNativeJS:V` sobre los dos emuladores conectados) + consultas de solo
+lectura a Supabase con `service_role` key (el `anon` key sin sesión no ve
+nada por RLS — devuelve `[]`, no confundir con "no hay datos"):
+- `[RESERVAS]`: 0 filas crudas — no había reservas programadas, comportamiento
+  correcto, no bug.
+- `[INMEDIATOS]`: 25 filas crudas, 0 tras filtrar. El booking `3B8ZJV`
+  (`car_type=ConfortPlus`) tenía pickup a 0km exactos del conductor de prueba,
+  sin conductor asignado, `status=PENDING` — pasaba 3 de 4 filtros, se caía en
+  coincidencia de categoría.
+
+**Causa raíz:** cuenta `demo conductor` (`fcc57421-...`) con
+`cars.service_type="particular"` (→XPlus) pero `cars.features.carType=
+"ConfortPlus"` — divergentes. `fetchActiveCarType()` prioriza `service_type`
+por diseño (mismo patrón que cerró el ítem #31 de deuda técnica), así que el
+conductor quedaba categorizado XPlus y nunca veía bookings ConfortPlus.
+
+**Fix:** con confirmación explícita del usuario sobre cuál valor era el
+correcto (ConfortPlus), `PATCH cars.service_type = 'servicio_especial'` en la
+fila del driver de prueba. Verificado end-to-end vía logcat: `Total: 0` →
+`Total: 1, PENDING: 1` tras el siguiente ciclo de refresco (30s).
+
+Documentado en **[[10-deuda-tecnica]] ítem #34** (incluye la metodología de
+diagnóstico con `adb logcat` + `service_role` reutilizable para casos
+similares) y cross-linked con el ítem #31 (mismo patrón de causa).
+
+## 2026-07-10 (15) — Piso al mínimo cotizado en el recálculo al finalizar viaje
+
+**Agente:** Claude Code (Opus 4.8)
+Regla de negocio del usuario: *"el valor calculado podrá ser mayor al valor
+mínimo del rango, pero jamás menor a ese valor"*. El recálculo real al
+finalizar (`addActualsToBooking`, `sharedFunctions.ts`) sobreescribía
+`trip_cost` con el `totalCost` recalculado **sin piso** → un viaje corto (no se
+llegó al destino) o una ruta real más barata dejaba el precio final por debajo
+del mínimo cotizado al cliente. La dirección "más largo → sube" ya funcionaba
+(sesiones previas: `valor_hora`, columna `timestamp`, formato `trip_end_time`);
+faltaba el piso.
+
+**Verificación histórica pedida por el usuario:** auditados los 4 commits sobre
+`sharedFunctions.ts` (`1e70a9b`, `6f03388`, `b796ef6`, `1322504`) + `git log
+-S"Math.max"` / `-G` sobre conceptos de piso. **El piso nunca existió** — hueco
+desde el origen, no regresión. Por eso se **creó** el sistema.
+
+**Implementado:** invariante `precio_final = max(recalculado, mínimo_cotizado)`
+donde mínimo cotizado = `trip_cost`/`driver_share` con que entró la reserva.
+Se floorean `trip_cost` y `driver_share`; si aplica el piso se conserva la
+`convenience_fees` cotizada. `distance` conserva la real (registro honesto).
+Idempotente. Documentado en **[[21-calculo-tarifa]]** §"Actualización
+2026-07-10".
+
+**Hueco relacionado sin cerrar (documentado):** viaje atascado en `STARTED` sin
+completar no tiene timeout ni cierre forzado desde el móvil → no dispara
+recálculo ni cobro. Requiere acción admin web o job de timeout (decisión de
+negocio pendiente).
+
+## 2026-07-09 (14) — Confirmación de pago del conductor no aparecía (endBooking tronaba por location)
+
+**Agente:** Claude Code (Opus 4.8)
+Reporte del usuario: al finalizar un viaje on-demand en efectivo no salía el
+"modal de recibo de pago" (la confirmación *"¿recibiste el pago en efectivo?"*).
+
+Diagnóstico: no era el modal (un `CustomAlert` en `PaymentDeais.tsx` →
+`handleCashButton`, correcto y presente en HEAD). El flujo ni llegaba a la
+pantalla Payment porque `endBooking` (`common/store/bookingsSlice.ts`) lanzaba
+`"Driver location data is missing"` cuando `driverProfile.location`
+(= `state.auth.user.location`) venía vacío (casi siempre; garantizado en
+emulador sin GPS) → `finalizarReserva` caía al `catch` sin navegar.
+
+Fix aplicado en `endBooking`: leer GPS en vivo
+(`Location.getCurrentPositionAsync`) con fallback a Redux, igual que
+`updateLocation`. Documentado en **[[10-deuda-tecnica]] #33** y
+**[[06-flujos-negocio]] §5.1** (nueva sección sobre la confirmación del
+conductor). Se confirmó que el sistema NO fue eliminado por versiones recientes;
+el commit `f11c7a6` había cerrado un bug distinto del mismo flujo (gate
+`usertype` → `!isCustomer`).
+
 ## 2026-07-04 (13) — 2 bugs reales cerrados durante debug remoto + confirmación onMapReady
 
 **Agente:** Claude Code (Sonnet 5)

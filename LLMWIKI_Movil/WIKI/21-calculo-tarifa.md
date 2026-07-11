@@ -514,6 +514,61 @@ ruta una vez y la sirve a ambos). Tolerancia esperada: hasta $100 en
 `totalConductor`, hasta $100-200 en `clientTotal` (efecto de la ceil-100
 sobre el margen).
 
+## Actualización 2026-07-10 — Piso al mínimo cotizado en el recálculo al finalizar
+
+**Problema reportado (usuario):** el recálculo real al finalizar el servicio
+(`addActualsToBooking`, `sharedFunctions.ts`) sobreescribía `trip_cost` con el
+`totalCost` recalculado **sin ningún piso**. Consecuencia: si el viaje se
+quedaba corto (el conductor no llegaba al destino) o la ruta real daba menos
+km/tiempo que lo cotizado, el precio final quedaba **por debajo del mínimo que
+se le mostró al cliente al crear la reserva**. La dirección "más largo → sube"
+ya funcionaba; la que faltaba era el piso en la dirección "más corto → nunca
+baja del cotizado".
+
+**Verificación histórica (git):** se auditaron los 4 commits que tocaron
+`sharedFunctions.ts` (`1e70a9b`, `6f03388`, `b796ef6`, `1322504`) y `git log
+-S"Math.max"` / `-G` sobre conceptos de piso. **El piso nunca existió** en
+ningún punto de la historia — `addActualsToBooking` siempre asignó
+`booking.trip_cost = totalCost` de forma incondicional. No fue una regresión;
+era un hueco desde el origen.
+
+**Invariante implementada:** `precio_final >= mínimo_del_rango_cotizado`.
+El mínimo del rango cotizado es `trip_cost` (= `driver_share` = `totalCost` al
+momento del quote), el extremo inferior del rango mostrado al cliente
+("$52.700 – $65.900"). El recálculo puede **subir** este valor (viaje real más
+largo) pero **jamás bajarlo**.
+
+**Fix (`sharedFunctions.ts` `addActualsToBooking`):**
+```ts
+// capturado al entrar, ANTES de recalcular
+const quotedMinFare =
+  parseFloat(booking.trip_cost) || parseFloat(booking.driver_share) || 0;
+...
+const finalCost = Math.max(totalCost, quotedMinFare);   // piso
+const floorApplied = finalCost > totalCost;
+booking.trip_cost    = finalCost;
+booking.driver_share = finalCost;
+// si se aplicó el piso, conservar la comisión cotizada para que el total tampoco baje
+booking.convenience_fees = floorApplied
+  ? (parseFloat(booking.convenience_fees) || convenience_fees)
+  : convenience_fees;
+```
+`booking.distance` sí conserva la distancia real recorrida (registro honesto de
+lo que pasó); solo el **precio** queda floored. Idempotente: si la función
+corre dos veces, `quotedMinFare` toma el valor ya floored y nunca baja.
+
+**Hueco relacionado NO cubierto por este fix (documentado, sin implementar):**
+si un viaje queda atascado en `STARTED` (app cerrada, pérdida de conexión, el
+conductor abandona sin completar) no hay timeout ni cierre forzado desde el
+móvil — no se dispara `addActualsToBooking`, no hay cobro final. El único
+auto-cancel (`NotificationsScreen.tsx` `autoCancelExpiredBooking`) es para
+solicitudes **sin aceptar** (pre-`ACCEPTED`), no para viajes en curso. El
+botón "Cancelar" del cliente se oculta tras `ACCEPTED`
+(`CustomerActiveTripScreen.tsx`) y el conductor no tiene acción de cancelar en
+`ReservationTripScreen.tsx`. Cierre de viajes atascados requeriría acción de
+admin en el dashboard web (`AplicacionWebTmasplus`, fuera de este proyecto) o
+un job de timeout — pendiente de decisión de negocio.
+
 ## Fuentes
 - `App/common/actions/FareCalculator.tsx` (algoritmo completo)
 - `App/components/CarDetails.tsx:53-118` (invocación y selección urbana/intermunicipal)

@@ -53,6 +53,34 @@ Más detalle en guías históricas: `App/OTP_SYSTEM_README.md`, `App/OTP_DEBUG_C
   `-buyTransactionDaviplata`, `-readOtpDaviplata`, `-confirmBuyDaviplata`).
 - **Billetera interna** — `app/(tabs)/WalletDetails.tsx`, slice `wallet`.
 
+### 5.1 Confirmación del conductor "¿recibiste el pago?" (efectivo/transferencia)
+
+Al finalizar, el conductor confirma que recibió el dinero. **No es un `<Modal>`
+de RN — es un `CustomAlert`** (`showAlert('confirm', …)`), por eso buscar
+"Modal" no lo encuentra. Vive en dos flujos distintos:
+
+- **On-demand (inmediato):** `app/(tabs)/PaymentDeais.tsx` → `handleCashButton`.
+  El conductor llega a la pantalla **Payment** (tras `endBooking`→`REACHED`) y
+  toca el botón **"Dinero en efectivo en el Automóvil"**; recién ahí salta
+  *"¿Confirmas que recibiste el pago en efectivo del cliente?"* con
+  *"No recibí el pago"* (→ pantalla `Complain`) / *"Sí, recibí el pago"*
+  (→ `doPayment('cash')`). **Solo para `payment_mode === "cash"`**; en no-efectivo
+  paga directo sin preguntar. El gate usa `!isCustomer` (por descarte), no
+  `usertype === "driver"`, porque tras restaurar sesión `state.auth.user` viene
+  como el objeto crudo de Supabase Auth sin `usertype`.
+- **Reservas (programado):** `app/(tabs)/ReservationTripScreen.tsx` →
+  `proceedAfterRating`. Si NO es efectivo: *"¿Ya recibiste la transferencia de
+  $X…?"*; si es efectivo: solo *"¿Confirmas que ha finalizado el recorrido?"*.
+
+**Requisito no obvio (on-demand):** esta confirmación solo se ve si el flujo
+llega a la pantalla Payment, y eso depende de que `endBooking`
+(`common/store/bookingsSlice.ts`) resuelva la ubicación del conductor. Antes
+lanzaba `"Driver location data is missing"` si `driverProfile.location` venía
+vacío (casi siempre, y garantizado en emulador sin GPS) → `finalizarReserva`
+caía al `catch` sin navegar → la confirmación nunca aparecía. Fix 2026-07-09:
+`endBooking` ahora lee GPS en vivo (`Location.getCurrentPositionAsync`) con
+fallback a Redux, igual que `updateLocation`. Ver [[10-deuda-tecnica]] #33.
+
 ## 6. Membresías y referidos
 
 - Pantallas: `app/Subscription/{ChosePlan,Memberships,SubscriptionScreen}`.
