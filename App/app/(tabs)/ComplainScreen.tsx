@@ -161,11 +161,9 @@ const Complain = ({ navigation }: Props) => {
           allowsEditing: false,
         });
       } else {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== "granted") {
-          showAlert('warning', 'Permiso requerido', 'Necesitamos acceso a la galería para seleccionar fotos.');
-          return;
-        }
+        // Sin request explícito de READ_MEDIA_IMAGES/VIDEO — el Photo Picker nativo
+        // no lo requiere para un uso puntual (adjuntar evidencia), y pedirlo de más
+        // viola la política de Google Play sobre permisos de fotos y video.
         result = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ImagePicker.MediaTypeOptions.Images,
           quality: 0.7,

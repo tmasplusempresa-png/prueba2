@@ -567,15 +567,11 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
     setSearchText(text);
     setRequestCount(0); // Reinicia el contador de peticiones
   };
+  // Sin request explícito de READ_MEDIA_IMAGES/VIDEO en ninguno de los dos —
+  // el Photo Picker nativo no lo requiere para uso puntual (foto de perfil /
+  // documento de verificación), y pedirlo de más viola la política de Google
+  // Play sobre permisos de fotos y video.
   const pickProfileImage = async () => {
-    let permissionResult =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-    if (permissionResult.granted === false) {
-      alert("Permiso para acceder a la galería es necesario!");
-      return;
-    }
-
     let pickerResult = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
@@ -589,14 +585,6 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
   };
 
   const pickVerifyIdImage = async () => {
-    let permissionResult =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-    if (permissionResult.granted === false) {
-      alert("Permiso para acceder a la galería es necesario!");
-      return;
-    }
-
     let pickerResult = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
