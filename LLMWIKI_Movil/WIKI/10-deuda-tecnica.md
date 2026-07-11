@@ -573,6 +573,35 @@ a toda reserva retail o corporativa por igual.
    no tocado en esta sesión) para consistencia cross-canal si aplica.
 5. Actualizar [[21-calculo-tarifa]] cuando se implemente esta distinción.
 
+## 36. `getCurrentPositionAsync` sin `try/catch` en `DriverReservationsScreen` — uncaught rejection cuando GPS no tiene fix — cerrado
+
+**Síntoma reportado:** consola del conductor mostraba `Uncaught (in
+promise) Error: Current location is unavailable. Make sure that location
+services are enabled` (error nativo de `expo-location`, `CodedError`), sin
+crash visible en pantalla pero con el promise sin manejar.
+
+**Causa raíz:** `DriverReservationsScreen.tsx` (efecto de "Live GPS del
+conductor", ~línea 197) llamaba `Location.getCurrentPositionAsync(...)`
+seguido de `Location.watchPositionAsync(...)` dentro de un IIFE `async`
+sin `try/catch`. Si el emulador/dispositivo tiene permisos concedidos pero
+el GPS aún no entrega un fix (típico en emuladores o interiores), la
+promesa de `getCurrentPositionAsync` rechaza y queda sin capturar — el
+`liveCoords` (usado para el filtro estricto de 3km de servicios inmediatos)
+nunca se setea y el error queda flotando en consola.
+
+Nota: `mapaSensors.tsx` (otra pantalla que también usa GPS en vivo) ya
+tenía este mismo patrón envuelto en `try/catch` desde antes — este efecto
+de `DriverReservationsScreen.tsx` era la única llamada sin proteger.
+
+**Fix aplicado:** ambas llamadas envueltas en `try/catch` independientes.
+Si `getCurrentPositionAsync` falla, no bloquea — el `watchPositionAsync`
+subsiguiente sigue intentando y actualiza `liveCoords` en cuanto haya
+señal. Si `watchPositionAsync` también falla (permiso revocado a mitad de
+sesión, hardware sin GPS), se marca `setLocationDenied(true)` para que la
+UI lo refleje en vez de dejar la promesa sin manejar.
+
+**Archivo:** `App/app/(tabs)/DriverReservationsScreen.tsx:197-216`.
+
 ## Cómo cerrar un ítem
 
 1. Abrir PR.

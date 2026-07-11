@@ -202,12 +202,20 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         setLocationDenied(true);
         return;
       }
-      const first = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      setLiveCoords({ lat: first.coords.latitude, lng: first.coords.longitude });
-      sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
-        loc => setLiveCoords({ lat: loc.coords.latitude, lng: loc.coords.longitude }),
-      );
+      try {
+        const first = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        setLiveCoords({ lat: first.coords.latitude, lng: first.coords.longitude });
+      } catch {
+        // GPS aún sin fix; el watcher de abajo actualizará liveCoords en cuanto haya señal.
+      }
+      try {
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 },
+          loc => setLiveCoords({ lat: loc.coords.latitude, lng: loc.coords.longitude }),
+        );
+      } catch {
+        setLocationDenied(true);
+      }
     })();
     return () => { sub?.remove(); };
   }, []);

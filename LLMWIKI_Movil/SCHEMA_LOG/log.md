@@ -9,6 +9,28 @@
 > propias de esta copia** y deben ser exclusivamente sobre
 > `AplicacionMovilTmasplus`.
 
+## 2026-07-11 — Fix: uncaught rejection "Current location is unavailable" en `DriverReservationsScreen`
+
+**Agente:** Claude Code (Sonnet 5)
+Usuario reportó error de consola en el conductor: `Uncaught (in promise)
+Error: Current location is unavailable. Make sure that location services
+are enabled` (`CodedError` nativo de `expo-location`).
+
+**Causa raíz:** el efecto de "Live GPS del conductor" en
+`DriverReservationsScreen.tsx` (usado para el filtro estricto de 3km de
+servicios inmediatos) llamaba `Location.getCurrentPositionAsync(...)` y
+`Location.watchPositionAsync(...)` sin `try/catch` dentro de un IIFE
+`async`. Si el GPS no tenía fix todavía (común en emuladores), la promesa
+rechazaba sin manejar. `mapaSensors.tsx` ya protegía la misma llamada con
+`try/catch`; esta pantalla era la única sin protección.
+
+**Fix:** `App/app/(tabs)/DriverReservationsScreen.tsx:197-216` — ambas
+llamadas envueltas en `try/catch` independientes; si falla el fix inicial
+el watcher sigue intentando, y si el watcher también falla se marca
+`locationDenied` en vez de dejar el rechazo sin capturar.
+
+Documentado en [[10-deuda-tecnica]] #36 (cerrado).
+
 ## 2026-07-10 (2) — Corrección: margen 25% solo se apaga al finalizar, no en el pronóstico
 
 **Agente:** Claude Code (Sonnet 5)
