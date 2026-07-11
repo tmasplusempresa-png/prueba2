@@ -58,6 +58,19 @@ export const addActualsToBooking = async (
   booking.total_trip_time = totalTimeTaken;
 
   if (!settings.prepaid) {
+    // ── PISO AL MÍNIMO COTIZADO ─────────────────────────────────────────
+    // Mínimo del rango que se le mostró/cotizó al cliente al crear la reserva
+    // (`trip_cost` = `driver_share` = `totalCost` al momento del quote).
+    // El recálculo real al finalizar el viaje puede SUBIR este valor si el
+    // servicio resultó más largo en kilómetros o tiempo, pero NUNCA puede
+    // bajarlo: aunque el viaje se haya quedado corto (no se llegó al destino)
+    // o la ruta real dé un precio menor, el cliente paga como mínimo lo
+    // cotizado. Invariante: precio_final >= mínimo_del_rango_cotizado.
+    const quotedMinFare =
+      parseFloat(booking.trip_cost) ||
+      parseFloat(booking.driver_share) ||
+      0;
+
     // Leer tarifas desde Supabase car_types (fuente única de verdad)
     let rates: any = {};
     const { data: carTypeRows } = await supabase
@@ -131,12 +144,28 @@ export const addActualsToBooking = async (
 
     console.log('Tarifas calculadas:', { totalCost, grandTotal, convenience_fees });
 
+    // Aplicar el piso: el precio final del servicio nunca queda por debajo del
+    // mínimo cotizado. Si el recálculo real es mayor (viaje más largo), se
+    // cobra el recálculo; si es menor (viaje corto / no se llegó al destino),
+    // se cobra el mínimo cotizado.
+    const finalCost = Math.max(totalCost, quotedMinFare);
+    const floorApplied = finalCost > totalCost;
+    if (floorApplied) {
+      console.log(
+        `[addActualsToBooking] Piso aplicado: recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`
+      );
+    }
+
     booking.drop = { add: booking.drop?.add, lat: booking.drop?.lat, lng: booking.drop?.lng };
     booking.dropAddress = booking.drop.add;
-    booking.trip_cost = totalCost;
+    booking.trip_cost = finalCost;
     booking.distance = parseFloat(distance).toFixed(settings.decimal);
-    booking.convenience_fees = convenience_fees;
-    booking.driver_share = totalCost;
+    // Si se aplicó el piso, conservar la comisión cotizada originalmente para
+    // que el total tampoco baje; si el recálculo mandó, usar la recalculada.
+    booking.convenience_fees = floorApplied
+      ? (parseFloat(booking.convenience_fees) || convenience_fees)
+      : convenience_fees;
+    booking.driver_share = finalCost;
     booking.coords = res.coords;
   }
 

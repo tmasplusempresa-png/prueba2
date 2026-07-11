@@ -644,7 +644,32 @@ export const endBooking = createAsyncThunk(
     { rejectWithValue }
   ) => {
     try {
-      const driverLocation = driverProfile?.location;
+      // Read live GPS directly — Redux user.location is unreliable (the
+      // UPDATE_USER_LOCATION action dispatched from _layout.tsx is not handled
+      // by the auth slice, so driverProfile.location is usually undefined).
+      // Sin este fallback, endBooking lanzaba "Driver location data is missing"
+      // y finalizarReserva caía al catch SIN navegar a la pantalla Payment,
+      // por lo que el conductor nunca veía la confirmación de pago en efectivo.
+      let driverLocation: { lat: number; lng: number } | null = null;
+      try {
+        const { status } = await Location.getForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const pos = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+          });
+          driverLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        }
+      } catch (e: any) {
+        console.warn('endBooking: getCurrentPositionAsync failed', e?.message || e);
+      }
+
+      // Fallback a lo que tenga Redux, por si falla la lectura de GPS en vivo
+      if (!driverLocation) {
+        const fallback = driverProfile?.location;
+        if (fallback && typeof fallback.lat === 'number' && typeof fallback.lng === 'number') {
+          driverLocation = { lat: fallback.lat, lng: fallback.lng };
+        }
+      }
 
       if (!driverLocation || !driverLocation.lat || !driverLocation.lng) {
         throw new Error("Driver location data is missing");
