@@ -884,7 +884,12 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       estimate: fd.clientFare,
       estimateDistance: distance || 0,
       estimateTime: duration || 0,
-      otp: generatedOtp,
+      // OTP de self-confirm del cliente: se usa solo en el modal local
+      // (state `otp`). NO se persiste en bookings.otp — esa columna es del
+      // OTP conductor↔cliente que el conductor genera cuando confirma llegada
+      // en ReservationTripScreen. Persistir el self-confirm aquí causaba
+      // desincronización: al llegar, el conductor pisaba el OTP viejo con
+      // uno nuevo y el cliente seguía viendo el viejo cacheado.
       payment_mode: selectedPaymentType || "cash",
       driver_share: fd.driverShare,
       reference: [...Array(6)].map(() => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[Math.floor(Math.random() * 26)]).join(""),
@@ -966,9 +971,12 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       
       if (result.success) {
         console.log("✅ [BOOKING SAVED] ID:", result.uid);
-        await OtpService.saveOtp(result.uid, bookingObject.otp);
-        console.log("💾 [OTP SERVICE] OTP guardado en Supabase para booking:", result.uid);
-        
+        // NO llamamos OtpService.saveOtp aquí. El OTP conductor↔cliente lo
+        // genera y persiste ReservationTripScreen cuando el conductor confirma
+        // llegada. Antes esta línea seteaba otp_generated_at=NOW sin OTP real,
+        // marcando el booking como "OTP en curso" antes de tiempo y causando
+        // desincronización con el OTP posterior del conductor.
+
         const bookingWithUid = { ...bookingObject, id: result.uid };
         console.log("✅ [NAVIGATION] Navegando a pantalla Booking...");
         setIsButtonDisabled(false);

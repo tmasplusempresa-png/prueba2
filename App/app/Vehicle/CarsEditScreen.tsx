@@ -682,17 +682,11 @@ const CarsEditScreen = ({ navigation }: any) => {
           );
           return;
         }
-      } else {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== "granted") {
-          showAlert(
-            'warning',
-            'Permiso requerido',
-            'Necesitamos acceso a tu galeria para cargar la imagen. Activalo en Configuracion > Aplicaciones.'
-          );
-          return;
-        }
       }
+      // Galería: NO se pide READ_MEDIA_IMAGES/VIDEO explícito — launchImageLibraryAsync
+      // usa el Photo Picker nativo (Android 13+/iOS 14+), que no requiere permiso
+      // persistente para un uso puntual como este. Pedirlo de más viola la política
+      // de Google Play de "uso no válido de permisos de fotos y video".
 
       const imageOptions: ImagePicker.ImagePickerOptions = {
         mediaTypes: ImagePicker.MediaTypeOptions.Images,

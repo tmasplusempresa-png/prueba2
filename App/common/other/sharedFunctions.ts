@@ -5,6 +5,7 @@ import { isNearAirport } from "../utils/airports";
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
+import { getLocalTrackingBackup, clearLocalTrackingBackup } from "@/common/services/driverLocationTask";
 
 export const MAIN_COLOR = colors.TAXIPRIMARY;
 
@@ -58,6 +59,26 @@ export const addActualsToBooking = async (
   booking.total_trip_time = totalTimeTaken;
 
   if (!settings.prepaid) {
+    // ── PISO AL MÍNIMO COTIZADO ─────────────────────────────────────────
+    // Mínimo del rango que se le mostró/cotizó al cliente al crear la reserva
+    // (`trip_cost` = `driver_share` = `totalCost` al momento del quote).
+    // El recálculo real al finalizar el viaje puede SUBIR este valor si el
+    // servicio resultó más largo en kilómetros o tiempo, pero NUNCA puede
+    // bajarlo: aunque el viaje se haya quedado corto (no se llegó al destino)
+    // o la ruta real dé un precio menor, el cliente paga como mínimo lo
+    // cotizado. Invariante: precio_final >= mínimo_del_rango_cotizado.
+    const quotedMinFare =
+      parseFloat(booking.trip_cost) ||
+      parseFloat(booking.driver_share) ||
+      0;
+    // Nota: `price`/`estimate` (lo que lee CustomerActiveTripScreen.tsx) se
+    // popula UNA sola vez al crear la reserva con el máximo del rango
+    // (`clientPrice`, con margen) y nunca se recalculaba acá — quedaba
+    // desalineado del precio real del conductor. Ahora, al finalizar,
+    // cliente y conductor reciben el MISMO valor final (ver `finalClientCost`
+    // abajo) — no hace falta un piso propio del lado cliente, hereda el de
+    // `finalCost`.
+
     // Leer tarifas desde Supabase car_types (fuente única de verdad)
     let rates: any = {};
     const { data: carTypeRows } = await supabase
@@ -84,6 +105,48 @@ export const addActualsToBooking = async (
         convenience_fees:           parseFloat(ct.convenience_fee)     || 0,
         convenience_fee_type:       ct.convenience_fee_type            || 'flat',
       };
+    }
+
+    // Reconciliación con el respaldo local (buffer en el teléfono, ver
+    // `driverLocationTask.ts`). El tracking en tiempo real sigue siendo la
+    // fuente principal (el cliente ya lo vio en vivo); esto solo rellena
+    // huecos si hubo caídas de red durante el viaje. Se sube solo si el
+    // respaldo local tiene claramente más puntos que el servidor — en el
+    // caso sano (sin huecos) no se toca nada, evita duplicar puntos.
+    try {
+      const localBackup = await getLocalTrackingBackup(booking.id);
+      if (localBackup.length > 0) {
+        const { count: serverCount } = await supabase
+          .from('booking_tracking' as any)
+          .select('id', { count: 'exact', head: true })
+          .eq('booking_id', booking.id);
+        if (localBackup.length > (serverCount || 0) + 1) {
+          console.warn(
+            `[addActualsToBooking] Respaldo local (${localBackup.length} pts) > servidor (${serverCount || 0} pts) — reconciliando huecos de red.`
+          );
+          const rows = localBackup.map((p) => ({
+            booking_id: booking.id,
+            driver_id: booking.driver || booking.driver_id || null,
+            lat: p.lat,
+            lng: p.lng,
+            accuracy: p.accuracy,
+            // Preservar el instante real de captura, no el de la subida —
+            // si no, todos los puntos reconciliados caerían con el mismo
+            // created_at (ahora) y arruinarían el orden cronológico que usa
+            // el cálculo de distancia.
+            created_at: new Date(p.ts).toISOString(),
+          }));
+          const { error: reconcileError } = await supabase
+            .from('booking_tracking' as any)
+            .insert(rows as any);
+          if (reconcileError) {
+            console.error('[addActualsToBooking] error subiendo respaldo local:', reconcileError);
+          }
+        }
+      }
+      await clearLocalTrackingBackup(booking.id);
+    } catch (e) {
+      console.warn('[addActualsToBooking] error reconciliando respaldo local:', e);
     }
 
     // Tracking desde Supabase. `booking_tracking` no tiene columna `timestamp`
@@ -131,12 +194,39 @@ export const addActualsToBooking = async (
 
     console.log('Tarifas calculadas:', { totalCost, grandTotal, convenience_fees });
 
+    // Aplicar el piso: el precio final del servicio nunca queda por debajo del
+    // mínimo cotizado. Si el recálculo real es mayor (viaje más largo), se
+    // cobra el recálculo; si es menor (viaje corto / no se llegó al destino),
+    // se cobra el mínimo cotizado.
+    const finalCost = Math.max(totalCost, quotedMinFare);
+    const floorApplied = finalCost > totalCost;
+    if (floorApplied) {
+      console.log(
+        `[addActualsToBooking] Piso aplicado (conductor): recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`
+      );
+    }
+
+    // Precio cliente AL FINALIZAR: alineado 1:1 con el precio conductor —
+    // sin margen acá (el margen del 25% solo aplica al PRONÓSTICO inicial,
+    // ver `MARGEN_CLIENTE` en `constants/fare.ts`). El piso ya está puesto
+    // en `finalCost` (nunca por debajo del mínimo cotizado al crear la
+    // reserva) — el cliente paga exactamente lo mismo que recibe el
+    // conductor al cierre del servicio, ese valor o superior si el viaje
+    // real salió más largo.
+    const finalClientCost = finalCost;
+
     booking.drop = { add: booking.drop?.add, lat: booking.drop?.lat, lng: booking.drop?.lng };
     booking.dropAddress = booking.drop.add;
-    booking.trip_cost = totalCost;
+    booking.trip_cost = finalCost;
+    booking.price = finalClientCost;
+    booking.estimate = finalClientCost;
     booking.distance = parseFloat(distance).toFixed(settings.decimal);
-    booking.convenience_fees = convenience_fees;
-    booking.driver_share = totalCost;
+    // Si se aplicó el piso, conservar la comisión cotizada originalmente para
+    // que el total tampoco baje; si el recálculo mandó, usar la recalculada.
+    booking.convenience_fees = floorApplied
+      ? (parseFloat(booking.convenience_fees) || convenience_fees)
+      : convenience_fees;
+    booking.driver_share = finalCost;
     booking.coords = res.coords;
   }
 
@@ -147,6 +237,14 @@ export const addActualsToBooking = async (
       .update({
         trip_cost:        booking.trip_cost,
         driver_share:     booking.driver_share,
+        // `price` es el campo que realmente lee la pantalla del cliente
+        // (`booking.price || booking.estimate`) y `estimate` el fallback —
+        // ninguno de los dos se tocaba acá antes, quedaban con la
+        // cotización original de creación para siempre. Ahora ambos
+        // reflejan el precio cliente final (conductor + margen 25%, con su
+        // propio piso — ver arriba), consistente con `trip_cost`.
+        price:            booking.price,
+        estimate:         booking.estimate,
         convenience_fees: booking.convenience_fees,
         distance:         booking.distance,
         trip_end_time:    booking.trip_end_time,

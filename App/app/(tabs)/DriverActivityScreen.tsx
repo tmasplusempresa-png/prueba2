@@ -4,11 +4,18 @@ import {
   ActivityIndicator, RefreshControl, Platform, Animated,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+
+const isUuid = (value?: string | null) => {
+  if (!value) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+};
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -89,6 +96,8 @@ const DriverActivityScreen = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+  const user = useSelector((s: RootState) => s.auth.user) as any;
+  const profile = useSelector((s: RootState) => s.auth.profile) as any;
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('todos');
   const [completas, setCompletas] = useState<Reservation[]>([]);
@@ -96,14 +105,45 @@ const DriverActivityScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [dayFilter, setDayFilter] = useState<Date | null>(null);
   const [showPicker, setShowPicker] = useState(false);
+  const driverIdRef = useRef<string | null>(null);
+
+  // Resuelve el PK users.id del conductor autenticado (mismo patrón que
+  // DriverActiveReservationsScreen) — necesario para filtrar SOLO sus viajes.
+  const resolveDriverId = useCallback(async (): Promise<string | null> => {
+    if (driverIdRef.current) return driverIdRef.current;
+    const candidates = [user?.id, user?.auth_id, profile?.id, profile?.auth_id]
+      .map((value) => String(value || '').trim())
+      .filter((value, index, array) => isUuid(value) && array.indexOf(value) === index);
+    if (candidates.length === 0) return null;
+
+    const headers = await getSupabaseAuthHeaders();
+    for (const candidate of candidates) {
+      const url = `${SUPABASE_URL}/rest/v1/users?or=(id.eq.${candidate},auth_id.eq.${candidate})&select=id&limit=1`;
+      const res = await fetch(url, { headers });
+      const data = res.ok ? await res.json() : [];
+      if (Array.isArray(data) && data[0]?.id) {
+        driverIdRef.current = data[0].id;
+        return data[0].id;
+      }
+    }
+    return null;
+  }, [user?.id, user?.auth_id, profile?.id, profile?.auth_id]);
 
   const fetchReservations = useCallback(async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
+      const driverId = await resolveDriverId();
+      if (!driverId) {
+        console.warn('📡 [DriverActivity] No se pudo resolver driver_id — no se muestran viajes');
+        setCompletas([]);
+        return;
+      }
 
-      // Fetch ALL COMPLETE bookings (no driver_id filter - filter on client side if needed)
-      const completasUrl = `${SUPABASE_URL}/rest/v1/bookings?status=eq.COMPLETE&order=created_at.desc&limit=200`;
-      console.log('📡 [DriverActivity] Fetching all completed trips');
+      // SOLO los viajes de ESTE conductor — antes traía COMPLETE de todos los
+      // conductores del sistema sin filtrar, causando que se vieran/tocaran
+      // viajes ajenos con precios distintos.
+      const completasUrl = `${SUPABASE_URL}/rest/v1/bookings?driver_id=eq.${encodeURIComponent(driverId)}&status=eq.COMPLETE&order=created_at.desc&limit=200`;
+      console.log('📡 [DriverActivity] Fetching completed trips for driver', driverId);
       const completasRes = await fetch(completasUrl, { headers });
       console.log('📡 [DriverActivity] Response Status:', completasRes.status);
       if (completasRes.ok) {
@@ -120,7 +160,7 @@ const DriverActivityScreen = () => {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [resolveDriverId]);
 
   useFocusEffect(
     useCallback(() => {

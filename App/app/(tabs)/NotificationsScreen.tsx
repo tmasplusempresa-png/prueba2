@@ -306,8 +306,13 @@ const NotificationsScreen = () => {
       const headers = await getSupabaseAuthHeaders();
       const statuses = ACTIVE_STATUSES.map(s => `"${s}"`).join(',');
       const customerLimit = MAX_ACTIVE_IMMEDIATE_TRIPS + MAX_ACTIVE_SCHEDULED_TRIPS;
+      // Para conductor NO es una cuota de negocio (a diferencia del cliente) — es
+      // solo un techo práctico de fetch. Antes estaba en `limit=1`, por lo que
+      // un conductor con varios servicios asignados (ej. reservas programadas)
+      // solo veía el más reciente.
+      const driverLimit = 30;
       const url = isDriver
-        ? `${SUPABASE_URL}/rest/v1/bookings?driver_id=eq.${uid}&status=in.(${statuses})&order=created_at.desc&limit=1&select=*`
+        ? `${SUPABASE_URL}/rest/v1/bookings?driver_id=eq.${uid}&status=in.(${statuses})&order=created_at.desc&limit=${driverLimit}&select=*`
         : `${SUPABASE_URL}/rest/v1/bookings?customer=eq.${uid}&status=in.(${statuses})&order=created_at.desc&limit=${customerLimit}&select=*`;
       const resp = await fetch(url, { headers });
       if (!resp.ok) { setLoading(false); return; }
@@ -396,7 +401,6 @@ const NotificationsScreen = () => {
   const immediateCount = immediateBookings.length;
   const scheduledCount = scheduledBookings.length;
   const activeCount = isDriver ? activeBookings.length : immediateCount;
-  const maxActive = isDriver ? 1 : MAX_ACTIVE_IMMEDIATE_TRIPS;
   const atLimit = immediateCount >= MAX_ACTIVE_IMMEDIATE_TRIPS;
   const remainingSlots = Math.max(0, MAX_ACTIVE_IMMEDIATE_TRIPS - immediateCount);
   const scheduledAtLimit = scheduledCount >= MAX_ACTIVE_SCHEDULED_TRIPS;

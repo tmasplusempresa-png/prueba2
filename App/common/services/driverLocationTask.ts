@@ -12,6 +12,14 @@ export const DRIVER_LOCATION_TASK = 'tmasplus-driver-location-task';
 const ACTIVE_BOOKING_KEY = 'driver_tracking_active_booking_id';
 const ACTIVE_DRIVER_KEY = 'driver_tracking_active_driver_id';
 const LAST_INSERT_KEY = 'driver_tracking_last_insert';
+// Respaldo local — resiliencia si el POST a booking_tracking falla por red
+// durante el viaje. Se reconcilia con el servidor al finalizar (ver
+// `getLocalTrackingBackup`/`clearLocalTrackingBackup`, usados por
+// `addActualsToBooking` en `common/other/sharedFunctions.ts`). NO reemplaza
+// el posteo en tiempo real — el cliente sigue viendo al conductor en vivo
+// igual que antes, esto es solo respaldo.
+const LOCAL_BACKUP_PREFIX = 'driver_tracking_local_backup_';
+const MAX_LOCAL_BACKUP_POINTS = 500;
 
 const MIN_DISTANCE_METERS = 15;
 const SAFETY_INTERVAL_MS = 8000;
@@ -89,6 +97,23 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
     }
   }
 
+  // Guardar en el respaldo local ANTES de intentar la red — así el punto
+  // sobrevive aunque el POST de abajo falle (sin señal, timeout, etc.).
+  try {
+    const backupKey = LOCAL_BACKUP_PREFIX + bookingId;
+    const raw = await AsyncStorage.getItem(backupKey);
+    const arr: Array<{ lat: number; lng: number; accuracy: number | null; ts: number }> = raw
+      ? JSON.parse(raw)
+      : [];
+    arr.push({ lat, lng, accuracy: accuracy ?? null, ts: Date.now() });
+    if (arr.length > MAX_LOCAL_BACKUP_POINTS) {
+      arr.splice(0, arr.length - MAX_LOCAL_BACKUP_POINTS);
+    }
+    await AsyncStorage.setItem(backupKey, JSON.stringify(arr));
+  } catch (e) {
+    console.warn('[driverLocationTask] error guardando respaldo local:', e);
+  }
+
   // RLS está desactivado en booking_tracking — anon key es suficiente.
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
     method: 'POST',
@@ -124,6 +149,32 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
     );
   } catch {}
 });
+
+/**
+ * Lee el respaldo local de puntos GPS de un viaje (buffer en el teléfono,
+ * independiente de lo que haya llegado o no al servidor). Usado por
+ * `addActualsToBooking` para reconciliar huecos de red al finalizar.
+ */
+export async function getLocalTrackingBackup(
+  bookingId: string,
+): Promise<Array<{ lat: number; lng: number; accuracy: number | null; ts: number }>> {
+  try {
+    const raw = await AsyncStorage.getItem(LOCAL_BACKUP_PREFIX + bookingId);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.warn('[driverLocationTask] error leyendo respaldo local:', e);
+    return [];
+  }
+}
+
+/** Borra el respaldo local de un viaje — llamar tras reconciliar/subir. */
+export async function clearLocalTrackingBackup(bookingId: string): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(LOCAL_BACKUP_PREFIX + bookingId);
+  } catch (e) {
+    console.warn('[driverLocationTask] error borrando respaldo local:', e);
+  }
+}
 
 /**
  * Solicita el permiso de ubicación en segundo plano. Debe llamarse SOLO
