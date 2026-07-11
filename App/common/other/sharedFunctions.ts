@@ -176,6 +176,12 @@ export const addActualsToBooking = async (
       .update({
         trip_cost:        booking.trip_cost,
         driver_share:     booking.driver_share,
+        // El campo que la pantalla del cliente muestra como precio final
+        // (`estimate`) nunca se tocaba acá — quedaba con la cotización
+        // original (rango superior) para siempre, aunque el viaje terminara
+        // antes de tiempo y el piso cotizado (mínimo) fuera lo que realmente
+        // se cobró. Ahora refleja el precio final real, igual que trip_cost.
+        estimate:         booking.trip_cost,
         convenience_fees: booking.convenience_fees,
         distance:         booking.distance,
         trip_end_time:    booking.trip_end_time,
