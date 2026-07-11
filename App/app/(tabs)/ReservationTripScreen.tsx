@@ -388,41 +388,49 @@ const ReservationTripScreen = () => {
     }
   }, [phase, driverLocation?.latitude, driverLocation?.longitude, fetchRoute, pickupLat, pickupLng, dropLat, dropLng]);
 
-  // Al finalizar el viaje, reemplazar la ruta sugerida (Mapbox/Google, fija desde
-  // TRIP_STARTED) por el recorrido real registrado en `booking_tracking` — el
-  // trazo debe pasar por todos los puntos GPS del conductor, no solo pickup→drop.
-  useEffect(() => {
-    if (phase !== 'TRIP_COMPLETE' || !reservation?.id) return;
-    (async () => {
-      try {
-        const { data, error } = await supabase
-          .from('booking_tracking')
-          .select('lat, lng, created_at')
-          .eq('booking_id', reservation.id)
-          .order('created_at', { ascending: true });
-        if (error) {
-          console.warn('[ReservationTripScreen] error leyendo booking_tracking para ruta final:', error);
-          return;
-        }
-        const points = (data || []).map((row: any) => ({
-          latitude: row.lat,
-          longitude: row.lng,
-        }));
-        if (points.length > 1) {
-          setRouteCoords(points);
-          mapRef.current?.fitToCoordinates(points, {
-            edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
-            animated: true,
-          });
-        }
-      } catch (e) {
-        console.warn('[ReservationTripScreen] excepción cargando ruta real del viaje:', e);
+  // Reemplaza la ruta sugerida (Mapbox/Google, fija desde TRIP_STARTED) por el
+  // recorrido real registrado en `booking_tracking` — el trazo debe pasar por
+  // todos los puntos GPS del conductor, no solo pickup→drop. Se llama de forma
+  // eager desde `handleEndTrip` (no reactiva a `phase`) para que la ruta ya
+  // esté lista antes de que aparezca el modal de precio/calificación/éxito —
+  // si se esperaba al cambio de fase, un `fitToCoordinates` de otro efecto
+  // (o la latencia de red) podía ganarle la carrera y dejar la cámara
+  // encuadrada solo en 2 puntos aunque el trazo ya tuviera todo el recorrido.
+  const loadActualRoute = async () => {
+    if (!reservation?.id) return;
+    try {
+      const { data, error } = await supabase
+        .from('booking_tracking')
+        .select('lat, lng, created_at')
+        .eq('booking_id', reservation.id)
+        .order('created_at', { ascending: true });
+      if (error) {
+        console.warn('[ReservationTripScreen] error leyendo booking_tracking para ruta final:', error);
+        return;
       }
-    })();
-  }, [phase, reservation?.id]);
+      const points = (data || []).map((row: any) => ({
+        latitude: row.lat,
+        longitude: row.lng,
+      }));
+      if (points.length > 1) {
+        setRouteCoords(points);
+        mapRef.current?.fitToCoordinates(points, {
+          edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
+          animated: true,
+        });
+      }
+    } catch (e) {
+      console.warn('[ReservationTripScreen] excepción cargando ruta real del viaje:', e);
+    }
+  };
 
-  // Fit map to markers
+  // Fit map to markers — en TRIP_COMPLETE la cámara la controla el efecto de
+  // ruta real (arriba), que encuadra los puntos GPS completos; si este efecto
+  // también corriera ahí, su fitToCoordinates(driverLocation+pickup) podía
+  // ganar la carrera y recortar la vista a solo 2 puntos, tapando el resto
+  // del trazo aunque routeCoords ya tuviera todo el recorrido.
   useEffect(() => {
+    if (phase === 'TRIP_COMPLETE') return;
     const timer = setTimeout(() => {
       if (!mapRef.current) return;
       const markers: { latitude: number; longitude: number }[] = [];
@@ -780,6 +788,7 @@ const ReservationTripScreen = () => {
       const updated = await addActualsToBooking(bookingForActuals, { isScheduled: true });
       completedBookingRef.current = updated;
       setFinalPrice(Number(updated?.price ?? updated?.trip_cost ?? 0));
+      await loadActualRoute();
       setPriceModalVisible(true);
     } catch (e) {
       console.error('Error calculando el precio final del viaje:', e);
