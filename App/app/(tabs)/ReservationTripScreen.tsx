@@ -818,42 +818,6 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // Continuar el flujo de pago/confirmación una vez calificado el cliente
-  const proceedAfterRating = () => {
-    const priceLabel = (finalPrice ?? reservation.estimate ?? reservation.price ?? 0).toLocaleString('es-CO');
-    if (paymentMode !== 'cash') {
-      showAlert('confirm',
-        `Confirmar pago por ${paymentLabel}`,
-        `¿Ya recibiste la transferencia de $${priceLabel} por ${paymentLabel} del cliente ${reservation.customer_name}?`,
-        [
-          { text: 'Aún no', style: 'cancel', onPress: () => setAlertVisible(false) },
-          {
-            text: 'Sí, recibí el pago',
-            onPress: () => {
-              setAlertVisible(false);
-              finalizeTrip();
-            },
-          },
-        ],
-      );
-    } else {
-      showAlert('confirm',
-        'Finalizar Viaje',
-        '¿Confirmas que ha finalizado el recorrido?',
-        [
-          { text: 'Cancelar', style: 'cancel', onPress: () => setAlertVisible(false) },
-          {
-            text: 'Finalizar',
-            onPress: () => {
-              setAlertVisible(false);
-              finalizeTrip();
-            },
-          },
-        ],
-      );
-    }
-  };
-
   // Guardar la calificación del cliente y continuar con el flujo de finalización
   const submitCustomerRating = async () => {
     if (customerRating < 1) {
@@ -910,7 +874,7 @@ const ReservationTripScreen = () => {
       }
 
       setRatingModalVisible(false);
-      proceedAfterRating();
+      finalizeTrip();
     } catch (e: any) {
       console.error('Error guardando calificación del cliente:', e);
       showAlert(
