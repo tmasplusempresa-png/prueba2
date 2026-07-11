@@ -157,6 +157,12 @@ const ReservationTripScreen = () => {
   const [waitingForOtpTimer, setWaitingForOtpTimer] = useState(false);
   const [enteredOtp, setEnteredOtp] = useState(''); // 🆕 Input del driver
 
+  // 💵 Precio total del servicio — primer modal al finalizar, antes de calificar.
+  // Mismo valor que ve el cliente (ver `addActualsToBooking`: price === trip_cost, sin margen al cierre).
+  const [priceModalVisible, setPriceModalVisible] = useState(false);
+  const [finalPrice, setFinalPrice] = useState<number | null>(null);
+  const completedBookingRef = useRef<any>(null);
+
   // ⭐ Customer rating (conductor → cliente) requerido antes de finalizar
   const [ratingModalVisible, setRatingModalVisible] = useState(false);
   const [customerRating, setCustomerRating] = useState(0);
@@ -381,6 +387,39 @@ const ReservationTripScreen = () => {
       fetchRoute(pickupLat, pickupLng, dropLat, dropLng);
     }
   }, [phase, driverLocation?.latitude, driverLocation?.longitude, fetchRoute, pickupLat, pickupLng, dropLat, dropLng]);
+
+  // Al finalizar el viaje, reemplazar la ruta sugerida (Mapbox/Google, fija desde
+  // TRIP_STARTED) por el recorrido real registrado en `booking_tracking` — el
+  // trazo debe pasar por todos los puntos GPS del conductor, no solo pickup→drop.
+  useEffect(() => {
+    if (phase !== 'TRIP_COMPLETE' || !reservation?.id) return;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('booking_tracking')
+          .select('lat, lng, created_at')
+          .eq('booking_id', reservation.id)
+          .order('created_at', { ascending: true });
+        if (error) {
+          console.warn('[ReservationTripScreen] error leyendo booking_tracking para ruta final:', error);
+          return;
+        }
+        const points = (data || []).map((row: any) => ({
+          latitude: row.lat,
+          longitude: row.lng,
+        }));
+        if (points.length > 1) {
+          setRouteCoords(points);
+          mapRef.current?.fitToCoordinates(points, {
+            edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
+            animated: true,
+          });
+        }
+      } catch (e) {
+        console.warn('[ReservationTripScreen] excepción cargando ruta real del viaje:', e);
+      }
+    })();
+  }, [phase, reservation?.id]);
 
   // Fit map to markers
   useEffect(() => {
@@ -721,24 +760,49 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // End the trip — el conductor debe calificar al cliente antes de poder finalizar
-  const handleEndTrip = () => {
-    setRatingModalVisible(true);
+  // End the trip — primero se calcula y persiste el precio real (mismo valor
+  // que verá el cliente), se muestra al conductor, y solo después se pide la
+  // calificación del cliente.
+  const handleEndTrip = async () => {
+    setLoading(true);
+    try {
+      const bookingForActuals = {
+        ...reservation,
+        id: reservation.id,
+        startTime: tripStartTimestamp.current || Date.now(),
+        carType: reservation.car_type,
+        status: 'COMPLETE',
+        driver_status: 'COMPLETE',
+        customer_status: 'COMPLETE',
+      };
+      // isScheduled: true — todo viaje en esta pantalla es una reserva programada.
+      // isProtocol/tollsTotal/parking: deuda pendiente, ver [[10-deuda-tecnica]] #26.
+      const updated = await addActualsToBooking(bookingForActuals, { isScheduled: true });
+      completedBookingRef.current = updated;
+      setFinalPrice(Number(updated?.price ?? updated?.trip_cost ?? 0));
+      setPriceModalVisible(true);
+    } catch (e) {
+      console.error('Error calculando el precio final del viaje:', e);
+      showAlert('error', 'Error', 'No se pudo calcular el precio final del viaje.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Continuar el flujo de pago/confirmación una vez calificado el cliente
   const proceedAfterRating = () => {
+    const priceLabel = (finalPrice ?? reservation.estimate ?? reservation.price ?? 0).toLocaleString('es-CO');
     if (paymentMode !== 'cash') {
       showAlert('confirm',
         `Confirmar pago por ${paymentLabel}`,
-        `¿Ya recibiste la transferencia de $${(reservation.estimate || reservation.price || 0).toLocaleString('es-CO')} por ${paymentLabel} del cliente ${reservation.customer_name}?`,
+        `¿Ya recibiste la transferencia de $${priceLabel} por ${paymentLabel} del cliente ${reservation.customer_name}?`,
         [
           { text: 'Aún no', style: 'cancel', onPress: () => setAlertVisible(false) },
           {
             text: 'Sí, recibí el pago',
             onPress: () => {
               setAlertVisible(false);
-              completeTrip();
+              finalizeTrip();
             },
           },
         ],
@@ -753,7 +817,7 @@ const ReservationTripScreen = () => {
             text: 'Finalizar',
             onPress: () => {
               setAlertVisible(false);
-              completeTrip();
+              finalizeTrip();
             },
           },
         ],
@@ -830,24 +894,12 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // Actually complete the trip (shared by both cash and transfer flows).
-  // Recalcula distancia/tiempo/precio reales (incluye desvíos) vía
-  // `addActualsToBooking` en vez de solo marcar status — ver [[21-calculo-tarifa]].
-  const completeTrip = async () => {
+  // Cierra el viaje (compartido por flujo efectivo y transferencia). El precio
+  // real ya fue calculado y persistido en `handleEndTrip` vía `addActualsToBooking`
+  // — ver [[21-calculo-tarifa]] — acá solo se marca la fase y se notifica.
+  const finalizeTrip = async () => {
     setLoading(true);
     try {
-      const bookingForActuals = {
-        ...reservation,
-        id: reservation.id,
-        startTime: tripStartTimestamp.current || Date.now(),
-        carType: reservation.car_type,
-        status: 'COMPLETE',
-        driver_status: 'COMPLETE',
-        customer_status: 'COMPLETE',
-      };
-      // isScheduled: true — todo viaje en esta pantalla es una reserva programada.
-      // isProtocol/tollsTotal/parking: deuda pendiente, ver [[10-deuda-tecnica]] #26.
-      await addActualsToBooking(bookingForActuals, { isScheduled: true });
       setPhase('TRIP_COMPLETE');
       // Restore the default driver-online notification
       showDriverActiveNotification().catch(() => {});
@@ -1396,6 +1448,41 @@ const ReservationTripScreen = () => {
           callManager.endCall();
         }}
       /> */}
+
+      {/* 💵 Modal de precio total del servicio — primero al finalizar, antes de calificar */}
+      <Modal
+        transparent
+        visible={priceModalVisible}
+        animationType="fade"
+        onRequestClose={() => setPriceModalVisible(false)}
+      >
+        <View style={s.ratingBackdrop}>
+          <View style={s.ratingModalCard}>
+            <View style={s.ratingHeader}>
+              <Ionicons name="cash" size={28} color="#00E676" />
+              <Text style={s.ratingTitle}>Viaje completado</Text>
+            </View>
+            <Text style={s.ratingSubtitle}>
+              Precio total del servicio
+            </Text>
+            <Text style={{ color: '#00E676', fontSize: 40, fontWeight: '800', textAlign: 'center', marginVertical: 16 }}>
+              ${(finalPrice ?? 0).toLocaleString('es-CO')}
+            </Text>
+            <Text style={s.ratingHint}>
+              Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.
+            </Text>
+
+            <TouchableOpacity
+              style={s.ratingSubmitBtn}
+              onPress={() => { setPriceModalVisible(false); setRatingModalVisible(true); }}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="checkmark-circle" size={20} color="#051A26" />
+              <Text style={s.ratingSubmitText}>Continuar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* ⭐ Modal de calificación al cliente (obligatorio antes de finalizar) */}
       <Modal
