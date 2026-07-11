@@ -768,10 +768,30 @@ const ReservationTripScreen = () => {
     }
   };
 
+  // Confirmación previa — evita finalizar el viaje por un toque accidental
+  // en el botón. Solo al confirmar corre la lógica real (cálculo de precio,
+  // ruta, modales).
+  const handleEndTrip = () => {
+    showAlert('confirm',
+      '¿Finalizar viaje?',
+      'Vas a marcar este viaje como finalizado. ¿Confirmas que el recorrido terminó?',
+      [
+        { text: 'No', style: 'cancel', onPress: () => setAlertVisible(false) },
+        {
+          text: 'Sí, finalizar',
+          onPress: () => {
+            setAlertVisible(false);
+            confirmedEndTrip();
+          },
+        },
+      ],
+    );
+  };
+
   // End the trip — primero se calcula y persiste el precio real (mismo valor
   // que verá el cliente), se muestra al conductor, y solo después se pide la
   // calificación del cliente.
-  const handleEndTrip = async () => {
+  const confirmedEndTrip = async () => {
     setLoading(true);
     try {
       const bookingForActuals = {
