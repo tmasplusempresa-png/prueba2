@@ -602,6 +602,57 @@ UI lo refleje en vez de dejar la promesa sin manejar.
 
 **Archivo:** `App/app/(tabs)/DriverReservationsScreen.tsx:197-216`.
 
+## 37. Geocoding/autocompletado de rutas sin sugerencias en producción — key de Google Maps resuelta vacía — cerrado
+
+**Síntoma reportado:** en el APK/AAB de producción, los campos de búsqueda
+de origen/destino en `CreateReservationScreen.tsx` (`GooglePlacesAutocomplete`)
+dejaron de mostrar sugerencias de direcciones. Sin crash ni error visible en
+pantalla — el autocompletado simplemente no respondía.
+
+**Causa raíz:** doble esquema de nombres de variables de entorno para la
+API key de Google Maps, desalineado entre capas:
+
+- `App/config/AppConfig.ts:127-130` resolvía la key de producción con
+  `getEnv('GOOGLE_MAPS_API_KEY_PROD', getEnv('GOOGLE_MAPS_API_KEY_IOS', ''))`.
+- `App/app.config.js` solo reenviaba `GOOGLE_MAPS_API_KEY_ANDROID` y
+  `GOOGLE_MAPS_API_KEY_IOS` al bloque `extra` de Expo (nunca `_PROD`).
+- En el dashboard de EAS (`eas env:list --environment production`) solo
+  existía configurada `GOOGLE_MAPS_API_KEY_ANDROID` — ni `_PROD` ni `_IOS`.
+
+Resultado: `API_KEY` se resolvía a `''` en el build de producción. En
+local no se notaba porque el `.env` sí trae las 4 variantes
+(`_DEV/_PROD/_ANDROID/_IOS`). Misma clase de problema que
+`SUPABASE_SERVICE_ROLE_KEY` (ver ítem relacionado): nombre de variable
+esperado por el código vs. nombre realmente provisionado en EAS, sin
+validación que lo haga fallar ruidosamente — la librería de autocompletado
+solo devuelve lista vacía ante key inválida/ausente.
+
+No fue causado por cambios de dependencias: se descartó revisando
+`git log -p` sobre `package.json` del fix de versiones Expo del mismo día
+— no tocó `react-native-google-places-autocomplete`, `react-native-maps`
+ni `expo-location`.
+
+**Fix aplicado:** `App/config/AppConfig.ts:129` — se agregó
+`GOOGLE_MAPS_API_KEY_ANDROID` como fallback intermedio antes de
+`GOOGLE_MAPS_API_KEY_IOS`:
+
+```ts
+production: getEnv('GOOGLE_MAPS_API_KEY_PROD', getEnv('GOOGLE_MAPS_API_KEY_ANDROID', getEnv('GOOGLE_MAPS_API_KEY_IOS', '')))
+```
+
+Desplegado vía `eas update --channel production` (OTA, sin nueva build
+nativa — `runtimeVersion` fijo en `1.0.4`).
+
+**Nota/deuda pendiente relacionada:** `common/other/GoogleAPIFunctions.tsx`
+(usado por `SearchScreen.tsx`) llama a una Cloud Function `googleapi` que
+**no existe** en `functions/index.js` de este repo — si ese flujo de
+búsqueda (distinto al de `CreateReservationScreen.tsx`) se usa en algún
+punto, fallaría de forma silenciosa por un 404 nunca surfaceado a la UI.
+Pendiente confirmar contra el proyecto de Firebase desplegado.
+
+**Archivo:** `App/config/AppConfig.ts:129`, `App/app.config.js:23,69-70`,
+`App/app/(tabs)/CreateReservationScreen.tsx:898-935`.
+
 ## Cómo cerrar un ítem
 
 1. Abrir PR.

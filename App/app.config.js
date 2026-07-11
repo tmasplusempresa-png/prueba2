@@ -9,7 +9,7 @@ const AppConfig = {
     icon_app: './assets/images/logo-Preview.png',
     app_identifier: process.env.APP_IDENTIFIER || 'com.releaseunocero',
     app_identifier_ios: process.env.APP_IDENTIFIER_IOS || 'tmasplus.tmasplus',
-    ios_app_version: process.env.APP_VERSION || '1.10.3',
+    ios_app_version: process.env.APP_VERSION || '1.10.4',
     runtime_Version: process.env.EXPO_RUNTIME_VERSION || '1.0.4',
     android_app_version: parseInt(process.env.ANDROID_APP_VERSION || '1', 10),
     expo_owner: process.env.EXPO_OWNER || 'tmasplus',

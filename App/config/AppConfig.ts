@@ -126,7 +126,7 @@ export const SupabaseConfig: SupabaseConfiguration = {
 // ==================== CONFIGURACIÓN GOOGLE MAPS SEGURA ====================
 const GoogleMapsConfig: GoogleMapsConfiguration = {
   development: getEnv('GOOGLE_MAPS_API_KEY_DEV', getEnv('GOOGLE_MAPS_API_KEY_ANDROID', '')),
-  production: getEnv('GOOGLE_MAPS_API_KEY_PROD', getEnv('GOOGLE_MAPS_API_KEY_IOS', ''))
+  production: getEnv('GOOGLE_MAPS_API_KEY_PROD', getEnv('GOOGLE_MAPS_API_KEY_ANDROID', getEnv('GOOGLE_MAPS_API_KEY_IOS', '')))
 } as const;
 
 export const getGoogleMapsApiKey = (): string => {
