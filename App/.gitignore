@@ -40,7 +40,6 @@ android
 mobile-app/dist
 android/
 ios/
-AccessKey.*
 /app/config.ts
 google-services.json
 
