@@ -2,9 +2,10 @@ import { GetTripDistance } from "../other/GeoFunctions";
 import { settings } from '@/scripts/settings';
 import { FareCalculator } from "../actions/FareCalculator";
 import { isNearAirport } from "../utils/airports";
-import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
+import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM, MARGEN_CLIENTE } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
+import { getLocalTrackingBackup, clearLocalTrackingBackup } from "@/common/services/driverLocationTask";
 
 export const MAIN_COLOR = colors.TAXIPRIMARY;
 
@@ -70,6 +71,17 @@ export const addActualsToBooking = async (
       parseFloat(booking.trip_cost) ||
       parseFloat(booking.driver_share) ||
       0;
+    // Mismo invariante pero del lado cliente: lo que el cliente paga (con el
+    // margen Erixon del 25% ya incluido) tampoco puede bajar de lo cotizado.
+    // `price` es el campo que realmente lee la pantalla del cliente
+    // (`booking.price || booking.estimate`, ver CustomerActiveTripScreen.tsx) —
+    // se popula UNA sola vez al crear la reserva (`CreateReservationScreen.tsx`)
+    // y nunca se recalculaba acá, quedando desalineado del precio real del
+    // conductor cuando el viaje terminaba distinto a lo cotizado.
+    const quotedClientMin =
+      parseFloat(booking.price) ||
+      parseFloat(booking.estimate) ||
+      0;
 
     // Leer tarifas desde Supabase car_types (fuente única de verdad)
     let rates: any = {};
@@ -97,6 +109,48 @@ export const addActualsToBooking = async (
         convenience_fees:           parseFloat(ct.convenience_fee)     || 0,
         convenience_fee_type:       ct.convenience_fee_type            || 'flat',
       };
+    }
+
+    // Reconciliación con el respaldo local (buffer en el teléfono, ver
+    // `driverLocationTask.ts`). El tracking en tiempo real sigue siendo la
+    // fuente principal (el cliente ya lo vio en vivo); esto solo rellena
+    // huecos si hubo caídas de red durante el viaje. Se sube solo si el
+    // respaldo local tiene claramente más puntos que el servidor — en el
+    // caso sano (sin huecos) no se toca nada, evita duplicar puntos.
+    try {
+      const localBackup = await getLocalTrackingBackup(booking.id);
+      if (localBackup.length > 0) {
+        const { count: serverCount } = await supabase
+          .from('booking_tracking' as any)
+          .select('id', { count: 'exact', head: true })
+          .eq('booking_id', booking.id);
+        if (localBackup.length > (serverCount || 0) + 1) {
+          console.warn(
+            `[addActualsToBooking] Respaldo local (${localBackup.length} pts) > servidor (${serverCount || 0} pts) — reconciliando huecos de red.`
+          );
+          const rows = localBackup.map((p) => ({
+            booking_id: booking.id,
+            driver_id: booking.driver || booking.driver_id || null,
+            lat: p.lat,
+            lng: p.lng,
+            accuracy: p.accuracy,
+            // Preservar el instante real de captura, no el de la subida —
+            // si no, todos los puntos reconciliados caerían con el mismo
+            // created_at (ahora) y arruinarían el orden cronológico que usa
+            // el cálculo de distancia.
+            created_at: new Date(p.ts).toISOString(),
+          }));
+          const { error: reconcileError } = await supabase
+            .from('booking_tracking' as any)
+            .insert(rows as any);
+          if (reconcileError) {
+            console.error('[addActualsToBooking] error subiendo respaldo local:', reconcileError);
+          }
+        }
+      }
+      await clearLocalTrackingBackup(booking.id);
+    } catch (e) {
+      console.warn('[addActualsToBooking] error reconciliando respaldo local:', e);
     }
 
     // Tracking desde Supabase. `booking_tracking` no tiene columna `timestamp`
@@ -152,13 +206,28 @@ export const addActualsToBooking = async (
     const floorApplied = finalCost > totalCost;
     if (floorApplied) {
       console.log(
-        `[addActualsToBooking] Piso aplicado: recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`
+        `[addActualsToBooking] Piso aplicado (conductor): recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`
+      );
+    }
+
+    // Precio cliente: mismo margen Erixon (25%) que usa FareCalculator,
+    // aplicado sobre el precio conductor YA con el piso puesto — alineado
+    // con la arquitectura oficial (Excel Tapa!F13-F14, ver [[21-calculo-tarifa]]).
+    // Piso propio del lado cliente: nunca por debajo de lo cotizado.
+    const recalculatedClientCost = Math.ceil((finalCost * (1 + MARGEN_CLIENTE)) / 100) * 100;
+    const finalClientCost = Math.max(recalculatedClientCost, quotedClientMin);
+    const clientFloorApplied = finalClientCost > recalculatedClientCost;
+    if (clientFloorApplied) {
+      console.log(
+        `[addActualsToBooking] Piso aplicado (cliente): recalculado ${recalculatedClientCost} < cotizado ${quotedClientMin}. Se cobra lo cotizado ${finalClientCost}.`
       );
     }
 
     booking.drop = { add: booking.drop?.add, lat: booking.drop?.lat, lng: booking.drop?.lng };
     booking.dropAddress = booking.drop.add;
     booking.trip_cost = finalCost;
+    booking.price = finalClientCost;
+    booking.estimate = finalClientCost;
     booking.distance = parseFloat(distance).toFixed(settings.decimal);
     // Si se aplicó el piso, conservar la comisión cotizada originalmente para
     // que el total tampoco baje; si el recálculo mandó, usar la recalculada.
@@ -176,12 +245,14 @@ export const addActualsToBooking = async (
       .update({
         trip_cost:        booking.trip_cost,
         driver_share:     booking.driver_share,
-        // El campo que la pantalla del cliente muestra como precio final
-        // (`estimate`) nunca se tocaba acá — quedaba con la cotización
-        // original (rango superior) para siempre, aunque el viaje terminara
-        // antes de tiempo y el piso cotizado (mínimo) fuera lo que realmente
-        // se cobró. Ahora refleja el precio final real, igual que trip_cost.
-        estimate:         booking.trip_cost,
+        // `price` es el campo que realmente lee la pantalla del cliente
+        // (`booking.price || booking.estimate`) y `estimate` el fallback —
+        // ninguno de los dos se tocaba acá antes, quedaban con la
+        // cotización original de creación para siempre. Ahora ambos
+        // reflejan el precio cliente final (conductor + margen 25%, con su
+        // propio piso — ver arriba), consistente con `trip_cost`.
+        price:            booking.price,
+        estimate:         booking.estimate,
         convenience_fees: booking.convenience_fees,
         distance:         booking.distance,
         trip_end_time:    booking.trip_end_time,
