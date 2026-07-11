@@ -19,7 +19,6 @@ const AppConfig = {
 
     const SUPABASE_URL = process.env.SUPABASE_URL || '';
     const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
-    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
     const API_KEY = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
     const MAPBOX_ACCESS_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || '';
@@ -66,7 +65,6 @@ module.exports = {
         EXPO_PROJECT_ID: AppConfig.expo_project_id,
         SUPABASE_URL: process.env.SUPABASE_URL || '',
         SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || '',
-        SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
         SUPABASE_EMAIL_REDIRECT_TO: process.env.SUPABASE_EMAIL_REDIRECT_TO || 'https://dashboard.tmasplus.com/welcome',
         GOOGLE_MAPS_API_KEY_ANDROID: process.env.GOOGLE_MAPS_API_KEY_ANDROID || '',
         GOOGLE_MAPS_API_KEY_IOS: process.env.GOOGLE_MAPS_API_KEY_IOS || '',
@@ -134,12 +132,8 @@ module.exports = {
         versionCode: AppConfig.android_app_version,
         "permissions": [
             "CAMERA",
-            "READ_EXTERNAL_STORAGE",
-            "READ_MEDIA_IMAGES",
-            "WRITE_EXTERNAL_STORAGE",
             "ACCESS_FINE_LOCATION",
             "ACCESS_COARSE_LOCATION",
-            "CAMERA_ROLL",
             "FOREGROUND_SERVICE",
             "FOREGROUND_SERVICE_LOCATION",
             "ACCESS_BACKGROUND_LOCATION",
