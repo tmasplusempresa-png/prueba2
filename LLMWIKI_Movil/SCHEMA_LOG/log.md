@@ -9,6 +9,36 @@
 > propias de esta copia** y deben ser exclusivamente sobre
 > `AplicacionMovilTmasplus`.
 
+## 2026-07-10 — Margen cliente 25% apagado (decisión de negocio, temporal) + alineación cliente/conductor
+
+**Agente:** Claude Code (Sonnet 5)
+**Trigger:** usuario reportó que cliente (219.500) y conductor (175.700) no
+coincidían tras finalizar un servicio. Antes de implementar se aclaró que
+**no era un bug** — es el margen Erixon del 25% (documentado, ver
+[[21-calculo-tarifa]] y [23-modelo-pricing-excel-oficial] en la wiki raíz),
+la diferencia es la ganancia de la plataforma por diseño.
+
+Usuario confirmó: ese margen **solo debe aplicar al modelo empresarial**
+(no implementado hoy como flujo separado) — por ahora, apagarlo para todas
+las reservas y documentar para reactivar más adelante.
+
+**Fix:** `App/constants/fare.ts` — `MARGEN_CLIENTE` de `0.25` a `0`. Única
+fuente de la constante (`FareCalculator.tsx` la consume, todo lo demás pasa
+por `FareCalculator`) — un solo cambio alinea cliente = conductor en todo
+el flujo (cotización al crear + recálculo al finalizar), sin tocar piso de
+mínimo, ROUNDUP ni recargos.
+
+Documentado como pendiente futuro (no deuda/bug) en [[10-deuda-tecnica]]
+#35 y en [[21-calculo-tarifa]] §Actualización 2026-07-04 (5), con los pasos
+concretos para reactivarlo condicionado al modelo empresarial cuando exista.
+
+También implementado en esta sesión (feature nueva, no relacionada al
+margen): respaldo local de tracking GPS (`AsyncStorage`, por `bookingId`)
+en `driverLocationTask.ts`, reconciliado con `booking_tracking` al finalizar
+el viaje (`addActualsToBooking`) si el servidor quedó con huecos por caídas
+de red — resiliencia adicional, el tracking en tiempo real existente no se
+tocó. Ver [[13-servicio-driver-tracking]] si se documenta ahí también.
+
 ## 2026-07-10 (16) — "Conductor no ve servicios" — dato inconsistente cars.service_type vs features.carType, no bug de código
 
 **Agente:** Claude Code (Opus 4.8)

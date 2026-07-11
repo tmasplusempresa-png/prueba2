@@ -541,6 +541,30 @@ sin tocar el otro. Ver [[06-flujos-negocio]] y [[21-calculo-tarifa]] para el
 mismo patrón de "dos fuentes de verdad que divergen" en otras áreas del
 sistema.
 
+## 35. Margen cliente 25% apagado — pendiente reactivar solo para modelo empresarial
+
+**Estado: implementado a propósito, no cerrar como "bug".** `MARGEN_CLIENTE`
+(`App/constants/fare.ts`) está en `0` desde 2026-07-04 por decisión de
+negocio — el 25% de margen (cliente paga más que lo que recibe el
+conductor) **solo debería aplicar a reservas empresariales**, que hoy no
+existen como flujo distinto en el código (`FareCalculator` no distingue
+retail vs. corporativo, aplica lo mismo a todo). Mientras tanto, cliente =
+conductor en el 100% de las reservas.
+
+**Trabajo pendiente para cuando se implemente el modelo empresarial:**
+1. Definir cómo se marca una reserva como empresarial (columna nueva en
+   `bookings`, o derivarlo de `payment_mode='corp'`/`users.user_type='company'`
+   que ya existen en el schema — ver [[07-entidades-bd]] item 10 de este
+   catálogo).
+2. Condicionar `MARGEN_CLIENTE` por ese flag en `FareCalculator.tsx` —
+   pasar como parte de `context` (mismo patrón que `isAirport`/`isScheduled`),
+   no como constante global. Retail = 0, empresarial = 0.25 (o el % que
+   defina negocio, podría no ser fijo).
+3. Revisar `AplicacionWebTmasplus/.../utils/fareConstants.ts` (otro proyecto,
+   no tocado en esta sesión) — sigue en 0.25 ahí, decidir si debe alinearse.
+4. Actualizar [[21-calculo-tarifa]] cuando se reactive — tiene el detalle
+   completo de esta decisión y su fecha.
+
 ## Cómo cerrar un ítem
 
 1. Abrir PR.

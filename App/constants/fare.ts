@@ -15,8 +15,16 @@ export const DELTA_AEROPUERTO = 12_000; // viaje desde/hacia aeropuerto
 export const DELTA_PROGRAMADO = 4_800;  // reserva programada (cualquier hora)
 export const DELTA_PROTOCOLO = 5_000;   // servicio con protocolo
 
-// Margen Erixon (plataforma) sobre el valor conductor → valor cliente
-export const MARGEN_CLIENTE = 0.25;
+// Margen Erixon (plataforma) sobre el valor conductor → valor cliente.
+// ⚠️ APAGADO 2026-07-04 a pedido de negocio: el 25% de margen SOLO aplica al
+// modelo empresarial (`payment_mode='corp'` / reservas corporativas), que
+// todavía no está implementado como flujo separado. Hasta que exista esa
+// distinción, cliente retail paga lo mismo que recibe el conductor (sin
+// margen) — ver [[10-deuda-tecnica]] item nuevo. Reactivar a 0.25 (o mejor,
+// condicionarlo por tipo de reserva) cuando se implemente el modelo
+// empresarial real. NO borrar esta constante ni su uso en FareCalculator —
+// solo se cambió el valor.
+export const MARGEN_CLIENTE = 0;
 
 // Umbral default para clasificar urbano vs intermunicipal cuando la categoría
 // no trae `umbral_intermunicipal_km` en BD.

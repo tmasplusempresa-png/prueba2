@@ -569,8 +569,48 @@ botón "Cancelar" del cliente se oculta tras `ACCEPTED`
 admin en el dashboard web (`AplicacionWebTmasplus`, fuera de este proyecto) o
 un job de timeout — pendiente de decisión de negocio.
 
+## Actualización 2026-07-04 (5) — Margen cliente 25% APAGADO por decisión de negocio (temporal)
+
+**⚠️ Cambio de modelo de negocio, no un bug fix.** El margen Erixon del 25%
+(`MARGEN_CLIENTE`, `App/constants/fare.ts`) documentado arriba y en
+[23-modelo-pricing-excel-oficial] **solo aplica al modelo empresarial**
+(reservas corporativas, `payment_mode='corp'` o similar), que hoy **no está
+implementado como flujo separado** en este proyecto — la app no distingue
+entre reserva retail y empresarial al calcular tarifa, aplica el mismo
+`FareCalculator` a todas.
+
+Hasta que exista esa distinción real, negocio pidió apagar el margen para
+**todas** las reservas: cliente paga exactamente lo mismo que recibe el
+conductor (sin comisión de plataforma visible en el cálculo).
+
+**Implementación:**
+```ts
+// App/constants/fare.ts
+export const MARGEN_CLIENTE = 0; // antes 0.25 — ver nota arriba
+```
+
+Al ser la **única** fuente de esa constante (`FareCalculator.tsx` la importa
+y todo lo demás —`CreateReservationScreen.tsx`, `BookingScreen.tsx`,
+`sharedFunctions.ts` `addActualsToBooking`— pasa por `FareCalculator`), este
+único cambio alinea cliente = conductor en **todo** el flujo: cotización al
+crear la reserva Y recálculo al finalizar. No se tocó ninguna otra lógica —
+ni el piso al mínimo cotizado (sección anterior), ni el ROUNDUP, ni los
+recargos (aeropuerto/programado/protocolo).
+
+**Pendiente para cuando se implemente el modelo empresarial real:**
+1. Agregar distinción explícita reserva retail vs. empresarial (columna
+   `bookings` o `car_types`, o flag en el flujo de creación).
+2. Reactivar `MARGEN_CLIENTE=0.25` **condicionado** a ese flag, no
+   incondicional como estaba antes — retail sigue en 0, empresarial en 0.25
+   (o el % que negocio defina).
+3. Revisar si `AplicacionWebTmasplus` (`utils/fareConstants.ts`, fuera de
+   este proyecto) necesita el mismo apagado para consistencia cross-canal —
+   no se tocó en esta sesión, sigue en 0.25 ahí salvo que se decida lo
+   contrario.
+
 ## Fuentes
 - `App/common/actions/FareCalculator.tsx` (algoritmo completo)
+- `App/constants/fare.ts` (`MARGEN_CLIENTE` — hoy en `0`, ver nota arriba)
 - `App/components/CarDetails.tsx:53-118` (invocación y selección urbana/intermunicipal)
 - `App/app/(tabs)/CreateReservationScreen.tsx`, `BookingScreen.tsx` (consumo en UI)
 - `App/common/other/sharedFunctions.ts` (utilidades comparativas)
