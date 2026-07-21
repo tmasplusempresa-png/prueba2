@@ -147,7 +147,27 @@ module.exports = {
             googleMaps: {
                 apiKey: API_KEY
             }
-        }
+        },
+        // Android App Links (https verificado) para el reset de contraseña.
+        // autoVerify + assetlinks.json en dashboard.tmasplus.com hacen que el
+        // enlace del correo abra la app DIRECTO, sin depender de que el navegador
+        // respete el esquema propio tmasplus:// (incompatibilidad en Firefox,
+        // Samsung Internet, MIUI y webviews de Gmail/Outlook). El esquema propio
+        // sigue existiendo (scheme global) como respaldo.
+        intentFilters: [
+            {
+                action: "VIEW",
+                autoVerify: true,
+                data: [
+                    {
+                        scheme: "https",
+                        host: "dashboard.tmasplus.com",
+                        pathPrefix: "/reset-password"
+                    }
+                ],
+                category: ["BROWSABLE", "DEFAULT"]
+            }
+        ]
     },
     "plugins": [
         "expo-asset",

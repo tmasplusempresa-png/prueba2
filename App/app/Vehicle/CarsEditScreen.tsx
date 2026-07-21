@@ -229,6 +229,7 @@ const CarsEditScreen = ({ navigation }: any) => {
   const [plateMsg, setPlateMsg] = useState("");
   const [plateChecking, setPlateChecking] = useState(false);
   const [driverVehicleCount, setDriverVehicleCount] = useState<number | null>(null);
+  const [remoteBrands, setRemoteBrands] = useState<Array<{ label: string; value: string }>>([]);
   const plateDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolvedDriverIdRef = useRef<string | null>(null);
   const [alertVisible, setAlertVisible] = useState(false);
@@ -252,7 +253,7 @@ const CarsEditScreen = ({ navigation }: any) => {
     { description: "XPlus (Vehículo Particular Sedan o Hatchback 2006 en adelante)", value: "XPlus" },
   ];
   const bodyworkTypes = ["VAN", "4x4", "Cerrada", "Coupe", "Doble Cabina", "Hatch Back", "MiniVan", "CROSSOVER", "Sedan", "Station Wagon"];
-  const marcasDeVehiculos = [
+  const LOCAL_BRANDS = [
     { label: "Brilliance", value: "Brilliance" },
     { label: "Byd", value: "Byd" },
     { label: "Chana", value: "Chana" },
@@ -344,6 +345,17 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "Zotye", value: "Zotye" },
     { label: "Otra", value: "Otra" },
   ];
+  // Marcas locales (hardcodeadas) + marcas activas administradas desde la web
+  // (tabla car_brands). Si el fetch falla o no hay marcas remotas, se usa solo
+  // la lista local, por lo que el comportamiento actual nunca se rompe.
+  const marcasDeVehiculos = useMemo(() => {
+    const seen = new Set(LOCAL_BRANDS.map((b) => b.value.toLowerCase()));
+    const merged = [
+      ...LOCAL_BRANDS,
+      ...remoteBrands.filter((b) => !seen.has(b.value.toLowerCase())),
+    ];
+    return merged.sort((a, b) => a.label.localeCompare(b.label));
+  }, [remoteBrands]);
   const CilindrajesDeVehiculos = [
     { label: "Menos de 1.0L", value: "Menos de 1.0L" },
     { label: "1.0L - 1.4L", value: "1.0L - 1.4L" },
@@ -388,6 +400,31 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "2026", value: "2026" },
     { label: "2027", value: "2027" },
   ];
+
+  // â”€â”€ Cargar marcas administradas desde la web (tabla car_brands) â”€â”€
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const url = `${SUPABASE_URL}/rest/v1/car_brands?is_active=eq.true&select=name&order=name.asc`;
+        const res = await fetch(url, {
+          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+        });
+        if (!res.ok || cancelled) return;
+        const rows = await res.json();
+        if (cancelled || !Array.isArray(rows)) return;
+        const mapped = rows
+          .map((r: any) => String(r?.name || "").trim())
+          .filter(Boolean)
+          .map((name: string) => ({ label: name, value: name }));
+        setRemoteBrands(mapped);
+      } catch (e) {
+        // Silencioso: si falla, el selector usa solo la lista local.
+        console.warn("No se pudieron cargar las marcas remotas:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // â”€â”€ Resolver driver_id al montar y contar vehÃ­culos â”€â”€
   useEffect(() => {

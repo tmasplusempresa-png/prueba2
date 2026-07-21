@@ -86,6 +86,17 @@ const decodePolyline = (encoded: string): { latitude: number; longitude: number 
   return coords;
 };
 
+// Formatea una duración en segundos a "Xh Ym" / "Xm Ys" para el resumen de viaje.
+const formatTripDuration = (totalSeconds: number | null | undefined): string => {
+  const secs = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+
 const ReservationTripScreen = () => {
   const nav = useNavigation<any>();
   const route = useRoute();
@@ -161,6 +172,10 @@ const ReservationTripScreen = () => {
   // Mismo valor que ve el cliente (ver `addActualsToBooking`: price === trip_cost, sin margen al cierre).
   const [priceModalVisible, setPriceModalVisible] = useState(false);
   const [finalPrice, setFinalPrice] = useState<number | null>(null);
+  // 📏 Distancia (km) y ⏱️ tiempo (segundos) reales recalculados al cierre —
+  // se muestran junto al precio en el modal de fin de viaje.
+  const [finalDistanceKm, setFinalDistanceKm] = useState<number | null>(null);
+  const [finalTripSeconds, setFinalTripSeconds] = useState<number | null>(null);
   const completedBookingRef = useRef<any>(null);
 
   // ⭐ Customer rating (conductor → cliente) requerido antes de finalizar
@@ -477,17 +492,27 @@ const ReservationTripScreen = () => {
     }
     setLoading(true);
     try {
-      // 🔐 Generate OTP
-      const otp = OtpService.generateOtp();
+      // 🔐 OTP de recogida: se genera al CREAR el booking (trigger DB
+      // `trg_generate_booking_otp`) para que el admin lo vea en la web y se lo
+      // pueda dar al cliente. Aquí solo lo LEEMOS, no lo regeneramos.
+      let otp = currentOtp;
+      if (!otp) {
+        const existing = await OtpService.getOtp(reservation.id);
+        otp = existing?.otp ? String(existing.otp).trim() : null;
+      }
+      // Fallback: reservas creadas ANTES de existir el trigger no tienen otp.
+      // En ese caso lo generamos y persistimos como antes (retrocompatibilidad).
+      if (!otp) {
+        otp = OtpService.generateOtp();
+        await OtpService.saveOtp(reservation.id, otp);
+        console.log('✅ OTP legacy generado y guardado:', otp);
+      }
       setCurrentOtp(otp);
-      
+
       await updateBookingStatus('ARRIVED', {
         driver_arrived_time: new Date().toISOString(),
       });
-      
-      // 💾 Save OTP to database
-      await OtpService.saveOtp(reservation.id, otp);
-      console.log('✅ OTP guardado en base de datos:', otp);
+      console.log('✅ OTP de recogida en uso:', otp);
       
       setPhase('ARRIVED_AT_PICKUP');
       setWaitingForOtpTimer(true); // ⏱️ Mostrar estado de espera
@@ -808,6 +833,8 @@ const ReservationTripScreen = () => {
       const updated = await addActualsToBooking(bookingForActuals, { isScheduled: true });
       completedBookingRef.current = updated;
       setFinalPrice(Number(updated?.price ?? updated?.trip_cost ?? 0));
+      setFinalDistanceKm(Number(updated?.distance ?? 0));
+      setFinalTripSeconds(Number(updated?.total_trip_time ?? 0));
       await loadActualRoute();
       setPriceModalVisible(true);
     } catch (e) {
@@ -1461,6 +1488,24 @@ const ReservationTripScreen = () => {
             <Text style={{ color: '#00E676', fontSize: 40, fontWeight: '800', textAlign: 'center', marginVertical: 16 }}>
               ${(finalPrice ?? 0).toLocaleString('es-CO')}
             </Text>
+
+            {/* 📊 Distancia y tiempo reales recalculados al cierre del viaje */}
+            <View style={s.tripSummaryRow}>
+              <View style={s.tripSummaryItem}>
+                <Ionicons name="navigate" size={20} color="#4FC3F7" />
+                <Text style={s.tripSummaryValue}>
+                  {(finalDistanceKm ?? 0).toLocaleString('es-CO', { maximumFractionDigits: 2 })} km
+                </Text>
+                <Text style={s.tripSummaryLabel}>Distancia</Text>
+              </View>
+              <View style={s.tripSummaryDivider} />
+              <View style={s.tripSummaryItem}>
+                <Ionicons name="time" size={20} color="#FFD54F" />
+                <Text style={s.tripSummaryValue}>{formatTripDuration(finalTripSeconds)}</Text>
+                <Text style={s.tripSummaryLabel}>Tiempo</Text>
+              </View>
+            </View>
+
             <Text style={s.ratingHint}>
               Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.
             </Text>
@@ -1799,6 +1844,35 @@ const s = StyleSheet.create({
     fontSize: 12,
     color: 'rgba(255,255,255,0.6)',
     marginBottom: 12,
+  },
+  tripSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginBottom: 14,
+  },
+  tripSummaryItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  tripSummaryDivider: {
+    width: 1,
+    height: 44,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  tripSummaryValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginTop: 6,
+  },
+  tripSummaryLabel: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.6)',
+    marginTop: 2,
   },
   ratingStarsWrap: {
     alignItems: 'center',

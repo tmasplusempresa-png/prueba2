@@ -449,7 +449,13 @@ const LoginScreen = ({ navigation }: Props) => {
       return;
     }
     try {
-      const redirectTo = ExpoLinking.createURL('reset-password');
+      // Usamos un App Link https (verificado con assetlinks.json) en vez del
+      // esquema propio tmasplus://. Android lo abre DIRECTO en la app en casi
+      // todos los dispositivos; si el navegador no lo intercepta, la página
+      // puente en esa URL reintenta abrir la app y ofrece un botón "Abrir app".
+      // Esto evita la incompatibilidad del redirect https→tmasplus:// en
+      // Firefox, Samsung Internet, MIUI y los webviews de Gmail/Outlook.
+      const redirectTo = 'https://dashboard.tmasplus.com/reset-password.html';
       const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
       if (error) throw error;
       showAlert('success', 'Enviado', 'Revisa tu email para el enlace de reseteo');

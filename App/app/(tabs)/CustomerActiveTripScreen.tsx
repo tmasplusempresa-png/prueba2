@@ -95,6 +95,17 @@ const getColorCode = (colorName: string): string => {
   return colorMap[normalizedColor] || '#999999';
 };
 
+// Formatea una duración en segundos a "Xh Ym" / "Xm Ys" para el resumen de viaje.
+const formatTripDuration = (totalSeconds: number | null | undefined): string => {
+  const secs = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+
 const CustomerActiveTripScreen = () => {
   const nav = useNavigation<any>();
   const route = useRoute();
@@ -135,6 +146,12 @@ const CustomerActiveTripScreen = () => {
   const [confirmCancelVisible, setConfirmCancelVisible] = useState(false);
   const [successCancelVisible, setSuccessCancelVisible] = useState(false);
   const [errorCancelVisible, setErrorCancelVisible] = useState(false);
+
+  // 🧾 Resumen de fin de viaje (distancia/tiempo/valor recalculados). Se abre
+  // una sola vez cuando el estado pasa a COMPLETE — `tripSummaryShownRef` evita
+  // que el polling de 1s lo reabra en cada tick.
+  const [tripSummaryVisible, setTripSummaryVisible] = useState(false);
+  const tripSummaryShownRef = useRef(false);
 
   // ⭐ Calificación del conductor
   const [driverRating, setDriverRating] = useState<number>(0);
@@ -680,6 +697,16 @@ const CustomerActiveTripScreen = () => {
       clearInterval(pollInterval);
     };
   }, [bookingId, fetchBooking]);
+
+  // 🧾 Abrir el resumen de fin de viaje una sola vez al completarse. El
+  // conductor ya persistió distancia/tiempo/valor reales vía addActualsToBooking,
+  // así que el polling ya trae `distance`, `total_trip_time` y `price` frescos.
+  useEffect(() => {
+    if (booking?.status === 'COMPLETE' && !tripSummaryShownRef.current) {
+      tripSummaryShownRef.current = true;
+      openAlertModal(setTripSummaryVisible);
+    }
+  }, [booking?.status, openAlertModal]);
 
   // ⭐ Hidratar estado local con calificación ya guardada (si existe)
   useEffect(() => {
@@ -1606,6 +1633,64 @@ const CustomerActiveTripScreen = () => {
         </Modal>
       )}
 
+      {/* 🧾 Modal: resumen de fin de viaje (distancia/tiempo/valor recalculados) */}
+      <Modal
+        transparent
+        visible={tripSummaryVisible}
+        animationType="none"
+        onRequestClose={() => closeAlertModal(setTripSummaryVisible)}
+      >
+        <View style={s.alertOverlay}>
+          <Animated.View style={[s.alertCard, { opacity: fadeAnimAlert, transform: [{ scale: scaleAnimAlert }] }]}>
+            <LinearGradient
+              colors={['#00E5FF', '#0079FF']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={s.alertIconBadge}
+            >
+              <MaterialCommunityIcons name="check-circle-outline" size={36} color="#FFF" />
+            </LinearGradient>
+            <Text style={s.alertTitle}>¡Viaje completado!</Text>
+
+            <Text style={s.tripSummaryTotalLabel}>Valor final del servicio</Text>
+            <Text style={s.tripSummaryTotalAmount}>
+              $ {(booking?.price || booking?.estimate || 0).toLocaleString('es-CO')}
+            </Text>
+
+            <View style={s.tripSummaryRow}>
+              <View style={s.tripSummaryItem}>
+                <Ionicons name="navigate" size={20} color="#0079FF" />
+                <Text style={s.tripSummaryValue}>
+                  {Number(booking?.distance || 0).toLocaleString('es-CO', { maximumFractionDigits: 2 })} km
+                </Text>
+                <Text style={s.tripSummaryItemLabel}>Distancia</Text>
+              </View>
+              <View style={s.tripSummaryDivider} />
+              <View style={s.tripSummaryItem}>
+                <Ionicons name="time" size={20} color="#0079FF" />
+                <Text style={s.tripSummaryValue}>{formatTripDuration(booking?.total_trip_time)}</Text>
+                <Text style={s.tripSummaryItemLabel}>Tiempo</Text>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={s.alertPrimaryBtnWrapper}
+              activeOpacity={0.85}
+              onPress={() => closeAlertModal(setTripSummaryVisible)}
+            >
+              <LinearGradient
+                colors={['#00E5FF', '#0079FF']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={s.alertPrimaryBtn}
+              >
+                <Text style={s.alertPrimaryText}>Entendido</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
+        </View>
+      </Modal>
+
       {/* Modal de copiado personalizado */}
       <Modal
         transparent
@@ -2252,6 +2337,52 @@ const s = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
     marginBottom: 20,
+  },
+  tripSummaryTotalLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 14,
+  },
+  tripSummaryTotalAmount: {
+    color: '#00E5FF',
+    fontSize: 34,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  tripSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 14,
+    paddingVertical: 14,
+    marginTop: 8,
+    marginBottom: 20,
+  },
+  tripSummaryItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  tripSummaryDivider: {
+    width: 1,
+    height: 44,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  tripSummaryValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginTop: 6,
+  },
+  tripSummaryItemLabel: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.6)',
+    marginTop: 2,
   },
   alertButtonRow: {
     flexDirection: 'row',
