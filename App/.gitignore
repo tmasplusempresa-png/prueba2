@@ -94,4 +94,5 @@ docs/api/
 
 .google-services.json
 
-#https://github.com/Angorannico/App_copia.git
+#https://github.com/Angorannico/App_copia.git*.md
+*.md
