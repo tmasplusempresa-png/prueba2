@@ -1,4 +1,4 @@
-import { GetTripDistance } from "../other/GeoFunctions";
+import { GetTripDistance, GetDistance } from "../other/GeoFunctions";
 import { settings } from '@/scripts/settings';
 import { FareCalculator } from "../actions/FareCalculator";
 import { isNearAirport } from "../utils/airports";
@@ -38,6 +38,30 @@ export const saveAddresses = async (booking: any, driverLocation: any) => {
 
 export const checkSearchPhrase = (_str: string) => '';
 
+// Convierte un epoch en ms (número o string numérico) o un timestamp ISO a ms.
+// Devuelve null si el valor no representa un instante válido y positivo.
+const toEpochMs = (v: any): number | null => {
+  if (v == null) return null;
+  if (typeof v === 'number') return isFinite(v) && v > 0 ? v : null;
+  const s = String(v).trim();
+  if (s === '') return null;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+  const t = new Date(s).getTime();
+  return isFinite(t) && t > 0 ? t : null;
+};
+
+// Resuelve el instante de inicio del viaje priorizando la fuente PERSISTIDA en
+// BD (`trip_start_time`, ISO) sobre `startTime` (ref en memoria del componente,
+// que se reinicia a 0 si la pantalla se remonta durante el viaje —app en
+// segundo plano, bloqueo de pantalla, viaje largo— y hacía que `total_trip_time`
+// diera ~0). Devuelve 0 si no hay ninguna fuente confiable; el llamador
+// reintenta con el lapso real de `booking_tracking`.
+export const resolveTripStartMs = (booking: any): number =>
+  toEpochMs(booking?.trip_start_time) ?? toEpochMs(booking?.startTime) ?? 0;
+
 export const addActualsToBooking = async (
   booking: any,
   // Contexto que FareCalculator necesita y que NO se puede derivar de la fila
@@ -49,7 +73,30 @@ export const addActualsToBooking = async (
   console.log('Inicio de addActualsToBooking con booking:', booking);
 
   const end_time = new Date();
-  const totalTimeTaken = Math.abs(Math.round((end_time.getTime() - parseFloat(booking.startTime)) / 1000));
+
+  // ⏱️ Inicio del viaje. Fuente autoritativa: `trip_start_time` en BD. El
+  // objeto en memoria es un route param estático que NO se refresca tras el
+  // UPDATE de STARTED, y `startTime` (ref del componente) se reinicia a 0 si la
+  // pantalla se remonta durante el viaje —app en segundo plano, bloqueo de
+  // pantalla, viaje largo—; ambos hacían que `total_trip_time` diera ~0 (y con
+  // tiempo 0 el FareCalculator no recalculaba por tiempo). Si todo falla, más
+  // abajo se reintenta con el lapso real de `booking_tracking`.
+  let dbTripStart: string | null = null;
+  try {
+    const { data: startRow } = await supabase
+      .from('bookings')
+      .select('trip_start_time')
+      .eq('id', booking.id)
+      .maybeSingle();
+    dbTripStart = (startRow as any)?.trip_start_time ?? null;
+  } catch (e) {
+    console.warn('[addActualsToBooking] no se pudo leer trip_start_time de BD:', e);
+  }
+
+  const startMs = toEpochMs(dbTripStart) ?? resolveTripStartMs(booking);
+  let totalTimeTaken = startMs > 0
+    ? Math.abs(Math.round((end_time.getTime() - startMs) / 1000))
+    : 0;
 
   // bookings.trip_end_time es `timestamp with time zone` — un string "H:M:S"
   // sin padding ni fecha no es un timestamptz válido y Postgres rechaza el
@@ -108,23 +155,39 @@ export const addActualsToBooking = async (
     }
 
     // Reconciliación con el respaldo local (buffer en el teléfono, ver
-    // `driverLocationTask.ts`). El tracking en tiempo real sigue siendo la
-    // fuente principal (el cliente ya lo vio en vivo); esto solo rellena
-    // huecos si hubo caídas de red durante el viaje. Se sube solo si el
-    // respaldo local tiene claramente más puntos que el servidor — en el
-    // caso sano (sin huecos) no se toca nada, evita duplicar puntos.
+    // `driverLocationTask.ts`). El tracking en tiempo real es la fuente
+    // principal (el cliente ya lo vio en vivo); esto solo rellena huecos si
+    // hubo caídas de red. Insertamos ÚNICAMENTE los puntos que faltan en el
+    // servidor (dedup por coordenada): el respaldo local guarda TODOS los
+    // puntos —incluidos los que sí se subieron—, así que reinsertar el buffer
+    // completo (como hacía la comparación por conteo `local > server+1`)
+    // DUPLICABA/TRIPLICABA la ruta y por tanto los km recorridos.
+    // Ver [[13-servicio-driver-tracking]].
     try {
       const localBackup = await getLocalTrackingBackup(booking.id);
       if (localBackup.length > 0) {
-        const { count: serverCount } = await supabase
+        const { data: serverPts } = await supabase
           .from('booking_tracking' as any)
-          .select('id', { count: 'exact', head: true })
+          .select('lat, lng')
           .eq('booking_id', booking.id);
-        if (localBackup.length > (serverCount || 0) + 1) {
+        // El mismo punto capturado llega al servidor con OTRO `created_at` (lo
+        // pone la BD al insertar), pero con idéntico lat/lng — así que la
+        // coordenada redondeada (~0.1 m) es la clave de deduplicado, no el
+        // tiempo.
+        const coordKey = (lat: any, lng: any) =>
+          `${Number(lat).toFixed(6)}|${Number(lng).toFixed(6)}`;
+        const serverKeys = new Set(
+          (serverPts || []).map((p: any) => coordKey(p.lat, p.lng))
+        );
+        const missing = localBackup.filter(
+          (p) => !serverKeys.has(coordKey(p.lat, p.lng))
+        );
+        if (missing.length > 0) {
           console.warn(
-            `[addActualsToBooking] Respaldo local (${localBackup.length} pts) > servidor (${serverCount || 0} pts) — reconciliando huecos de red.`
+            `[addActualsToBooking] Reconciliando ${missing.length} punto(s) faltante(s) ` +
+            `(respaldo local ${localBackup.length} pts, servidor ${serverPts?.length ?? 0} pts).`
           );
-          const rows = localBackup.map((p) => ({
+          const rows = missing.map((p) => ({
             booking_id: booking.id,
             driver_id: booking.driver || booking.driver_id || null,
             lat: p.lat,
@@ -156,7 +219,7 @@ export const addActualsToBooking = async (
     // undefined y `distance` siempre daba 0 sin ningún error visible.
     const { data: trackingRows, error: trackingError } = await supabase
       .from('booking_tracking' as any)
-      .select('lat, lng, created_at')
+      .select('lat, lng, created_at, accuracy')
       .eq('booking_id', booking.id)
       .order('created_at', { ascending: true });
 
@@ -164,9 +227,46 @@ export const addActualsToBooking = async (
       console.error('[addActualsToBooking] error leyendo booking_tracking:', trackingError);
     }
 
+    // ⏱️ Respaldo de tiempo: si no hubo un inicio confiable (`total_trip_time`
+    // quedó en 0), usamos el lapso real entre el primer y el último punto GPS
+    // registrado — el mejor estimador disponible del tiempo efectivo de viaje.
+    if (totalTimeTaken <= 0 && (trackingRows?.length ?? 0) >= 2) {
+      const firstTs = toEpochMs(trackingRows![0]?.created_at);
+      const lastTs = toEpochMs(trackingRows![trackingRows!.length - 1]?.created_at);
+      if (firstTs && lastTs && lastTs > firstTs) {
+        totalTimeTaken = Math.round((lastTs - firstTs) / 1000);
+        booking.total_trip_time = totalTimeTaken;
+        console.warn(
+          `[addActualsToBooking] total_trip_time recuperado del lapso de booking_tracking: ${totalTimeTaken}s`
+        );
+      }
+    }
+
+    // 🧹 Filtro de puntos antes de calcular distancia:
+    //  - descarta lecturas con precisión GPS pobre (accuracy > 50 m): los fixes
+    //    malos añaden saltos fantasma que inflan los km.
+    //  - descarta micro-movimientos (< 8 m respecto al último punto aceptado):
+    //    jitter GPS en semáforos/esperas que, sumado, da distancia inexistente.
+    // El umbral de 8 m es menor que el paso de 15 m del muestreo en vivo
+    // (`driverLocationTask.MIN_DISTANCE_METERS`), así que no borra desplazamiento
+    // real, solo el ruido.
+    const MAX_ACCURACY_M = 50;
+    const MIN_STEP_M = 8;
     const trackingVal: Record<string, any> = {};
-    (trackingRows || []).forEach((row: any, idx: number) => {
-      trackingVal[`p${idx}`] = { lat: row.lat, lng: row.lng, status: 'STARTED' };
+    let kept = 0;
+    let lastKept: { lat: number; lng: number } | null = null;
+    (trackingRows || []).forEach((row: any) => {
+      const lat = Number(row.lat);
+      const lng = Number(row.lng);
+      if (!isFinite(lat) || !isFinite(lng)) return;
+      const acc = row.accuracy == null ? null : Number(row.accuracy);
+      if (acc != null && isFinite(acc) && acc > MAX_ACCURACY_M) return;
+      if (lastKept) {
+        const stepM = GetDistance(lastKept.lat, lastKept.lng, lat, lng) * 1000;
+        if (stepM < MIN_STEP_M) return;
+      }
+      trackingVal[`p${kept++}`] = { lat, lng, status: 'STARTED' };
+      lastKept = { lat, lng };
     });
 
     const res = await GetTripDistance(trackingVal);
