@@ -9,7 +9,7 @@ const AppConfig = {
     icon_app: './assets/images/logo-Preview.png',
     app_identifier: process.env.APP_IDENTIFIER || 'com.releaseunocero',
     app_identifier_ios: process.env.APP_IDENTIFIER_IOS || 'tmasplus.tmasplus',
-    ios_app_version: process.env.APP_VERSION || '1.10.4',
+    ios_app_version: process.env.APP_VERSION || '1.10.5',
     runtime_Version: process.env.EXPO_RUNTIME_VERSION || '1.0.4',
     android_app_version: parseInt(process.env.ANDROID_APP_VERSION || '1', 10),
     expo_owner: process.env.EXPO_OWNER || 'tmasplus',
@@ -20,7 +20,11 @@ const AppConfig = {
     const SUPABASE_URL = process.env.SUPABASE_URL || '';
     const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 
-    const API_KEY = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
+    // Claves separadas por plataforma: react-native-maps usa PROVIDER_GOOGLE en
+    // varias pantallas, y una clave restringida a apps Android deja el mapa en
+    // gris dentro del iPhone. Cada plataforma cae a la otra solo como respaldo.
+    const API_KEY_ANDROID = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
+    const API_KEY_IOS = process.env.GOOGLE_MAPS_API_KEY_IOS || process.env.GOOGLE_MAPS_API_KEY_ANDROID || '';
     const MAPBOX_ACCESS_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || '';
     const RNMAPBOX_MAPS_DOWNLOAD_TOKEN = process.env.RNMAPBOX_MAPS_DOWNLOAD_TOKEN || process.env.MAPBOX_DOWNLOAD_TOKEN || '';
 
@@ -77,12 +81,13 @@ module.exports = {
         config: "metro.config.js"
     },
     ios: {
-        supportsTablet: true,
-        usesAppleSignIn: true,
+        // Solo iPhone: evita tener que publicar capturas de iPad 13" y el rechazo
+        // por layout roto en tablet. Volver a activarlo es cambiar este flag.
+        supportsTablet: false,
         bundleIdentifier: AppConfig.app_identifier_ios,
-        entitlements: {
-            "com.apple.developer.devicecheck.appattest-environment": "production"
-        },
+        // El ícono global (logo-Preview.png) mide 1028x1032; Apple exige 1024x1024
+        // exacto y sin canal alfa, que es justo lo que cumple este archivo.
+        icon: './assets/images/logo1024x1024.png',
         infoPlist: {
             "NSMotionUsageDescription": "Esta aplicación utiliza el giroscopio para mejorar la experiencia del usuario.",
             "NSUserTrackingUsageDescription": "Para brindar un servicio de transporte confiable...",
@@ -119,9 +124,8 @@ module.exports = {
             ]
         },
         config: {
-            googleMapsApiKey: API_KEY
+            googleMapsApiKey: API_KEY_IOS
         },
-        googleServicesFile: "./GoogleService-Info.plist",
         buildNumber: AppConfig.ios_app_version
     },
     android: {
@@ -145,7 +149,7 @@ module.exports = {
         blockedPermissions: ["com.google.android.gms.permission.AD_ID"],
         config: {
             googleMaps: {
-                apiKey: API_KEY
+                apiKey: API_KEY_ANDROID
             }
         },
         // Android App Links (https verificado) para el reset de contraseña.

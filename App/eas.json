@@ -37,8 +37,12 @@
     "production": {
       "autoIncrement": true,
       "channel": "production",
+      "environment": "production",
       "android": {
         "buildType": "app-bundle"
+      },
+      "ios": {
+        "resourceClass": "m-medium"
       },
       "env": {
         "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
