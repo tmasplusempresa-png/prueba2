@@ -197,9 +197,14 @@ module.exports = {
         [
             "expo-build-properties",
             {
-                "ios": {
-                    "useFrameworks": "static"
-                },
+                // Sin useFrameworks a proposito. Con use_frameworks! los pods se
+                // compilan como framework modules y react-native-maps incluye
+                // headers no modulares de React-Core (RCTComponent.h, RCTView.h,
+                // RCTViewManager.h); -Werror convierte ese warning en error y la
+                // compilacion de Xcode muere. Se puso "static" cuando estaban
+                // activos @react-native-firebase/app y /auth, que si lo exigian;
+                // hoy estan comentados y solo se usa el firebase de JS, sin pods.
+                // @rnmapbox/maps soporta ambos modos, no requiere frameworks.
                 "android": {
                     "enableHermes": true
                 }
