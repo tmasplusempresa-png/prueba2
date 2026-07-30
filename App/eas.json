@@ -34,6 +34,18 @@
         "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
       }
     },
+    "screenshots": {
+      "channel": "production",
+      "environment": "production",
+      "distribution": "internal",
+      "ios": {
+        "simulator": true,
+        "resourceClass": "m-medium"
+      },
+      "env": {
+        "EXPO_PUBLIC_ACCESS_KEY": "&Tr98TzvdWfdSRqAsfhjupDjsNVmowB98=Cr"
+      }
+    },
     "production": {
       "autoIncrement": true,
       "channel": "production",
