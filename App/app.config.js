@@ -55,11 +55,11 @@ module.exports = {
     version: AppConfig.ios_app_version,
     orientation: "portrait",
     icon: AppConfig.icon_app,
-    splash: {
-        "image": "./assets/images/logo1024x1024.png",
-        "resizeMode": 'contain',
-        "backgroundColor": "#051A26"
-    },
+    // El splash se configura abajo con el plugin expo-splash-screen. La clave
+    // "splash" heredada no permite controlar el tamano de la imagen: con
+    // resizeMode contain sobre un PNG de 1024x1024 el logo ocupaba casi todo
+    // el ancho, y como logo1024x1024.png no tiene alfa se veia un cuadro
+    // blanco recortado sobre el fondo oscuro.
     updates: {
         "fallbackToCacheTimeout": 0,
         "url": "https://u.expo.dev/" + AppConfig.expo_project_id,
@@ -185,6 +185,24 @@ module.exports = {
         // "@react-native-firebase/app",
         // "@react-native-firebase/auth",
         // "react-native-background-fetch",
+        [
+            "expo-splash-screen",
+            {
+                // splash-icon.png es logo1024x1024.png con las esquinas
+                // recortadas en alfa, asi que sobre el fondo oscuro se lee como
+                // la misma tarjeta blanca redondeada que usa la pantalla de
+                // login, en vez de un cuadro blanco a sangre.
+                "image": "./assets/images/splash-icon.png",
+                // En puntos. La pantalla mas comun ronda los 430pt de ancho, asi
+                // que 200pt deja el logo a poco menos de la mitad, con aire.
+                "imageWidth": 200,
+                "resizeMode": "contain",
+                "backgroundColor": "#051A26",
+                "dark": {
+                    "backgroundColor": "#051A26"
+                }
+            }
+        ],
         [
             "expo-notifications",
             {
