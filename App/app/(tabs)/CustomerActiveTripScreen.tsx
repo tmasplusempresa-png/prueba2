@@ -1674,7 +1674,7 @@ const CustomerActiveTripScreen = () => {
             </View>
 
             <TouchableOpacity
-              style={s.alertPrimaryBtnWrapper}
+              style={s.alertPrimaryBtnSolo}
               activeOpacity={0.85}
               onPress={() => closeAlertModal(setTripSummaryVisible)}
             >
@@ -1796,7 +1796,7 @@ const CustomerActiveTripScreen = () => {
             <Text style={s.alertTitle}>Viaje cancelado</Text>
             <Text style={s.alertMessage}>Tu viaje fue cancelado correctamente.</Text>
             <TouchableOpacity
-              style={s.alertPrimaryBtnWrapper}
+              style={s.alertPrimaryBtnSolo}
               activeOpacity={0.85}
               onPress={() => closeAlertModal(setSuccessCancelVisible, () => nav.goBack())}
             >
@@ -1833,7 +1833,7 @@ const CustomerActiveTripScreen = () => {
             <Text style={s.alertTitle}>Error</Text>
             <Text style={s.alertMessage}>No se pudo cancelar el viaje. Intenta de nuevo.</Text>
             <TouchableOpacity
-              style={s.alertPrimaryBtnWrapper}
+              style={s.alertPrimaryBtnSolo}
               activeOpacity={0.85}
               onPress={() => closeAlertModal(setErrorCancelVisible)}
             >
@@ -2405,8 +2405,21 @@ const s = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.3,
   },
+  // Para el boton primario cuando comparte fila con el secundario dentro de
+  // alertButtonRow: ahi flex: 1 reparte el ancho disponible.
   alertPrimaryBtnWrapper: {
     flex: 1,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  // Para cuando el boton es el unico y cuelga directo de alertCard. No puede
+  // reutilizar alertPrimaryBtnWrapper: alertCard es una columna sin altura
+  // fija, asi que ahi flex: 1 resuelve a altura 0 y el boton desaparece,
+  // dejando el modal sin forma de cerrarse. Se usa width en vez de flex, igual
+  // que alertButtonRow, para que el ancho no lo encoja el alignItems: center
+  // del padre.
+  alertPrimaryBtnSolo: {
+    width: '100%',
     borderRadius: 14,
     overflow: 'hidden',
   },
