@@ -16,3 +16,18 @@ scripts/
 **/*.test.tsx
 **/*.spec.ts
 **/*.spec.tsx
+
+# Directorios nativos: el flujo es managed y EAS los regenera con prebuild.
+# Si se suben, EAS los toma como proyecto bare y se salta el prebuild.
+ios/
+
+# Keystores de firma de Android: material sensible que EAS no necesita.
+*.jks
+
+# 86 MB de assets comprimidos que no participan en el build.
+assets.rar
+
+# Solo relevantes en desarrollo local.
+.maestro/
+__mocks__/
+supabase/

@@ -3,7 +3,12 @@ require('dotenv').config();
 
 // Construct AppConfig from environment variables directly instead of requiring a JS file.
 const AppConfig = {
-    app_name: process.env.APP_NAME || 'TmasPlus',
+    // OJO: app_name NO se lee de .env a proposito. Este valor define el nombre
+    // del target de Xcode (sanitizado: "T+Plus" -> "TPlus"), y como .env esta
+    // en .easignore no llega al servidor de EAS. Si cada lado calcula un nombre
+    // distinto, la build muere en CONFIGURE_XCODE_PROJECT con
+    // "Could not find target 'X' in project.pbxproj". Debe ser deterministico.
+    app_name: 'TmasPlus',
     app_description: process.env.APP_DESCRIPTION || 'Sistema de transporte urbano inteligente T+Plus',
     app_display_name: process.env.APP_DISPLAY_NAME || 'TmasPlus',
     icon_app: './assets/images/logo-Preview.png',
