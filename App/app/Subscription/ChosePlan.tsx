@@ -22,6 +22,7 @@ import {
 import Icon from "react-native-vector-icons/Ionicons";
 import { useColorScheme } from "react-native";
 import { AntDesign } from '@expo/vector-icons';
+import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
 const NoMembershipScreen = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigation = useNavigation();
@@ -105,6 +106,39 @@ const NoMembershipScreen = () => {
       navigation.navigate("DaviplataPayment", { amount: selectedPlan, mode: mode === "membership" ? "membership" : "kms", kilometers: selectedKm });
     }
   };
+
+  // Se bloquea aqui y no en cada boton porque todos los puntos de entrada a la
+  // compra desembocan en esta pantalla: los banners del home del conductor, el
+  // de renovacion, el de kilometros y los paquetes de la billetera. Cortando el
+  // embudo queda cubierto cualquiera que se haya pasado por alto.
+  if (!PUEDE_COMPRAR_EN_APP) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#051A26" }}>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 }}>
+          <Icon name="information-circle-outline" size={64} color="#00E5FF" />
+          <Text style={{ color: "#FFF", fontSize: 20, fontWeight: "800", textAlign: "center", marginTop: 18 }}>
+            Gestión de membresía
+          </Text>
+          <Text style={{ color: "rgba(255,255,255,0.78)", fontSize: 15, lineHeight: 22, textAlign: "center", marginTop: 12 }}>
+            Tu membresía se administra por fuera de la aplicación. Escríbenos y
+            te ayudamos con la activación o la renovación.
+          </Text>
+          <TouchableOpacity
+            style={{ marginTop: 28, backgroundColor: "#00E5FF", borderRadius: 14, paddingVertical: 14, paddingHorizontal: 34 }}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate("Soporte" as never)}
+          >
+            <Text style={{ color: "#051A26", fontSize: 15, fontWeight: "800" }}>
+              Contactar soporte
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={{ marginTop: 16 }} activeOpacity={0.7} onPress={() => navigation.goBack()}>
+            <Text style={{ color: "rgba(255,255,255,0.6)", fontSize: 14, fontWeight: "600" }}>Volver</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (isLoading) {
     return (
