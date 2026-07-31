@@ -263,9 +263,13 @@ export default function PaymentScreen(props) {
           setIsLoading(false);
           if (user.usertype === "customer") {
             if (curBooking.status === "PAID") {
-              props.navigation.navigate("DriverRating", {
-                bookingId: booking.id,
-              });
+              // La ruta se llama "Rating" en Navigation.tsx; "DriverRating" es
+              // el nombre del componente y no resuelve, asi que el cliente se
+              // quedaba varado en esta pantalla despues de pagar. La pantalla
+              // ademas lee route.params.booking, no bookingId. Se pasa
+              // curBooking y no booking porque es el que acaba de persistirse
+              // con los montos del pago.
+              props.navigation.navigate("Rating", { booking: curBooking });
             } else {
               props.navigation.navigate("HomeScreen");
             }
