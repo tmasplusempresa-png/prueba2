@@ -13,12 +13,20 @@ try {
 export const setupNotificationHandler = async () => {
   try {
     const Notifications = await import('expo-notifications');
+    // Sin esto, cuando la app está en foreground las push no aparecen en el
+    // centro de notificaciones — el usuario tiene la app abierta y no ve nada.
+    // Necesario para el requerimiento "notificaciones en primer/segundo/cerrada".
+    // Los flags shouldShowBanner y shouldShowList son requeridos por
+    // expo-notifications >= 0.28; los legacy (shouldShowAlert) se mantienen
+    // para compatibilidad con versiones previas.
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: true,
-      }),
+        shouldShowBanner: true,
+        shouldShowList: true,
+      } as any),
     });
   } catch (e) {
     console.warn('setupNotificationHandler: expo-notifications not available', e);

@@ -9,10 +9,21 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface NotificationData {
-  type: 'active-trip' | 'driver-active' | 'incoming-call' | 'booking-update' | 'otp' | 'unknown';
+  type:
+    | 'active-trip'
+    | 'driver-active'
+    | 'incoming-call'
+    | 'booking-update'
+    | 'otp'
+    // Nuevos tipos push transaccionales (backend: bookingWebhookDispatcher)
+    | 'new-service-loop'   // driver: nueva reserva immediate — sonido en loop hasta aceptar
+    | 'booking-scheduled'  // driver: servicio programado (reservation)
+    | 'booking-taken'      // driver: otro conductor tomó el booking — silenciar loop
+    | 'unknown';
   bookingId?: string;
   role?: 'driver' | 'customer';
   callerId?: string;
+  newStatus?: string;  // presente en booking-update: 'ACCEPTED' | 'ARRIVED' | 'COMPLETE'
   [key: string]: any;
 }
 
@@ -63,6 +74,23 @@ export const handleNotificationResponse = async (
 
       case 'booking-update':
         await handleBookingUpdateNotification(data, navigation);
+        break;
+
+      case 'new-service-loop':
+        await handleNewServiceLoopNotification(data, navigation);
+        break;
+
+      case 'booking-scheduled':
+        await handleBookingScheduledNotification(data, navigation);
+        break;
+
+      case 'booking-taken':
+        // Silencioso: el móvil ya usa este type internamente para cancelar el
+        // loop de sonido (ver DriverNotificationService.stopNewServiceLoop).
+        // Cuando llega por push, es porque el backend detectó que otro conductor
+        // tomó el booking mientras este conductor tenía la app cerrada — al
+        // reabrirla, el loop debería cancelarse. No requiere navegación.
+        console.log('[NotificationHandlers] booking-taken recibido, sin acción de navegación');
         break;
 
       default:
@@ -168,6 +196,77 @@ const handleBookingUpdateNotification = async (
   }, 500);
 
   console.log('[NotificationHandlers] Actualización de reserva:', data.bookingId);
+};
+
+/**
+ * Maneja notificación "Nueva reserva inmediata" para conductor.
+ * El conductor tocó la push (probablemente con la app en background).
+ * Lo llevamos a la pantalla donde puede aceptar/rechazar.
+ */
+const handleNewServiceLoopNotification = async (
+  data: NotificationData,
+  navigation: NavigationProp<any>,
+): Promise<void> => {
+  if (!data.bookingId) {
+    console.warn('[NotificationHandlers] new-service-loop sin bookingId');
+    return;
+  }
+
+  // Guardar para que la pantalla de destino pueda resaltar el booking
+  await AsyncStorage.setItem('notification_new_service', data.bookingId);
+
+  setTimeout(() => {
+    try {
+      navigation.navigate('HomeScreen', {
+        screen: 'DriverReservations',
+        params: { highlightBookingId: data.bookingId },
+      });
+    } catch (error) {
+      console.warn('[NotificationHandlers] Error navegando a DriverReservations:', error);
+      // Fallback
+      try {
+        navigation.navigate('HomeScreen');
+      } catch {
+        // ignore
+      }
+    }
+  }, 500);
+
+  console.log('[NotificationHandlers] Nuevo servicio (loop) — bookingId:', data.bookingId);
+};
+
+/**
+ * Maneja notificación "Servicio programado" para conductor.
+ * Similar a new-service-loop pero es una reservation (no immediate).
+ */
+const handleBookingScheduledNotification = async (
+  data: NotificationData,
+  navigation: NavigationProp<any>,
+): Promise<void> => {
+  if (!data.bookingId) {
+    console.warn('[NotificationHandlers] booking-scheduled sin bookingId');
+    return;
+  }
+
+  await AsyncStorage.setItem('notification_scheduled_booking', data.bookingId);
+
+  setTimeout(() => {
+    try {
+      navigation.navigate('HomeScreen', {
+        screen: 'DriverReservations',
+        params: { bookingId: data.bookingId },
+      });
+    } catch (error) {
+      console.warn('[NotificationHandlers] Error navegando a DriverReservations (programado):', error);
+      try {
+        navigation.navigate('HomeScreen');
+      } catch {
+        // ignore
+      }
+    }
+  }, 500);
+
+  console.log('[NotificationHandlers] Servicio programado — bookingId:', data.bookingId);
 };
 
 /**

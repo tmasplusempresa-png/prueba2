@@ -75,6 +75,43 @@ export async function notifyNewBooking(
   });
 }
 
+/* ── Silenciar notificación de "nueva reserva" cuando otro conductor la toma ──
+ *
+ * El backend dispara push type='booking-taken' con el mismo bookingId al que
+ * antes envió 'new-service-loop'. Esta función busca en las notificaciones
+ * presentes en el sistema (Android/iOS) las que tengan ese bookingId en su
+ * data.bookingId y las descarta.
+ *
+ * Nota: NO cancela sonidos que ya se están reproduciendo (Android/iOS los
+ * corren a nivel OS y no son abortables), pero sí quita la notificación
+ * visual y evita que el conductor la siga tocando. Cuando arme el loop real
+ * (fase futura con scheduleNotificationAsync + delays), esta función también
+ * cancelará las notifs pendientes en cola.
+ */
+export async function stopNewServiceLoop(bookingId: string): Promise<void> {
+  const N = await getNotifications();
+  if (!N || !bookingId) return;
+  try {
+    const presented = await N.getPresentedNotificationsAsync();
+    const matches = presented.filter((n: any) => {
+      const d = n?.request?.content?.data;
+      return d?.bookingId === bookingId;
+    });
+    await Promise.all(
+      matches.map((n: any) =>
+        N.dismissNotificationAsync(n.request.identifier).catch(() => {}),
+      ),
+    );
+    if (matches.length > 0) {
+      console.log(
+        `[DriverNotificationService] stopNewServiceLoop: dismissed ${matches.length} notif(s) for booking ${bookingId}`,
+      );
+    }
+  } catch (e) {
+    console.warn('[DriverNotificationService] stopNewServiceLoop error:', e);
+  }
+}
+
 /* ── Show the initial "driver is online" persistent notification ── */
 export async function showDriverActiveNotification(driverName?: string) {
   const N = await getNotifications();

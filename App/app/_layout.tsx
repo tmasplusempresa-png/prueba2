@@ -14,6 +14,8 @@ import { useWalletAndMembershipSync } from '@/hooks/useWalletAndMembershipSync';
 import { useDriverCarSync } from '@/hooks/useDriverCarSync';
 import CancellationNotifier from '@/components/CancellationNotifier';
 import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
+import { setupNotificationHandler } from '@/hooks/NotificationService';
+import { stopNewServiceLoop } from '@/hooks/DriverNotificationService';
 
 // El SDK de Supabase, al arrancar, intenta refrescar la sesión guardada. Si el
 // refresh token fue revocado en el servidor (p. ej. tras un reset de contraseña,
@@ -43,6 +45,43 @@ if ((TextInput as any).defaultProps == null) (TextInput as any).defaultProps = {
  * antes de que las rutas hijas (p. ej. index.tsx) intenten navegar.
  */
 export default function RootLayout() {
+  // Configura el handler global de notificaciones antes que cualquier otro
+  // efecto. Sin esto, las push en foreground NO aparecen en el centro de
+  // notificaciones (Android) ni como banner (iOS) — la app las recibe pero
+  // el usuario no ve nada. Ver hooks/NotificationService.tsx.
+  //
+  // También registra un listener global que, ante push type='booking-taken',
+  // cancela el loop de sonido de la reserva mencionada (otro conductor la
+  // tomó mientras esta app estaba en background).
+  useEffect(() => {
+    setupNotificationHandler().catch((e) =>
+      console.warn('[RootLayout] setupNotificationHandler falló:', e),
+    );
+
+    let cleanup: (() => void) | null = null;
+    (async () => {
+      try {
+        const Notifications = await import('expo-notifications');
+        // Listener global de foreground: si llega booking-taken, silencia loop.
+        const sub = Notifications.addNotificationReceivedListener((notif) => {
+          const data = (notif?.request?.content?.data ?? {}) as any;
+          if (data?.type === 'booking-taken' && data?.bookingId) {
+            stopNewServiceLoop(String(data.bookingId)).catch(() => {
+              // ignore
+            });
+          }
+        });
+        cleanup = () => sub.remove();
+      } catch {
+        // expo-notifications no disponible (Expo Go / dev sin native module)
+      }
+    })();
+
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
