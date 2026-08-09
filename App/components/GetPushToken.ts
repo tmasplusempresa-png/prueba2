@@ -53,13 +53,26 @@ export default async function GetPushToken() {
         lightColor: '#00f4f5',
         sound: 'default',
       });
-      await Notifications.setNotificationChannelAsync('bookings', {
-        name: 'Booking notifications',
+      // Renombrados a *-v2 para forzar re-creación del canal en Android.
+      // Los canales son INMUTABLES una vez creados en el dispositivo del
+      // usuario. Como el `horn.wav` original faltaba en el bundle desde el
+      // commit 1322504 (10-abril-2026), los usuarios existentes tienen los
+      // canales antiguos apuntando a un archivo inexistente → silencio.
+      // Con el ID nuevo, Android crea un canal nuevo con el archivo ahora
+      // sí bundleado en assets/sounds/.
+      await Notifications.setNotificationChannelAsync('bookings-v2', {
+        name: 'Nuevos servicios',
+        importance: Notifications.AndroidImportance.HIGH,
         sound: 'horn.wav',
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#00f4f5',
       });
-      await Notifications.setNotificationChannelAsync('bookings-repeat', {
-        name: 'Booking long notifications',
+      await Notifications.setNotificationChannelAsync('bookings-repeat-v2', {
+        name: 'Servicios pendientes',
+        importance: Notifications.AndroidImportance.HIGH,
         sound: 'repeat.wav',
+        vibrationPattern: [0, 500, 500, 500],
+        lightColor: '#00f4f5',
       });
 
       // Persistent driver notification channel

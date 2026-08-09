@@ -181,7 +181,9 @@ module.exports = {
             {
                 "icon": "./assets/images/logo1024x1024.png",
                 "sounds": [
-                    "./assets/sounds/notifi.mpeg"
+                    "./assets/sounds/notifi.mpeg",
+                    "./assets/sounds/horn.wav",
+                    "./assets/sounds/repeat.wav"
                 ]
             }
         ],

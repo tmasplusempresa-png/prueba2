@@ -27,8 +27,11 @@ export async function registerForPushNotificationsAsync() {
       // configure Android channel if needed
       if (Platform.OS === 'android') {
         try {
-          await Notifications.setNotificationChannelAsync('customSound', {
-            name: 'Custom Sound Channel',
+          // Renombrado a -v2 (mismo motivo que bookings-v2 en GetPushToken.ts):
+          // los canales Android son inmutables y el 'customSound' original
+          // apuntaba a horn.wav que no estaba bundleado. Forzar canal nuevo.
+          await Notifications.setNotificationChannelAsync('custom-sound-v2', {
+            name: 'Sonido personalizado',
             importance: Notifications.AndroidImportance.MAX,
             vibrationPattern: [0, 250, 250, 250],
             lightColor: '#E91E63',
