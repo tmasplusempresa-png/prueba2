@@ -60,17 +60,20 @@ export default async function GetPushToken() {
       // canales antiguos apuntando a un archivo inexistente → silencio.
       // Con el ID nuevo, Android crea un canal nuevo con el archivo ahora
       // sí bundleado en assets/sounds/.
+      //
+      // Sonido oficial de la app: firstoption.mp3 (elegido 2026-08-09).
+      // Se usa en los canales principales de servicio.
       await Notifications.setNotificationChannelAsync('bookings-v2', {
         name: 'Nuevos servicios',
         importance: Notifications.AndroidImportance.HIGH,
-        sound: 'horn.wav',
+        sound: 'firstoption.mp3',
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#00f4f5',
       });
       await Notifications.setNotificationChannelAsync('bookings-repeat-v2', {
         name: 'Servicios pendientes',
         importance: Notifications.AndroidImportance.HIGH,
-        sound: 'repeat.wav',
+        sound: 'firstoption.mp3',
         vibrationPattern: [0, 500, 500, 500],
         lightColor: '#00f4f5',
       });
