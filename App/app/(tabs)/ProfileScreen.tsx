@@ -228,6 +228,65 @@ const ProfileScreen = ({ navigation }: Props) => {
     });
   };
 
+  // Exigido por la Guideline 5.1.1(v) de Apple: si la app deja registrarse,
+  // tiene que dejar eliminar la cuenta desde dentro. No vale un enlace a la web
+  // ni un correo a soporte.
+  const eliminarCuenta = useCallback(async () => {
+    try {
+      setLoading(true);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        showAlert('error', 'Sesion expirada', 'Vuelve a iniciar sesion e intentalo de nuevo.');
+        return;
+      }
+
+      const { data, error } = await supabase.functions.invoke('delete-account', {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+
+      // Un viaje en curso no bloquea por capricho: dejar a la contraparte con
+      // un usuario anonimo a mitad de servicio rompe el viaje.
+      const detalle = (error as any)?.context?.body || data;
+      if (detalle?.error === 'VIAJE_ACTIVO') {
+        showAlert('warning', 'Tienes un viaje activo', detalle.message);
+        return;
+      }
+      if (error) throw error;
+
+      if (user?.usertype === 'driver') {
+        await Promise.race([
+          stopBackgroundLocation(),
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+        ]).catch(() => {});
+      }
+      await supabase.auth.signOut().catch(() => {});
+      dispatch(logout());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Error desconocido';
+      showAlert('error', 'No se pudo eliminar la cuenta', `${msg}. Si el problema sigue, escribenos por soporte.`);
+    } finally {
+      setLoading(false);
+    }
+  }, [dispatch, user?.usertype]);
+
+  const confirmarEliminarCuenta = useCallback(() => {
+    showAlert(
+      'confirm',
+      'Eliminar cuenta',
+      'Se borraran tus datos personales de forma permanente y no podras volver a iniciar sesion. Tus viajes ya realizados se conservaran de forma anonima. Esta accion no se puede deshacer.',
+      [
+        { text: 'Cancelar', onPress: () => setAlertVisible(false) },
+        {
+          text: 'Eliminar cuenta',
+          onPress: () => {
+            setAlertVisible(false);
+            eliminarCuenta();
+          },
+        },
+      ],
+    );
+  }, [eliminarCuenta]);
+
   const handleLogout = async () => {
     try {
       setLoading(true);
@@ -328,8 +387,11 @@ const ProfileScreen = ({ navigation }: Props) => {
       out.push({ key: "insurance", label: "Aseguradora", icon: "shield-checkmark-outline", onPress: () => navigation.navigate("Insurance") });
     }
     out.push({ key: "updates", label: "Ver actualizaciones", icon: "refresh-outline", onPress: () => navigation.navigate("Updates") });
+    // Ultima de la lista: es destructiva y no debe quedar al alcance de un
+    // desliz accidental entre opciones cotidianas.
+    out.push({ key: "delete-account", label: "Eliminar cuenta", icon: "trash-outline", onPress: confirmarEliminarCuenta });
     return out;
-  }, [baseItems, currentUserType, navigation]);
+  }, [baseItems, currentUserType, navigation, confirmarEliminarCuenta]);
 
   const onPickerScroll = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
