@@ -210,7 +210,8 @@ module.exports = {
                 "sounds": [
                     "./assets/sounds/notifi.mpeg",
                     "./assets/sounds/horn.wav",
-                    "./assets/sounds/repeat.wav"
+                    "./assets/sounds/repeat.wav",
+                    "./assets/sounds/firstoption.mp3"
                 ]
             }
         ],
