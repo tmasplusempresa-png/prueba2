@@ -28,6 +28,7 @@ import {
 } from "@/common/reducers/membershipSlice";
 import { listenToSettingsChanges, selectSettings } from "@/common/reducers/settingsSlice";
 import { supabase } from "@/config/SupabaseConfig";
+import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -374,10 +375,20 @@ const WalletDetails = ({ navigation }: Props) => {
                 <Text style={styles.noMembershipSubtext}>Debes adquirir una membresía para poder aceptar y completar servicios en T+Plus.</Text>
                 <TouchableOpacity
                   style={styles.ctaMini}
-                  onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
+                  onPress={() =>
+                    PUEDE_COMPRAR_EN_APP
+                      ? Linking.openURL("https://mpago.li/12iuk56")
+                      : Linking.openURL("https://wa.me/573118841054")
+                  }
                 >
-                  <Ionicons name="card-outline" size={16} color="#FFFFFF" />
-                  <Text style={styles.ctaMiniText}>Obtener Membresía</Text>
+                  <Ionicons
+                    name={PUEDE_COMPRAR_EN_APP ? "card-outline" : "logo-whatsapp"}
+                    size={16}
+                    color="#FFFFFF"
+                  />
+                  <Text style={styles.ctaMiniText}>
+                    {PUEDE_COMPRAR_EN_APP ? "Obtener Membresía" : "Contactar soporte"}
+                  </Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -408,9 +419,15 @@ const WalletDetails = ({ navigation }: Props) => {
             </View>
             <TouchableOpacity
               style={styles.renewMiniBtn}
-              onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
+              onPress={() =>
+                PUEDE_COMPRAR_EN_APP
+                  ? Linking.openURL("https://mpago.li/12iuk56")
+                  : Linking.openURL("https://wa.me/573118841054")
+              }
             >
-              <Text style={styles.renewMiniBtnText}>Obtener</Text>
+              <Text style={styles.renewMiniBtnText}>
+                {PUEDE_COMPRAR_EN_APP ? "Obtener" : "Soporte"}
+              </Text>
             </TouchableOpacity>
           </View>
         )}
@@ -446,15 +463,20 @@ const WalletDetails = ({ navigation }: Props) => {
           </View> */}
         </View>
 
-        <View style={styles.ctaWrap}>
-          <TouchableOpacity
-            style={styles.ctaMain}
-            onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
-          >
-            <Ionicons name="refresh-outline" size={20} color="#051A26" />
-            <Text style={styles.ctaMainText}>Renovar Membresia</Text>
-          </TouchableOpacity>
-        </View>
+        {/* Enlace de cobro externo (Mercado Pago). Apple prohibe sacar al
+            usuario de la app para pagar algo que desbloquea funcionalidad
+            dentro de ella, asi que en iOS este boton no se muestra. */}
+        {PUEDE_COMPRAR_EN_APP && (
+          <View style={styles.ctaWrap}>
+            <TouchableOpacity
+              style={styles.ctaMain}
+              onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
+            >
+              <Ionicons name="refresh-outline" size={20} color="#051A26" />
+              <Text style={styles.ctaMainText}>Renovar Membresia</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.packagesWrap}>
         {[

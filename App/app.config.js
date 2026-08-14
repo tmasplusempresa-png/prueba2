@@ -3,13 +3,18 @@ require('dotenv').config();
 
 // Construct AppConfig from environment variables directly instead of requiring a JS file.
 const AppConfig = {
-    app_name: process.env.APP_NAME || 'TmasPlus',
+    // OJO: app_name NO se lee de .env a proposito. Este valor define el nombre
+    // del target de Xcode (sanitizado: "T+Plus" -> "TPlus"), y como .env esta
+    // en .easignore no llega al servidor de EAS. Si cada lado calcula un nombre
+    // distinto, la build muere en CONFIGURE_XCODE_PROJECT con
+    // "Could not find target 'X' in project.pbxproj". Debe ser deterministico.
+    app_name: 'TmasPlus',
     app_description: process.env.APP_DESCRIPTION || 'Sistema de transporte urbano inteligente T+Plus',
     app_display_name: process.env.APP_DISPLAY_NAME || 'TmasPlus',
     icon_app: './assets/images/logo-Preview.png',
     app_identifier: process.env.APP_IDENTIFIER || 'com.releaseunocero',
     app_identifier_ios: process.env.APP_IDENTIFIER_IOS || 'tmasplus.tmasplus',
-    ios_app_version: process.env.APP_VERSION || '1.10.4',
+    ios_app_version: process.env.APP_VERSION || '1.10.5',
     runtime_Version: process.env.EXPO_RUNTIME_VERSION || '1.0.4',
     android_app_version: parseInt(process.env.ANDROID_APP_VERSION || '1', 10),
     expo_owner: process.env.EXPO_OWNER || 'tmasplus',
@@ -20,7 +25,11 @@ const AppConfig = {
     const SUPABASE_URL = process.env.SUPABASE_URL || '';
     const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 
-    const API_KEY = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
+    // Claves separadas por plataforma: react-native-maps usa PROVIDER_GOOGLE en
+    // varias pantallas, y una clave restringida a apps Android deja el mapa en
+    // gris dentro del iPhone. Cada plataforma cae a la otra solo como respaldo.
+    const API_KEY_ANDROID = process.env.GOOGLE_MAPS_API_KEY_ANDROID || process.env.GOOGLE_MAPS_API_KEY_IOS || '';
+    const API_KEY_IOS = process.env.GOOGLE_MAPS_API_KEY_IOS || process.env.GOOGLE_MAPS_API_KEY_ANDROID || '';
     const MAPBOX_ACCESS_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || '';
     const RNMAPBOX_MAPS_DOWNLOAD_TOKEN = process.env.RNMAPBOX_MAPS_DOWNLOAD_TOKEN || process.env.MAPBOX_DOWNLOAD_TOKEN || '';
 
@@ -46,11 +55,11 @@ module.exports = {
     version: AppConfig.ios_app_version,
     orientation: "portrait",
     icon: AppConfig.icon_app,
-    splash: {
-        "image": "./assets/images/logo1024x1024.png",
-        "resizeMode": 'contain',
-        "backgroundColor": "#051A26"
-    },
+    // El splash se configura abajo con el plugin expo-splash-screen. La clave
+    // "splash" heredada no permite controlar el tamano de la imagen: con
+    // resizeMode contain sobre un PNG de 1024x1024 el logo ocupaba casi todo
+    // el ancho, y como logo1024x1024.png no tiene alfa se veia un cuadro
+    // blanco recortado sobre el fondo oscuro.
     updates: {
         "fallbackToCacheTimeout": 0,
         "url": "https://u.expo.dev/" + AppConfig.expo_project_id,
@@ -77,12 +86,13 @@ module.exports = {
         config: "metro.config.js"
     },
     ios: {
-        supportsTablet: true,
-        usesAppleSignIn: true,
+        // Solo iPhone: evita tener que publicar capturas de iPad 13" y el rechazo
+        // por layout roto en tablet. Volver a activarlo es cambiar este flag.
+        supportsTablet: false,
         bundleIdentifier: AppConfig.app_identifier_ios,
-        entitlements: {
-            "com.apple.developer.devicecheck.appattest-environment": "production"
-        },
+        // El ícono global (logo-Preview.png) mide 1028x1032; Apple exige 1024x1024
+        // exacto y sin canal alfa, que es justo lo que cumple este archivo.
+        icon: './assets/images/logo1024x1024.png',
         infoPlist: {
             "NSMotionUsageDescription": "Esta aplicación utiliza el giroscopio para mejorar la experiencia del usuario.",
             "NSUserTrackingUsageDescription": "Para brindar un servicio de transporte confiable...",
@@ -119,9 +129,8 @@ module.exports = {
             ]
         },
         config: {
-            googleMapsApiKey: API_KEY
+            googleMapsApiKey: API_KEY_IOS
         },
-        googleServicesFile: "./GoogleService-Info.plist",
         buildNumber: AppConfig.ios_app_version
     },
     android: {
@@ -145,7 +154,7 @@ module.exports = {
         blockedPermissions: ["com.google.android.gms.permission.AD_ID"],
         config: {
             googleMaps: {
-                apiKey: API_KEY
+                apiKey: API_KEY_ANDROID
             }
         },
         // Android App Links (https verificado) para el reset de contraseña.
@@ -177,6 +186,24 @@ module.exports = {
         // "@react-native-firebase/auth",
         // "react-native-background-fetch",
         [
+            "expo-splash-screen",
+            {
+                // splash-icon.png es logo1024x1024.png con las esquinas
+                // recortadas en alfa, asi que sobre el fondo oscuro se lee como
+                // la misma tarjeta blanca redondeada que usa la pantalla de
+                // login, en vez de un cuadro blanco a sangre.
+                "image": "./assets/images/splash-icon.png",
+                // En puntos. La pantalla mas comun ronda los 430pt de ancho, asi
+                // que 200pt deja el logo a poco menos de la mitad, con aire.
+                "imageWidth": 200,
+                "resizeMode": "contain",
+                "backgroundColor": "#051A26",
+                "dark": {
+                    "backgroundColor": "#051A26"
+                }
+            }
+        ],
+        [
             "expo-notifications",
             {
                 "icon": "./assets/images/logo1024x1024.png",
@@ -190,9 +217,14 @@ module.exports = {
         [
             "expo-build-properties",
             {
-                "ios": {
-                    "useFrameworks": "static"
-                },
+                // Sin useFrameworks a proposito. Con use_frameworks! los pods se
+                // compilan como framework modules y react-native-maps incluye
+                // headers no modulares de React-Core (RCTComponent.h, RCTView.h,
+                // RCTViewManager.h); -Werror convierte ese warning en error y la
+                // compilacion de Xcode muere. Se puso "static" cuando estaban
+                // activos @react-native-firebase/app y /auth, que si lo exigian;
+                // hoy estan comentados y solo se usa el firebase de JS, sin pods.
+                // @rnmapbox/maps soporta ambos modos, no requiere frameworks.
                 "android": {
                     "enableHermes": true
                 }
