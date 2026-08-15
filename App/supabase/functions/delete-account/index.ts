@@ -41,20 +41,24 @@ serve(async (req) => {
     return jsonResponse({ error: "Falta el token de sesion" }, 401);
   }
 
-  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-    auth: { persistSession: false },
-  });
-
-  const { data: userData, error: userError } = await authClient.auth.getUser();
-  if (userError || !userData?.user) {
-    return jsonResponse({ error: "Sesion invalida" }, 401);
-  }
-
-  const authId = userData.user.id;
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
+
+  // getUser() TIENE que recibir el token explicitamente. Sin argumento busca
+  // una sesion guardada en el cliente, que aqui no existe (persistSession
+  // false), y devuelve siempre "Auth session missing" aunque el token sea
+  // valido. El header Authorization del cliente solo aplica a PostgREST.
+  const jwt = authHeader.slice("Bearer ".length).trim();
+  const { data: userData, error: userError } = await admin.auth.getUser(jwt);
+  if (userError || !userData?.user) {
+    return jsonResponse(
+      { error: "Sesion invalida", detalle: userError?.message ?? "sin usuario" },
+      401,
+    );
+  }
+
+  const authId = userData.user.id;
 
   // 2. Localizar la fila de la app. auth_id es el vinculo con auth.users.
   const { data: perfil, error: perfilError } = await admin
