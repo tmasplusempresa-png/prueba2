@@ -93,14 +93,19 @@ module.exports = {
         // El ícono global (logo-Preview.png) mide 1028x1032; Apple exige 1024x1024
         // exacto y sin canal alfa, que es justo lo que cumple este archivo.
         icon: './assets/images/logo1024x1024.png',
+        // Purpose strings: Apple (5.1.1) exige que cada texto diga QUE dato se
+        // usa, PARA QUE, y de un ejemplo concreto. Nada de frases cortadas con
+        // "..." ni mezcla de idiomas: el review se hace en ingles. Si se agrega
+        // una capacidad nueva, el texto se escribe con ese mismo molde.
+        // NSMotionUsageDescription se elimino a proposito: no hay ningun uso de
+        // expo-sensors / react-native-sensors en el codigo, y declarar una
+        // capacidad que la app nunca pide contradice el Privacy Label.
         infoPlist: {
-            "NSMotionUsageDescription": "Esta aplicación utiliza el giroscopio para mejorar la experiencia del usuario.",
-            "NSUserTrackingUsageDescription": "Para brindar un servicio de transporte confiable...",
-            "NSLocationAlwaysUsageDescription": "This app uses the always location access...",
-            "NSLocationAlwaysAndWhenInUseUsageDescription": "This app uses the always location access...",
-            "NSLocationWhenInUseUsageDescription": "For a reliable ride...",
-            "NSCameraUsageDescription": "This app uses the camera to take your profile picture.",
-            "NSPhotoLibraryUsageDescription": "This app uses Photo Library for uploading your profile picture.",
+            "NSLocationWhenInUseUsageDescription": "TmasPlus uses your location while the app is open to place you on the map, set your pickup point, find available drivers nearby, and calculate the route and fare of your trip. For example, when you request a ride, your pickup location is shared with the driver who accepts it so they can reach you.",
+            "NSLocationAlwaysAndWhenInUseUsageDescription": "TmasPlus uses your location in the background only while a trip is active, so the vehicle can be tracked in real time. For example, a driver's position keeps updating on the passenger's map while driving, even with the app in the background, and passengers can share that live trip with a safety contact. Background tracking stops when the trip ends or the driver goes offline.",
+            "NSLocationAlwaysUsageDescription": "TmasPlus uses your location in the background only while a trip is active, so the vehicle can be tracked in real time. For example, a driver's position keeps updating on the passenger's map while driving, even with the app in the background. Background tracking stops when the trip ends or the driver goes offline.",
+            "NSCameraUsageDescription": "TmasPlus uses the camera so you can take a photo for your profile picture and, if you drive with us, capture the documents required to be approved. For example, you can tap 'Take photo' to shoot your driver's license when uploading your paperwork.",
+            "NSPhotoLibraryUsageDescription": "TmasPlus accesses your photo library so you can pick an existing image as your profile picture and, if you drive with us, upload the documents required to be approved. For example, you can select a photo of your vehicle registration card that is already saved on your device.",
             "ITSAppUsesNonExemptEncryption": false,
             "UIBackgroundModes": [
                 "location",
@@ -231,27 +236,34 @@ module.exports = {
         [
             "expo-image-picker",
             {
-                "photosPermission": "This app uses Photo Library for uploading your profile picture.",
-                "cameraPermission": "This app uses the camera to take your profile picture."
+                // Identicos a ios.infoPlist: este plugin tambien reescribe el
+                // Info.plist en prebuild y gana sobre lo declarado alli.
+                "photosPermission": "TmasPlus accesses your photo library so you can pick an existing image as your profile picture and, if you drive with us, upload the documents required to be approved. For example, you can select a photo of your vehicle registration card that is already saved on your device.",
+                "cameraPermission": "TmasPlus uses the camera so you can take a photo for your profile picture and, if you drive with us, capture the documents required to be approved. For example, you can tap 'Take photo' to shoot your driver's license when uploading your paperwork."
             }
         ],
+        // Estos textos DEBEN ser identicos a los de ios.infoPlist: el plugin
+        // reescribe el Info.plist en prebuild y, si divergen, el binario acaba
+        // mostrando la version del plugin y no la que se reviso.
         [
             "expo-location",
             {
-                "locationAlwaysAndWhenInUsePermission": "This app uses the always location access in the background...",
-                "locationAlwaysPermission": "This app uses the always location access in the background...",
-                "locationWhenInUsePermission": "For a reliable ride, App collects location data from the time you open the app until a trip ends...",
+                "locationAlwaysAndWhenInUsePermission": "TmasPlus uses your location in the background only while a trip is active, so the vehicle can be tracked in real time. For example, a driver's position keeps updating on the passenger's map while driving, even with the app in the background, and passengers can share that live trip with a safety contact. Background tracking stops when the trip ends or the driver goes offline.",
+                "locationAlwaysPermission": "TmasPlus uses your location in the background only while a trip is active, so the vehicle can be tracked in real time. For example, a driver's position keeps updating on the passenger's map while driving, even with the app in the background. Background tracking stops when the trip ends or the driver goes offline.",
+                "locationWhenInUsePermission": "TmasPlus uses your location while the app is open to place you on the map, set your pickup point, find available drivers nearby, and calculate the route and fare of your trip. For example, when you request a ride, your pickup location is shared with the driver who accepts it so they can reach you.",
                 "isIosBackgroundLocationEnabled": true,
                 "isAndroidBackgroundLocationEnabled": true,
                 "isAndroidForegroundServiceEnabled": true
             }
         ],
-        [
-            "expo-tracking-transparency",
-            {
-                "userTrackingPermission": "This identifier will be used to deliver personalized ads to you."
-            }
-        ],
+        // expo-tracking-transparency eliminado a proposito. El plugin inyectaba
+        // NSUserTrackingUsageDescription diciendo que el IDFA se usa para
+        // "personalized ads", pero requestTrackingPermissionsAsync no se llama
+        // en ninguna parte del codigo y no hay ningun SDK de publicidad en el
+        // proyecto. Declarar tracking que la app nunca ejecuta contradice el
+        // Privacy Nutrition Label y es causal de rechazo. Si algun dia se
+        // integra publicidad, hay que volver a agregar el plugin Y disparar el
+        // prompt ATT antes de cualquier recoleccion.
         [
             "@rnmapbox/maps",
             {
