@@ -22,8 +22,13 @@ export default async function GetPushToken() {
     return null;
   }
 
-  let token;  
-  if (Device.isDevice) {
+  let token;
+  // `Device.isDevice` es false en emuladores → el flujo se saltaba y el token
+  // quedaba null. Un emulador Android con Google Play SÍ puede emitir token
+  // Expo/FCM, así que en desarrollo también lo permitimos (solo Android: el
+  // iOS Simulator no puede obtener token de APNs). En release el guard sigue
+  // exigiendo dispositivo físico.
+  if (Device.isDevice || (__DEV__ && Platform.OS === 'android')) {
     try {
       const Notifications = await import('expo-notifications');
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
@@ -37,6 +42,7 @@ export default async function GetPushToken() {
       }
       const ref = { projectId: AppConfig.expo_project_id };
       token = (await Notifications.getExpoPushTokenAsync(ref)).data;
+      if (__DEV__) console.log('[GetPushToken] Token =', token);
     } catch (err) {
       console.warn('GetPushToken: expo-notifications not available', err);
       return null;
