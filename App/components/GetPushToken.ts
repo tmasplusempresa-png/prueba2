@@ -28,7 +28,8 @@ export default async function GetPushToken() {
   // Expo/FCM, así que en desarrollo también lo permitimos (solo Android: el
   // iOS Simulator no puede obtener token de APNs). En release el guard sigue
   // exigiendo dispositivo físico.
-  if (Device.isDevice || (__DEV__ && Platform.OS === 'android')) {
+  const allowEmulator = __DEV__ && Platform.OS === 'android';
+  if (Device.isDevice || allowEmulator) {
     try {
       const Notifications = await import('expo-notifications');
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
@@ -37,16 +38,20 @@ export default async function GetPushToken() {
         const { status } = await Notifications.requestPermissionsAsync();
         finalStatus = status;
       }
+      console.log('[GetPushToken] permission=', finalStatus, 'isDevice=', Device.isDevice, 'projectId=', AppConfig.expo_project_id);
       if (finalStatus !== 'granted') {
+        console.warn('[GetPushToken] permiso de notificaciones no concedido:', finalStatus);
         return null;
       }
       const ref = { projectId: AppConfig.expo_project_id };
       token = (await Notifications.getExpoPushTokenAsync(ref)).data;
-      if (__DEV__) console.log('[GetPushToken] Token =', token);
+      console.log('[GetPushToken] Token =', token);
     } catch (err) {
       console.warn('GetPushToken: expo-notifications not available', err);
       return null;
     }
+  } else {
+    console.warn('[GetPushToken] skipped: not a physical device (iOS simulator / release emulator)');
   }
 
   if (Platform.OS === 'android') {

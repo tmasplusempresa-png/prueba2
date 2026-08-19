@@ -16,6 +16,7 @@ import CancellationNotifier from '@/components/CancellationNotifier';
 import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
 import { setupNotificationHandler } from '@/hooks/NotificationService';
 import { stopNewServiceLoop } from '@/hooks/DriverNotificationService';
+import { usePushTokenRegistration } from '@/hooks/usePushTokenRegistration';
 
 // El SDK de Supabase, al arrancar, intenta refrescar la sesión guardada. Si el
 // refresh token fue revocado en el servidor (p. ej. tras un reset de contraseña,
@@ -197,5 +198,6 @@ function GlobalServices() {
   useGlobalDriverTracking();
   useWalletAndMembershipSync();
   useDriverCarSync();
+  usePushTokenRegistration();
   return null;
 }
