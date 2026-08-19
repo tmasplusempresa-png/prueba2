@@ -62,6 +62,55 @@ const toEpochMs = (v: any): number | null => {
 export const resolveTripStartMs = (booking: any): number =>
   toEpochMs(booking?.trip_start_time) ?? toEpochMs(booking?.startTime) ?? 0;
 
+
+const MAX_GPS_SPEED_KMH = 160;
+const MAX_ACCURACY_M = 50;
+const MIN_STEP_M = 8;
+
+type TrackingPoint = { lat: number; lng: number; ts: number; accuracy: number | null };
+
+const parseQuotedDistanceKm = (raw: any): number => {
+  const n = parseFloat(raw);
+  return isFinite(n) && n > 0 ? n : 0;
+};
+
+/** Solo puntos entre inicio y fin de viaje, sin jitter ni saltos imposibles. */
+export const filterBillableTracking = (
+  rows: any[] | null | undefined,
+  tripStartMs: number,
+  tripEndMs: number,
+): TrackingPoint[] => {
+  if (!rows?.length || tripStartMs <= 0) return [];
+
+  const inWindow: TrackingPoint[] = [];
+  for (const row of rows) {
+    const ts = toEpochMs(row?.created_at);
+    if (!ts || ts < tripStartMs || ts > tripEndMs) continue;
+    const lat = Number(row.lat);
+    const lng = Number(row.lng);
+    if (!isFinite(lat) || !isFinite(lng)) continue;
+    const acc = row.accuracy == null ? null : Number(row.accuracy);
+    if (acc != null && isFinite(acc) && acc > MAX_ACCURACY_M) continue;
+    inWindow.push({ lat, lng, ts, accuracy: acc });
+  }
+
+  const kept: TrackingPoint[] = [];
+  for (const p of inWindow) {
+    const last = kept[kept.length - 1];
+    if (!last) {
+      kept.push(p);
+      continue;
+    }
+    const stepM = GetDistance(last.lat, last.lng, p.lat, p.lng) * 1000;
+    if (stepM < MIN_STEP_M) continue;
+    const dtSec = Math.max((p.ts - last.ts) / 1000, 1);
+    const maxM = (MAX_GPS_SPEED_KMH * 1000 / 3600) * dtSec;
+    if (stepM > maxM) continue;
+    kept.push(p);
+  }
+  return kept;
+};
+
 export const addActualsToBooking = async (
   booking: any,
   // Contexto que FareCalculator necesita y que NO se puede derivar de la fila
@@ -85,10 +134,13 @@ export const addActualsToBooking = async (
   try {
     const { data: startRow } = await supabase
       .from('bookings')
-      .select('trip_start_time')
+      .select('trip_start_time, distance')
       .eq('id', booking.id)
       .maybeSingle();
     dbTripStart = (startRow as any)?.trip_start_time ?? null;
+    if ((startRow as any)?.distance != null && booking.distance == null) {
+      booking.distance = (startRow as any).distance;
+    }
   } catch (e) {
     console.warn('[addActualsToBooking] no se pudo leer trip_start_time de BD:', e);
   }
@@ -227,50 +279,40 @@ export const addActualsToBooking = async (
       console.error('[addActualsToBooking] error leyendo booking_tracking:', trackingError);
     }
 
-    // ⏱️ Respaldo de tiempo: si no hubo un inicio confiable (`total_trip_time`
-    // quedó en 0), usamos el lapso real entre el primer y el último punto GPS
-    // registrado — el mejor estimador disponible del tiempo efectivo de viaje.
-    if (totalTimeTaken <= 0 && (trackingRows?.length ?? 0) >= 2) {
-      const firstTs = toEpochMs(trackingRows![0]?.created_at);
-      const lastTs = toEpochMs(trackingRows![trackingRows!.length - 1]?.created_at);
-      if (firstTs && lastTs && lastTs > firstTs) {
+
+    const tripEndMs = end_time.getTime();
+    const billablePoints = filterBillableTracking(trackingRows, startMs, tripEndMs);
+
+    if (totalTimeTaken <= 0 && billablePoints.length >= 2) {
+      const firstTs = billablePoints[0].ts;
+      const lastTs = billablePoints[billablePoints.length - 1].ts;
+      if (lastTs > firstTs) {
         totalTimeTaken = Math.round((lastTs - firstTs) / 1000);
         booking.total_trip_time = totalTimeTaken;
         console.warn(
-          `[addActualsToBooking] total_trip_time recuperado del lapso de booking_tracking: ${totalTimeTaken}s`
+          `[addActualsToBooking] total_trip_time recuperado del GPS en ventana de viaje: ${totalTimeTaken}s`
         );
       }
     }
 
-    // 🧹 Filtro de puntos antes de calcular distancia:
-    //  - descarta lecturas con precisión GPS pobre (accuracy > 50 m): los fixes
-    //    malos añaden saltos fantasma que inflan los km.
-    //  - descarta micro-movimientos (< 8 m respecto al último punto aceptado):
-    //    jitter GPS en semáforos/esperas que, sumado, da distancia inexistente.
-    // El umbral de 8 m es menor que el paso de 15 m del muestreo en vivo
-    // (`driverLocationTask.MIN_DISTANCE_METERS`), así que no borra desplazamiento
-    // real, solo el ruido.
-    const MAX_ACCURACY_M = 50;
-    const MIN_STEP_M = 8;
     const trackingVal: Record<string, any> = {};
-    let kept = 0;
-    let lastKept: { lat: number; lng: number } | null = null;
-    (trackingRows || []).forEach((row: any) => {
-      const lat = Number(row.lat);
-      const lng = Number(row.lng);
-      if (!isFinite(lat) || !isFinite(lng)) return;
-      const acc = row.accuracy == null ? null : Number(row.accuracy);
-      if (acc != null && isFinite(acc) && acc > MAX_ACCURACY_M) return;
-      if (lastKept) {
-        const stepM = GetDistance(lastKept.lat, lastKept.lng, lat, lng) * 1000;
-        if (stepM < MIN_STEP_M) return;
-      }
-      trackingVal[`p${kept++}`] = { lat, lng, status: 'STARTED' };
-      lastKept = { lat, lng };
+    billablePoints.forEach((p, i) => {
+      trackingVal[`p${i}`] = { lat: p.lat, lng: p.lng, status: 'STARTED' };
     });
 
     const res = await GetTripDistance(trackingVal);
-    const distance = settings.convert_to_mile ? res.distance / 1.609344 : res.distance;
+    let distance = settings.convert_to_mile ? res.distance / 1.609344 : res.distance;
+
+    const quotedDistanceKm = parseQuotedDistanceKm(booking.distance);
+    const gpsTooSparse = billablePoints.length < 3;
+    const gpsNearZero = !isFinite(distance) || distance < 0.2;
+    if (quotedDistanceKm > 0 && (gpsTooSparse || gpsNearZero)) {
+      console.warn(
+        `[addActualsToBooking] GPS de viaje insuficiente ` +
+        `(puntos=${billablePoints.length}, km=${distance}). Se usa distancia cotizada ${quotedDistanceKm} km.`
+      );
+      distance = quotedDistanceKm;
+    }
 
     // Detección por coords (Haversine + 40 aeropuertos Colombia).
     // booking.pickup / booking.drop traen { lat, lng } desde el INSERT original.
