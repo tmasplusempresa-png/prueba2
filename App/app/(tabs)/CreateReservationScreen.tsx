@@ -110,6 +110,9 @@ const CreateReservationScreen = () => {
 
   const [myLat, setMyLat] = useState(COLOMBIA_CENTER.latitude);
   const [myLng, setMyLng] = useState(COLOMBIA_CENTER.longitude);
+  // true solo cuando el GPS real resolvió — evita sesgar el autocompletado al
+  // centro del país (valor inicial de myLat/myLng) antes de tener la ubicación.
+  const [hasMyLocation, setHasMyLocation] = useState(false);
   const [origin, setOrigin] = useState<any>(params.origin || null);
   const [destination, setDestination] = useState<any>(params.destination || null);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
@@ -155,6 +158,7 @@ const CreateReservationScreen = () => {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         setMyLat(loc.coords.latitude);
         setMyLng(loc.coords.longitude);
+        setHasMyLocation(true);
         if (!origin) {
           // Reverse geocode para obtener dirección real en lugar de "Mi ubicación actual"
           try {
@@ -904,7 +908,16 @@ const CreateReservationScreen = () => {
                 enablePoweredByContainer={false}
                 nearbyPlacesAPI="GooglePlacesSearch"
                 onPress={(data, details) => handleLocationSelect(data, details, 'origin')}
-                query={{ key: GOOGLE_MAPS_KEY, language: 'es', components: 'country:co', sessiontoken: sessionTokenOrigin.current }}
+                query={{
+                  key: GOOGLE_MAPS_KEY,
+                  language: 'es',
+                  components: 'country:co',
+                  // Sesgo por ubicación: prioriza resultados cerca del usuario
+                  // (radio 30 km) solo cuando el GPS real ya resolvió. Bias
+                  // suave — no excluye destinos lejanos (viajes intermunicipales).
+                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
+                  sessiontoken: sessionTokenOrigin.current,
+                }}
                 styles={gpStyles}
                 textInputProps={{
                   placeholderTextColor: 'rgba(255,255,255,0.4)',
@@ -932,7 +945,14 @@ const CreateReservationScreen = () => {
                 enablePoweredByContainer={false}
                 nearbyPlacesAPI="GooglePlacesSearch"
                 onPress={(data, details) => handleLocationSelect(data, details, 'destination')}
-                query={{ key: GOOGLE_MAPS_KEY, language: 'es', components: 'country:co', sessiontoken: sessionTokenDest.current }}
+                query={{
+                  key: GOOGLE_MAPS_KEY,
+                  language: 'es',
+                  components: 'country:co',
+                  // Mismo sesgo por ubicación que el origen (ver comentario arriba).
+                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
+                  sessiontoken: sessionTokenDest.current,
+                }}
                 styles={gpStyles}
                 textInputProps={{
                   placeholderTextColor: 'rgba(255,255,255,0.4)',
