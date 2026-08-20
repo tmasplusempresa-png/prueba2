@@ -16,6 +16,7 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSelector, useDispatch } from "react-redux";
 import { RootState } from "@/common/store";
 import * as ImagePicker from "expo-image-picker";
+import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import * as FileSystem from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -195,6 +196,10 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
   };
 
   const getImageFromCamera = async () => {
+    // Ver common/utils/cameraPresentation: en iOS la camara no se presenta si
+    // el modal de origen sigue abierto.
+    await closeModalBeforeCamera(() => setSourceModalVisible(false));
+
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== "granted") {
       showAlert('warning', 'Permiso denegado', 'Se requiere acceso a la cámara para tomar fotos.');

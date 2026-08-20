@@ -42,6 +42,7 @@ type Props = NativeStackScreenProps<any>;
 import { Button, Input } from "react-native-elements";
 import { AntDesign, MaterialIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import { updateUserProfileSupabase } from "@/common/actions/userActions";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { getUserVerification } from "@/common/topus-integration";
@@ -61,6 +62,33 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
   const user = (useSelector((state: RootState) => state.auth.user) || {}) as any;
   const [modalVisible, setModalVisible] = useState(false);
   const [modalMessage, setModalMessage] = useState("");
+
+  // Los inputs de origen y destino flotan en un contenedor position:"absolute"
+  // sobre el mapa. Un <KeyboardAvoidingView> no sirve ahi: aplica padding a si
+  // mismo y un hijo posicionado en absoluto desde "top" no se mueve con eso. En
+  // iOS el teclado tapaba el input de destino y la lista de sugerencias (en
+  // Android la ventana se redimensiona sola, por eso solo se veia en iPhone).
+  // Se sube el contenedor a mano escuchando los eventos nativos del teclado.
+  const [keyboardShift, setKeyboardShift] = useState(0);
+  useEffect(() => {
+    // "will" en iOS acompana la animacion del teclado; Android solo emite "did".
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const onShow = (e: any) => {
+      const height = e?.endCoordinates?.height ?? 0;
+      // No se sube el alto completo: el contenedor arranca en top:80 y subirlo
+      // de mas lo metaria bajo la barra de estado. Con ~45% el destino y las
+      // primeras sugerencias quedan sobre el teclado.
+      setKeyboardShift(Math.min(height * 0.45, 140));
+    };
+    const onHide = () => setKeyboardShift(0);
+    const showSub = Keyboard.addListener(showEvent, onShow);
+    const hideSub = Keyboard.addListener(hideEvent, onHide);
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
   const [addresses, setAddresses] = useState([]);
   const [newAddress, setNewAddress] = useState("");
   const settings = useSelector(selectSettings);
@@ -606,6 +634,13 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
   ); // Ajusta el tiempo de debounce según sea necesario
 
   const takePhoto = async (variable: "profile" | "verifyId") => {
+    // Ver common/utils/cameraPresentation: iOS no presenta la camara con el
+    // modal de seleccion todavia abierto.
+    await closeModalBeforeCamera(() => {
+      setModalVisibleImage(false);
+      setModalVisibleImageVerify(false);
+    });
+
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
 
     if (permissionResult.granted === false) {
@@ -1434,7 +1469,7 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
             </View>
 
             {/* Inputs flotantes */}
-            <View style={{ position: 'absolute', top: 80, width: '100%', zIndex: 1, padding: 20 }}>
+            <View style={{ position: 'absolute', top: 80 - keyboardShift, width: '100%', zIndex: 1, padding: 20 }}>
               {/* Input de origen */}
               <GooglePlacesAutocomplete
                 ref={originAutocompleteRef}
@@ -2040,6 +2075,9 @@ const lightStyles = StyleSheet.create({
   },
   listView: {
     backgroundColor: "rgba(255, 255, 255, 0.9)",
+    // Sin tope, la lista de sugerencias crece hacia abajo y sus ultimos
+    // resultados quedan debajo del teclado, imposibles de tocar.
+    maxHeight: 220,
     borderRadius: 14,
     marginHorizontal: 20,
     shadowColor: "#00204a",

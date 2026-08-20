@@ -22,6 +22,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { RootState } from "@/common/store";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import * as ImagePicker from "expo-image-picker";
+import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import * as FileSystem from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import defaultProfileImage from "./../../assets/images/Avatar/1.png";
@@ -271,6 +272,16 @@ const DocumentsScreen = ({ navigation }: Props) => {
   const selectImage = async (fromCamera: boolean) => {
     let result;
     if (fromCamera) {
+      // Ver common/utils/cameraPresentation: en iOS el <Modal> abierto impide
+      // presentar la camara. Ademas aqui nunca se pedia el permiso, asi que en
+      // un dispositivo limpio la camara no abria y no habia forma de saber por que.
+      await closeModalBeforeCamera(() => setModalVisible(false));
+
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== "granted") {
+        showAlert('warning', 'Permiso requerido', 'Necesitamos acceso a la camara para tomar la foto del documento.');
+        return;
+      }
       result = await ImagePicker.launchCameraAsync();
     } else {
       result = await ImagePicker.launchImageLibraryAsync();

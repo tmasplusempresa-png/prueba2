@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import axios from "axios";
 import LottieView from "lottie-react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -710,6 +711,10 @@ const CarsEditScreen = ({ navigation }: any) => {
 
     try {
       if (fromCamera) {
+        // Ver common/utils/cameraPresentation: en iOS la camara no se presenta
+        // mientras el modal de seleccion siga abierto.
+        await closeModalBeforeCamera(() => setSelectModalVisible(false));
+
         const { status } = await ImagePicker.requestCameraPermissionsAsync();
         if (status !== "granted") {
           showAlert(

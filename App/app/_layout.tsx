@@ -43,6 +43,40 @@ if ((TextInput as any).defaultProps == null) (TextInput as any).defaultProps = {
  * antes de que las rutas hijas (p. ej. index.tsx) intenten navegar.
  */
 export default function RootLayout() {
+  // Permiso de notificaciones al arrancar, antes del login y por igual para
+  // cliente y conductor. Antes se pedia dentro de onAuthStateChange, o sea solo
+  // despues de iniciar sesion: quien nunca llegaba a loguearse no lo veia, y en
+  // el video de App Review el dialogo aparecia tarde y mezclado con el resto.
+  // Aqui solo se pide el permiso; el token de push se sigue obteniendo tras el
+  // login (necesita el usuario), y para entonces el permiso ya esta concedido.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // Expo Go no soporta push remotas; pedir el permiso ahi solo confunde.
+        if (Constants.appOwnership === 'expo') return;
+
+        const Device = await import('expo-device');
+        if (!Device.isDevice) return;
+
+        const Notifications = await import('expo-notifications');
+        const { status } = await Notifications.getPermissionsAsync();
+        // Solo se pregunta si el usuario aun no ha decidido. Si ya nego, iOS no
+        // vuelve a mostrar el dialogo y reintentarlo no aporta nada.
+        if (cancelled || status !== 'undetermined') return;
+
+        await Notifications.requestPermissionsAsync();
+      } catch (e) {
+        console.warn('No se pudo solicitar el permiso de notificaciones:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {

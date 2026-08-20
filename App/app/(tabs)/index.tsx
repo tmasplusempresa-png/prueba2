@@ -46,6 +46,7 @@ import * as Animatable from "react-native-animatable";
 import { Ionicons, AntDesign, MaterialIcons } from "@expo/vector-icons";
 import RNPickerSelect from "react-native-picker-select";
 import * as ImagePicker from "expo-image-picker";
+import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import { Button, Input } from "react-native-elements";
 import { ActivityIndicator } from "react-native"; // Aseg�rate de importar ActivityIndicator
 import axios from "axios";
@@ -1499,6 +1500,13 @@ const MapScreen = () => {
   }, [dispatch, user]);
 
   const takePhoto = async (variable: "profile" | "verifyId") => {
+    // El boton vive dentro de un <Modal>; en iOS hay que cerrarlo antes o la
+    // camara no se presenta. Ver common/utils/cameraPresentation.
+    await closeModalBeforeCamera(() => {
+      setModalVisibleImage(false);
+      setModalVisibleImageVerify(false);
+    });
+
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
 
     if (permissionResult.granted === false) {
