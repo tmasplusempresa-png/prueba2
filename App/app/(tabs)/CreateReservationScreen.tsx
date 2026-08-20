@@ -315,21 +315,30 @@ const CreateReservationScreen = () => {
     };
   }, [keyboardOffsetAnim, mapKeyboardOffsetAnim]);
 
-  /* ── Fit map to both markers ── */
+  /* ── Enfoque del mapa: centra en cada punto al ingresarlo (origen o destino,
+     manual o automático). Cuando ya hay ruta trazada, el encuadre completo lo
+     hace el efecto "Animar mapa cuando aparece la ruta" de más abajo. ── */
   useEffect(() => {
-    if (origin?.latitude && destination?.latitude && mapRef.current) {
-      // Si tenemos la ruta completa, usar eso; si no, solo los 2 puntos
-      const coordsToFit = routeCoords.length > 0 
-        ? routeCoords 
-        : [
-            { latitude: origin.latitude, longitude: origin.longitude },
-            { latitude: destination.latitude, longitude: destination.longitude },
-          ];
-      
-      mapRef.current.fitToCoordinates(coordsToFit, {
-        edgePadding: { top: 200, right: 50, bottom: 280, left: 50 },
-        animated: true,
-      });
+    if (!mapRef.current) return;
+
+    // Ya hay ruta calculada → el efecto de abajo la encuadra. No competir.
+    if (routeCoords.length > 2) return;
+
+    // Destino recién ingresado (aún sin ruta) → centrar en el destino.
+    if (destination?.latitude) {
+      mapRef.current.animateToRegion(
+        { latitude: destination.latitude, longitude: destination.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+        600,
+      );
+      return;
+    }
+
+    // Solo origen todavía → centrar en el origen.
+    if (origin?.latitude) {
+      mapRef.current.animateToRegion(
+        { latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+        600,
+      );
     }
   }, [origin, destination, routeCoords]);
 
