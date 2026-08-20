@@ -371,13 +371,15 @@ const RootLayout = () => {
           if (_messagingModule) {
             const m = typeof _messagingModule === 'function' ? _messagingModule() : _messagingModule;
             if (m && typeof m.onMessage === 'function') {
-              unsubscribeMessage = m.onMessage(async (remoteMessage: any) => {
-                const { title = 'Nueva Notificación', message = 'Has recibido una nueva notificación' } = remoteMessage.data || {};
-                try {
-                  await Notifications.scheduleNotificationAsync({ content: { title, body: message }, trigger: null });
-                } catch (nerr) {
-                  console.warn('Could not schedule notification (expo-notifications not available):', nerr);
-                }
+              // ⚠️ NO re-presentar la notificación aquí. Expo Push entrega por
+              // debajo vía FCM, así que este `onMessage` recibe el MISMO mensaje
+              // que expo-notifications YA muestra; volver a llamar
+              // `scheduleNotificationAsync` generaba una notificación DUPLICADA
+              // en la cortina (dos al tiempo). Dejamos expo-notifications como
+              // ÚNICO presentador. Se conserva la suscripción por si más adelante
+              // se necesita procesar `data` (sin re-presentar).
+              unsubscribeMessage = m.onMessage(async (_remoteMessage: any) => {
+                // intencionalmente vacío: sin re-presentación para evitar duplicados
               });
             }
           }

@@ -211,7 +211,13 @@ module.exports = {
         [
             "expo-notifications",
             {
-                "icon": "./assets/images/logo1024x1024.png",
+                // Ícono de la barra de estado: DEBE ser una silueta blanca sobre
+                // fondo transparente. Android usa solo el canal alfa y lo pinta
+                // blanco; un logo RGB sin alfa (logo1024x1024.png) salía
+                // recortado/como cuadro blanco. `color` es el tinte que Android
+                // aplica al ícono y al acento de la notificación.
+                "icon": "./assets/images/notification-icon.png",
+                "color": "#00E5FF",
                 "sounds": [
                     "./assets/sounds/notifi.mpeg",
                     "./assets/sounds/horn.wav",
