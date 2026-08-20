@@ -43,6 +43,15 @@ En ambos casos el video final es 100% metraje de iPhone. La contraparte es otro 
 
 ## Bloque 3 — Login y permisos
 
+> **Sí, aquí se cambia de cuenta a propósito.** No inicias sesión con la que acabas
+> de registrar. En el video juegan tres cuentas y cada una demuestra algo distinto:
+> la **desechable** demuestra el registro (Bloque 2) y el borrado (Bloque 9); la
+> **demo cliente** hace el viaje y, sobre todo, prueba que las credenciales que le
+> entregaste a Apple funcionan — "no pudimos iniciar sesión con las credenciales
+> proporcionadas" es de las causas de rechazo más comunes; la **demo conductor**
+> cubre el Bloque 6. La cuenta demo no se puede borrar en el video porque el
+> revisor la necesita viva para entrar él mismo.
+
 6. Iniciar sesión con la **cuenta demo cliente**.
 7. Dejar que salgan y aceptar en cámara los diálogos de:
    - Ubicación *When In Use*
