@@ -56,24 +56,14 @@ try {
 
     if (_messagingModule) {
       try {
-        _messagingModule().setBackgroundMessageHandler(async (remoteMessage: any) => {
-          try {
-            const { data } = remoteMessage || {};
-            if (data) {
-              const body = typeof data.body === 'string' ? (JSON.parse(data.body).message || 'Nueva notificación') : 'Nueva notificación';
-              try {
-                const Notifications = await import('expo-notifications');
-                await Notifications.scheduleNotificationAsync({
-                  content: { title: data.title || 'Nueva Notificación', body },
-                  trigger: null,
-                });
-              } catch (nerr) {
-                console.warn('Could not schedule notification (expo-notifications not available):', nerr);
-              }
-            }
-          } catch (error) {
-            console.error('Error manejando el mensaje en segundo plano:', error);
-          }
+        _messagingModule().setBackgroundMessageHandler(async (_remoteMessage: any) => {
+          // ⚠️ NO presentar la notificación aquí. Los push de T+Plus llegan vía
+          // FCM con payload `notification`, así que Android YA muestra la
+          // notificación en segundo plano automáticamente. Llamar
+          // `scheduleNotificationAsync` aquí mostraba una SEGUNDA notificación
+          // → DUPLICADO en background (el gemelo del bug del `onMessage`).
+          // Se mantiene el handler registrado (react-native-firebase lo exige)
+          // pero sin re-presentar. El SO / expo-notifications = único presentador.
         });
       } catch (err) {
         console.warn('No se pudo configurar setBackgroundMessageHandler:', err);
