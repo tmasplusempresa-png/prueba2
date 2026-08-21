@@ -26,7 +26,7 @@ const buildTitle = (booking: any, role: 'customer' | 'driver'): string => {
   if (role === 'customer') {
     if (booking.status === 'ACCEPTED') return '✅ Tu viaje fue aceptado';
     if (booking.status === 'ARRIVED') return '🚗 Tu conductor ha llegado';
-    if (booking.status === 'STARTED' || booking.status === 'IN_PROGRESS' || booking.status === 'TRIP_STARTED') return '▶️ Viaje en corso';
+    if (booking.status === 'STARTED' || booking.status === 'IN_PROGRESS' || booking.status === 'TRIP_STARTED') return '▶️ Viaje en curso';
     return 'Viaje activo';
   }
   return 'Viaje activo';
@@ -165,7 +165,19 @@ export const notifyTripStateChange = async (
   previousStatus?: string
 ): Promise<void> => {
   if (!booking?.id) return;
-  
+
+  // ⛔ Estados cuyo push al CLIENTE ya envía el servidor (Database Webhook
+  // `bookingWebhookDispatcher`): evitamos la alerta local para no DUPLICAR.
+  // El sticky (`scheduleActiveTripNotification`) es aparte y se mantiene.
+  // No aplica al conductor: el servidor no le manda estos estados a él.
+  // ⚠️ STARTED requiere que el dispatcher tenga el `case "STARTED"` desplegado;
+  // si no, el cliente se queda SIN aviso de inicio (desplegar Edge Function primero).
+  const SERVER_PUSHED_CUSTOMER_STATES = ['ACCEPTED', 'ARRIVED', 'STARTED', 'COMPLETE'];
+  if (role === 'customer' && SERVER_PUSHED_CUSTOMER_STATES.includes(booking.status)) {
+    console.log(`[TripNotification] alerta local omitida (${booking.status}) — la envía el servidor`);
+    return;
+  }
+
   try {
     const Notifications = await import('expo-notifications');
     await ensureActiveTripChannel();

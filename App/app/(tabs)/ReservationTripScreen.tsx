@@ -591,13 +591,11 @@ const ReservationTripScreen = () => {
                 '🚗 Viaje en curso',
                 `Llevando a ${reservation.customer_name} al destino — ${reservation.drop_address || 'Destino'}`,
               ).catch(() => {});
-              if (reservation.customer_token) {
-                sendPushNotification(
-                  reservation.customer_token,
-                  '¡Tu viaje ha comenzado! 🚗',
-                  `Tu reserva ${reservation.reference} está en camino al destino.`,
-                );
-              }
+              // ⛔ Push de "viaje iniciado" al cliente: se quita el envío legacy
+              // (treasupdate) desde aquí. STARTED lo notifica la alerta local del
+              // cliente (`notifyTripStateChange`), fuente única para este estado.
+              // (Opcional futuro: mover STARTED al dispatcher del servidor y
+              //  excluirlo también del local — ver plan de notificaciones.)
             } catch {
               showAlert('error', 'Error', 'No se pudo iniciar el viaje.');
             } finally {
