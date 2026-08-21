@@ -1,9 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Image,
   Linking,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
   Platform,
   ScrollView,
   Share,
@@ -36,9 +34,6 @@ type PickerItem = {
   isSOS?: boolean;
 };
 
-const ITEM_H = 44;
-const PICKER_H = 280;
-const PICKER_PAD = (PICKER_H - ITEM_H) / 2;
 const BG_IMAGE = require("../../assets/images/bg.png");
 
 const ProfileScreen = ({ navigation }: Props) => {
@@ -59,7 +54,6 @@ const ProfileScreen = ({ navigation }: Props) => {
     setAlertButtons(buttons || [{ text: 'OK', onPress: () => setAlertVisible(false) }]);
     setAlertVisible(true);
   };
-  const [activeIndex, setActiveIndex] = useState(0);
   const [dbProfile, setDbProfile] = useState<{
     firstName: string | null;
     lastName: string | null;
@@ -83,7 +77,6 @@ const ProfileScreen = ({ navigation }: Props) => {
   });
   // Código de referido PROPIO (AAA-XXXXX) + conteo. null = aún generándose.
   const [ownReferral, setOwnReferral] = useState<DriverReferralCode | null>(null);
-  const pickerRef = useRef<ScrollView>(null);
   const currentUserType = String(
     dbProfile.userType ||
       user?.usertype ||
@@ -393,23 +386,6 @@ const ProfileScreen = ({ navigation }: Props) => {
     return out;
   }, [baseItems, currentUserType, navigation, confirmarEliminarCuenta]);
 
-  const onPickerScroll = useCallback(
-    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const y = e.nativeEvent.contentOffset.y;
-      const idx = Math.max(0, Math.min(items.length - 1, Math.round(y / ITEM_H)));
-      if (idx !== activeIndex) {
-        setActiveIndex(idx);
-      }
-    },
-    [activeIndex, items.length]
-  );
-
-  const selectAndRun = (index: number) => {
-    setActiveIndex(index);
-    pickerRef.current?.scrollTo({ y: index * ITEM_H, animated: true });
-    setTimeout(() => items[index]?.onPress(), 90);
-  };
-
   const goBackFromProfile = () => {
     if (navigation.canGoBack()) {
       navigation.goBack();
@@ -454,7 +430,7 @@ const ProfileScreen = ({ navigation }: Props) => {
                     key={n}
                     name="star"
                     size={14}
-                    color={filled ? "#FFD700" : "rgba(255,255,255,0.25)"}
+                    color={filled ? "#FFB300" : "rgba(255,255,255,0.25)"}
                     style={{ marginRight: 2 }}
                   />
                 );
@@ -503,52 +479,34 @@ const ProfileScreen = ({ navigation }: Props) => {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.pickerContainer}>
-          <View pointerEvents="none" style={styles.pickerOverlayTop} />
-          <View pointerEvents="none" style={styles.pickerOverlayBottom} />
-          <View pointerEvents="none" style={styles.pickerHighlightZone} />
-
-          <ScrollView
-            ref={pickerRef}
-            style={styles.pickerScroll}
-            contentContainerStyle={{ paddingVertical: PICKER_PAD }}
-            showsVerticalScrollIndicator={false}
-            snapToInterval={ITEM_H}
-            decelerationRate="fast"
-            onMomentumScrollEnd={onPickerScroll}
-            onScroll={onPickerScroll}
-            scrollEventThrottle={16}
-          >
-            {items.map((item, i) => {
-              const isActive = i === activeIndex;
-              return (
-                <TouchableOpacity
-                  key={item.key}
-                  style={styles.pickerItem}
-                  activeOpacity={0.8}
-                  onPress={() => selectAndRun(i)}
-                >
-                  <View style={styles.pickerIconWrap}>
-                    <Ionicons
-                      name={item.icon}
-                      size={isActive ? 20 : 18}
-                      color={item.isSOS && isActive ? "#E91E63" : "#00E5FF"}
-                      style={{ opacity: isActive ? 1 : 0.56 }}
-                    />
-                  </View>
-                  <Text
-                    style={[
-                      styles.pickerText,
-                      isActive && styles.pickerTextActive,
-                      item.isSOS && isActive && styles.pickerTextSOS,
-                    ]}
-                  >
-                    {item.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+        <View style={styles.menuList}>
+          {items.map((item) => (
+            <TouchableOpacity
+              key={item.key}
+              style={styles.menuItem}
+              activeOpacity={0.8}
+              onPress={() => item.onPress()}
+            >
+              <View style={styles.menuIconWrap}>
+                <Ionicons
+                  name={item.icon}
+                  size={20}
+                  color={item.isSOS ? "#E91E63" : "rgba(255,255,255,0.72)"}
+                />
+              </View>
+              <Text
+                style={[styles.menuText, item.isSOS ? styles.menuTextSOS : null]}
+                numberOfLines={1}
+              >
+                {item.label}
+              </Text>
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={item.isSOS ? "rgba(233,30,99,0.7)" : "rgba(255,255,255,0.35)"}
+              />
+            </TouchableOpacity>
+          ))}
         </View>
 
         <View style={styles.logoutWrap}>
@@ -638,21 +596,21 @@ const styles = StyleSheet.create({
     paddingBottom: 36,
   },
   userCard: {
-    marginTop: 20,
+    marginTop: 16,
     marginBottom: 16,
-    padding: 18,
-    borderRadius: 24,
+    padding: 16,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.22)",
-    backgroundColor: "rgba(10,46,61,0.56)",
+    borderColor: "rgba(0,229,255,0.45)",
+    backgroundColor: "rgba(8,36,48,0.72)",
     flexDirection: "row",
     alignItems: "center",
     overflow: "hidden",
   },
   avatarRing: {
-    width: 66,
-    height: 66,
-    borderRadius: 33,
+    width: 70,
+    height: 70,
+    borderRadius: 35,
     padding: 2,
     marginRight: 14,
     backgroundColor: "#00E5FF",
@@ -660,11 +618,11 @@ const styles = StyleSheet.create({
   avatarImage: {
     width: "100%",
     height: "100%",
-    borderRadius: 31,
+    borderRadius: 33,
   },
   avatarFallback: {
     flex: 1,
-    borderRadius: 31,
+    borderRadius: 33,
     backgroundColor: "#0A2E3D",
     alignItems: "center",
     justifyContent: "center",
@@ -680,7 +638,7 @@ const styles = StyleSheet.create({
   },
   profilePhone: {
     fontSize: 13,
-    color: "rgba(255,255,255,0.72)",
+    color: "rgba(255,255,255,0.65)",
   },
   ratingRow: {
     flexDirection: "row",
@@ -690,128 +648,88 @@ const styles = StyleSheet.create({
   ratingText: {
     marginLeft: 6,
     fontSize: 12,
-    color: "#FFD700",
+    color: "#FFB300",
     fontWeight: "600",
   },
   profileBadgeRow: {
     flexDirection: "row",
-    marginTop: 6,
+    marginTop: 8,
   },
   profileBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,229,255,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.28)",
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: "#00E5FF",
   },
   profileBadgeText: {
-    color: "#00E5FF",
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.6,
+    color: "#042029",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
     textTransform: "uppercase",
   },
   profileMeta: {
     marginTop: 6,
     fontSize: 12,
-    color: "#B6D4E0",
-    fontWeight: "600",
+    color: "rgba(255,255,255,0.62)",
+    fontWeight: "500",
   },
   profileMetaMuted: {
     marginTop: 4,
     fontSize: 11,
-    color: "rgba(255,255,255,0.55)",
+    color: "rgba(255,255,255,0.45)",
     fontStyle: "italic",
   },
   editBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.24)",
+    borderColor: "rgba(0,229,255,0.55)",
     backgroundColor: "rgba(0,229,255,0.08)",
     alignItems: "center",
     justifyContent: "center",
   },
-  pickerContainer: {
-    height: PICKER_H,
-    borderRadius: 18,
-    overflow: "hidden",
+  menuList: {
+    marginTop: 2,
+  },
+  menuItem: {
+    minHeight: 54,
+    marginBottom: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: "rgba(10,28,38,0.88)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.14)",
-    backgroundColor: "#0D1117",
-  },
-  pickerOverlayTop: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: "38%",
-    zIndex: 4,
-    backgroundColor: "rgba(0,0,0,0.34)",
-  },
-  pickerOverlayBottom: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: "38%",
-    zIndex: 4,
-    backgroundColor: "rgba(0,0,0,0.34)",
-  },
-  pickerHighlightZone: {
-    position: "absolute",
-    top: "50%",
-    left: 0,
-    right: 0,
-    height: ITEM_H,
-    marginTop: -ITEM_H / 2,
-    zIndex: 3,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderTopColor: "rgba(0,229,255,0.22)",
-    borderBottomColor: "rgba(0,229,255,0.22)",
-    backgroundColor: "rgba(0,229,255,0.06)",
-  },
-  pickerScroll: {
-    flex: 1,
-  },
-  pickerItem: {
-    height: ITEM_H,
-    paddingHorizontal: 22,
+    borderColor: "rgba(255,255,255,0.06)",
     flexDirection: "row",
     alignItems: "center",
   },
-  pickerIconWrap: {
+  menuIconWrap: {
     width: 28,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 12,
   },
-  pickerText: {
-    color: "rgba(255,255,255,0.35)",
-    fontSize: 19,
+  menuText: {
+    flex: 1,
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 15,
     fontWeight: "500",
-    letterSpacing: -0.25,
   },
-  pickerTextActive: {
-    color: "#00E5FF",
-    fontSize: 22,
-    fontWeight: "700",
-  },
-  pickerTextSOS: {
+  menuTextSOS: {
     color: "#E91E63",
+    fontWeight: "600",
   },
   logoutWrap: {
-    marginTop: 20,
-    marginHorizontal: 10,
+    marginTop: 12,
+    marginHorizontal: 4,
   },
   logoutBtn: {
-    height: 48,
-    borderRadius: 14,
+    height: 50,
+    borderRadius: 25,
     borderWidth: 1,
-    borderColor: "#FFFFFF",
+    borderColor: "rgba(255,255,255,0.85)",
     backgroundColor: "transparent",
     alignItems: "center",
     justifyContent: "center",

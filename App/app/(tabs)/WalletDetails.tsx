@@ -166,13 +166,22 @@ const WalletDetails = ({ navigation }: Props) => {
     ).start();
 
 
+    shineAnim.setValue(0);
     Animated.loop(
-      Animated.timing(shineAnim, {
-        toValue: 1,
-        duration: 6000,
-        easing: Easing.inOut(Easing.ease),
-        useNativeDriver: true,
-      })
+      Animated.sequence([
+        Animated.timing(shineAnim, {
+          toValue: 1,
+          duration: 2200,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.delay(800),
+        Animated.timing(shineAnim, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ])
     ).start();
   }, [glow1, glow2, glow3, shineAnim]);
 
@@ -214,20 +223,22 @@ const WalletDetails = ({ navigation }: Props) => {
   const hasHistory = Array.isArray(walletHistory) && walletHistory.length > 0;
 
   // 🟢 Memoizar el estado de membresía
-  const { membershipStatus, expiryDate, startDate, renewalText } = useMemo(() => {
-    let status = "❌ Sin datos";
+  const { membershipStatus, expiryDate, startDate } = useMemo(() => {
+    let status = "Sin datos";
+    let isActive = false;
 
     if (activeMembership) {
       const estado = activeMembership.status?.toUpperCase();
 
       if (estado === 'ACTIVA' && daysRemaining > 0) {
-        status = "✅ ACTIVA";
+        status = "ACTIVA";
+        isActive = true;
       } else if (estado === 'ACTIVA' && daysRemaining <= 0) {
-        status = "⏰ VENCIDA";
+        status = "VENCIDA";
       } else if (estado === 'PENDIENTE') {
-        status = "⏳ PENDIENTE";
+        status = "PENDIENTE";
       } else if (estado === 'CANCELADA') {
-        status = "❌ CANCELADA";
+        status = "CANCELADA";
       } else {
         status = `${estado}`;
       }
@@ -247,26 +258,100 @@ const WalletDetails = ({ navigation }: Props) => {
       ? "Tu membresía está pendiente de activación"
       : "No tienes membresía registrada. Adquiere una para poder aceptar servicios.";
 
-    return { membershipStatus: status, expiryDate: expiry, startDate: start, renewalText: renewal };
+    return {
+      membershipStatus: status,
+      isMembershipActive: isActive,
+      expiryDate: expiry,
+      startDate: start,
+      renewalText: renewal,
+    };
   }, [activeMembership, daysRemaining]);
+
+  const [cardSize, setCardSize] = useState({ width: 0, height: 0 });
 
   const shineX = useMemo(
     () =>
       shineAnim.interpolate({
-        inputRange: [0, 0.8, 1],
-        outputRange: [-320, -320, 420],
+        inputRange: [0, 1],
+        outputRange: [-(cardSize.width || 320), (cardSize.width || 320) + 40],
       }),
-    [shineAnim]
+    [shineAnim, cardSize.width]
   );
 
-  const cardGlowOpacity = useMemo(
-    () =>
-      glow1.interpolate({
-        inputRange: [0, 1],
-        outputRange: [0.16, 0.28],
-      }),
-    [glow1]
-  );
+  const shineHeight = Math.max(cardSize.height * 1.6, 420);
+
+  const statusTone = useMemo(() => {
+    switch (membershipStatus) {
+      case "ACTIVA":
+        return {
+          accent: "#76FF03",
+          softBg: "rgba(118,255,3,0.10)",
+          border: "rgba(118,255,3,0.32)",
+          label: "rgba(200,255,170,0.72)",
+          chipBg: "rgba(118,255,3,0.16)",
+        };
+      case "VENCIDA":
+        return {
+          accent: "#FFD54F",
+          softBg: "rgba(255,213,79,0.10)",
+          border: "rgba(255,213,79,0.32)",
+          label: "rgba(255,236,179,0.72)",
+          chipBg: "rgba(255,213,79,0.16)",
+        };
+      case "PENDIENTE":
+        return {
+          accent: "#7DD3FC",
+          softBg: "rgba(125,211,252,0.10)",
+          border: "rgba(125,211,252,0.32)",
+          label: "rgba(186,230,253,0.72)",
+          chipBg: "rgba(125,211,252,0.16)",
+        };
+      case "CANCELADA":
+        return {
+          accent: "#FF6B6B",
+          softBg: "rgba(255,107,107,0.10)",
+          border: "rgba(255,107,107,0.32)",
+          label: "rgba(255,190,190,0.72)",
+          chipBg: "rgba(255,107,107,0.16)",
+        };
+      default:
+        return {
+          accent: "#9FB6C1",
+          softBg: "rgba(159,182,193,0.10)",
+          border: "rgba(159,182,193,0.3)",
+          label: "rgba(200,214,220,0.72)",
+          chipBg: "rgba(159,182,193,0.16)",
+        };
+    }
+  }, [membershipStatus]);
+
+  const daysTone = useMemo(() => {
+    if (daysRemaining > 7) {
+      return {
+        accent: "#76FF03",
+        softBg: "rgba(118,255,3,0.10)",
+        border: "rgba(118,255,3,0.32)",
+        label: "rgba(200,255,170,0.72)",
+        chipBg: "rgba(118,255,3,0.16)",
+      };
+    }
+    if (daysRemaining > 0) {
+      return {
+        accent: "#FFD54F",
+        softBg: "rgba(255,213,79,0.10)",
+        border: "rgba(255,213,79,0.32)",
+        label: "rgba(255,236,179,0.72)",
+        chipBg: "rgba(255,213,79,0.16)",
+      };
+    }
+    return {
+      accent: "#FF6B6B",
+      softBg: "rgba(255,107,107,0.10)",
+      border: "rgba(255,107,107,0.32)",
+      label: "rgba(255,190,190,0.72)",
+      chipBg: "rgba(255,107,107,0.16)",
+    };
+  }, [daysRemaining]);
 
   return (
     <View style={styles.container}>
@@ -279,7 +364,7 @@ const WalletDetails = ({ navigation }: Props) => {
           style={styles.headerIconBtn}
           onPress={() => Linking.openURL("https://wa.me/573118841054")}
         >
-          <MaterialIcons name="help" size={22} color="#00E5FF" />
+          <MaterialIcons name="help-outline" size={22} color="#00E5FF" />
         </TouchableOpacity>
       </View>
       <ScrollView
@@ -288,8 +373,24 @@ const WalletDetails = ({ navigation }: Props) => {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.cardWrap}>
-          <View style={styles.membershipCard}>
-            <Animated.View style={[styles.cardShine, { transform: [{ translateX: shineX }] }]} />
+          <View
+            style={styles.membershipCard}
+            onLayout={(e) => {
+              const { width, height } = e.nativeEvent.layout;
+              setCardSize({ width, height });
+            }}
+          >
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.cardShine,
+                {
+                  height: shineHeight,
+                  top: -shineHeight * 0.12,
+                  transform: [{ translateX: shineX }, { rotate: "-20deg" }],
+                },
+              ]}
+            />
             <View style={styles.cardTopRow}>
               <View style={styles.cardLogoWrap}>
                 <Image
@@ -297,43 +398,71 @@ const WalletDetails = ({ navigation }: Props) => {
                   style={styles.cardLogo}
                 />
               </View>
+            </View>
+
+            <View
+              style={[
+                styles.infoRowBox,
+                {
+                  backgroundColor: statusTone.softBg,
+                  borderColor: statusTone.border,
+                },
+              ]}
+            >
+              <Text
+                style={[styles.infoRowLabel, { color: statusTone.label || statusTone.accent }]}
+                numberOfLines={1}
+              >
+                ESTADO MEMBRESIA
+              </Text>
               <View
                 style={[
                   styles.statusPill,
-                  activeMembership?.status === 'ACTIVA' && daysRemaining > 0 ? styles.statusPillActive : styles.statusPillExpired,
+                  {
+                    backgroundColor: statusTone.chipBg,
+                    borderColor: statusTone.border,
+                  },
                 ]}
               >
-                <View
-                  style={[
-                    styles.statusDot,
-                    activeMembership?.status === 'ACTIVA' && daysRemaining > 0 ? styles.statusDotActive : styles.statusDotExpired,
-                  ]}
-                />
+                <View style={[styles.statusDot, { backgroundColor: statusTone.accent }]} />
                 <Text
-                  style={[
-                    styles.statusPillText,
-                    activeMembership?.status === 'ACTIVA' && daysRemaining > 0 ? styles.statusPillTextActive : styles.statusPillTextExpired,
-                  ]}
+                  style={[styles.statusPillText, { color: statusTone.accent }]}
+                  numberOfLines={1}
                 >
                   {membershipStatus}
                 </Text>
               </View>
             </View>
 
-            {/* 🎯 MOSTRAR DÍAS RESTANTES DESTACADO */}
             {activeMembership && (
-              <View style={[
-                styles.daysRemainBox,
-                daysRemaining > 7 ? styles.daysRemainBoxGreen :
-                daysRemaining > 0 ? styles.daysRemainBoxYellow :
-                styles.daysRemainBoxRed
-              ]}>
-                <Text style={styles.daysRemainLabel}>DÍAS RESTANTES</Text>
-                <Text style={styles.daysRemainValue}>{Math.max(daysRemaining, 0)}</Text>
+              <View
+                style={[
+                  styles.infoRowBox,
+                  {
+                    backgroundColor: daysTone.softBg,
+                    borderColor: daysTone.border,
+                  },
+                ]}
+              >
+                <Text style={[styles.infoRowLabel, { color: daysTone.label }]} numberOfLines={1}>
+                  DIAS RESTANTES
+                </Text>
+                <View
+                  style={[
+                    styles.statusPill,
+                    {
+                      backgroundColor: daysTone.chipBg,
+                      borderColor: daysTone.border,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.statusPillText, { color: daysTone.accent }]}>
+                    {Math.max(daysRemaining, 0)}
+                  </Text>
+                </View>
               </View>
             )}
 
-            {/* 🔄 INDICADOR DE LOADING */}
             {isLoadingMemberships && !activeMembership && (
               <View style={styles.loadingSection}>
                 <ActivityIndicator size="large" color="#00E5FF" />
@@ -342,32 +471,28 @@ const WalletDetails = ({ navigation }: Props) => {
             )}
 
             {activeMembership ? (
-              <>
-                <View style={styles.cardFooter}>
-                  <View>
-                    <Text style={styles.cardFooterLabel}>Membresia</Text>
-                    <Text style={styles.cardFooterValue}>
-                      Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estándar'}
-                    </Text>
-                  </View>
-                  <View style={styles.cardFooterRight}>
-                    <Text style={styles.cardFooterLabel}>Vence</Text>
-                    <Text style={styles.cardFooterDate}>{expiryDate}</Text>
-                  </View>
+              <View style={styles.detailsGrid}>
+                <View style={styles.detailCell}>
+                  <Text style={styles.detailLabel}>MEMBRESIA</Text>
+                  <Text style={styles.detailValueAccent}>
+                    Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estandar'}
+                  </Text>
                 </View>
-
-                {/* 📊 MOSTRAR MÁS DETALLES */}
-                <View style={styles.cardDetailsRow}>
-                  <View style={styles.cardDetailItem}>
-                    <Text style={styles.cardDetailLabel}>Costo</Text>
-                    <Text style={styles.cardDetailValue}>${Number(activeMembership?.costo || 0).toLocaleString("es-CO")}</Text>
-                  </View>
-                  <View style={styles.cardDetailItem}>
-                    <Text style={styles.cardDetailLabel}>Inicio</Text>
-                    <Text style={styles.cardDetailValue}>{startDate}</Text>
-                  </View>
+                <View style={styles.detailCell}>
+                  <Text style={styles.detailLabel}>VENCE</Text>
+                  <Text style={styles.detailValue}>{expiryDate}</Text>
                 </View>
-              </>
+                <View style={styles.detailCell}>
+                  <Text style={styles.detailLabel}>COSTO</Text>
+                  <Text style={styles.detailValue}>
+                    ${Number(activeMembership?.costo || 0).toLocaleString("es-CO")}
+                  </Text>
+                </View>
+                <View style={styles.detailCell}>
+                  <Text style={styles.detailLabel}>INICIO</Text>
+                  <Text style={styles.detailValue}>{startDate}</Text>
+                </View>
+              </View>
             ) : (
               <View style={styles.noMembershipSection}>
                 <Ionicons name="information-circle-outline" size={32} color="#FF6B6B" />
@@ -414,7 +539,7 @@ const WalletDetails = ({ navigation }: Props) => {
               <Ionicons name="alert-circle-outline" size={18} color="#FFFFFF" />
             </View>
             <View style={styles.alertTextWrap}>
-              <Text style={styles.alertTitle}>❌ Sin Membresía Activa</Text>
+              <Text style={styles.alertTitle}>Sin Membresía Activa</Text>
               <Text style={styles.alertSub}>No tienes una membresía registrada. Para poder aceptar servicios, necesitas adquirir una membresía.</Text>
             </View>
             <TouchableOpacity
@@ -432,40 +557,6 @@ const WalletDetails = ({ navigation }: Props) => {
           </View>
         )}
 
-        <View style={styles.statsRow}>
-          {/* Viajes - Comentado: Se quitó esta métrica de la interfaz */}
-          {/* <View style={styles.statCard}>
-            <View style={styles.statIconWrap}>
-              <Ionicons name="car-sport-outline" size={18} color="#00E5FF" />
-            </View>
-            <Text style={styles.statValue}>{walletHistory?.length || 0}</Text>
-            <Text style={styles.statLabel}>Viajes</Text>
-          </View> */}
-
-          {/* Ganado/Día - Comentado: Se quitó esta métrica de la interfaz */}
-          {/* <View style={styles.statCard}>
-            <View style={styles.statIconWrap}>
-              <Ionicons name="cash-outline" size={18} color="#00E5FF" />
-            </View>
-            <Text style={styles.statValue}>
-              ${activeMembership && activeMembership.periodo ? Number(walletBalance / activeMembership.periodo || 0).toLocaleString("es-CO") : 0}
-            </Text>
-            <Text style={styles.statLabel}>Ganado/Día</Text>
-          </View> */}
-
-          {/* Rating - Comentado: Se quitó esta métrica de la interfaz */}
-          {/* <View style={styles.statCard}>
-            <View style={styles.statIconWrap}>
-              <Ionicons name="star-outline" size={18} color="#00E5FF" />
-            </View>
-            <Text style={styles.statValue}>5.0</Text>
-            <Text style={styles.statLabel}>Rating</Text>
-          </View> */}
-        </View>
-
-        {/* Enlace de cobro externo (Mercado Pago). Apple prohibe sacar al
-            usuario de la app para pagar algo que desbloquea funcionalidad
-            dentro de ella, asi que en iOS este boton no se muestra. */}
         {PUEDE_COMPRAR_EN_APP && (
           <View style={styles.ctaWrap}>
             <TouchableOpacity
@@ -491,7 +582,7 @@ const WalletDetails = ({ navigation }: Props) => {
             key={mode}
             style={[
               styles.packageBtn,
-              idx === 1 && { marginTop: 10 },
+              idx === 1 ? { marginTop: 10 } : null,
             ]}
             onPress={() => navigation.navigate("ChosePlan", { mode })}
           >
@@ -576,21 +667,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingTop: 48,
     paddingHorizontal: 20,
-    paddingBottom: 10,
-    backgroundColor: "rgba(5,26,38,0.75)",
+    paddingBottom: 12,
   },
   headerIconBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(10,46,61,0.55)",
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "rgba(10,46,61,0.7)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.18)",
+    borderColor: "rgba(0,229,255,0.28)",
     alignItems: "center",
     justifyContent: "center",
   },
   headerText: {
-    fontSize: 19,
+    fontSize: 20,
     fontWeight: "700",
     color: "#FFFFFF",
   },
@@ -602,31 +692,31 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
   },
   cardWrap: {
-    marginTop: 10,
+    marginTop: 8,
     marginBottom: 14,
   },
   membershipCard: {
-    borderRadius: 26,
+    borderRadius: 22,
     paddingHorizontal: 18,
     paddingVertical: 18,
     width: "100%",
-    backgroundColor: "rgba(0, 55, 84, 0.9)",
+    backgroundColor: "rgba(8, 40, 56, 0.92)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.28)",
+    borderColor: "rgba(0,229,255,0.4)",
     overflow: "hidden",
+    position: "relative",
   },
   cardShine: {
     position: "absolute",
-    top: -20,
-    width: 140,
-    height: 300,
+    left: 0,
+    width: 120,
     backgroundColor: "rgba(255,255,255,0.08)",
-    transform: [{ rotate: "-20deg" }],
   },
   cardTopRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
+    justifyContent: "center",
     alignItems: "center",
+    marginBottom: 8,
   },
   cardLogoWrap: {
     flexDirection: "row",
@@ -636,11 +726,6 @@ const styles = StyleSheet.create({
     height: 56,
     borderRadius: 28,
     backgroundColor: "#FFFFFF",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 4,
   },
   cardLogo: {
     width: 40,
@@ -653,129 +738,73 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     lineHeight: 34,
   },
+  infoRowBox: {
+    borderRadius: 14,
+    minHeight: 48,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 10,
+    borderWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  infoRowLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    flex: 1,
+    marginRight: 8,
+  },
   statusPill: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 30,
-    backgroundColor: "rgba(0,229,255,0.14)",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.32)",
-    gap: 6,
-  },
-  statusPillExpired: {
-    backgroundColor: "transparent",
-    borderColor: "#FFFFFF",
-  },
-  statusPillActive: {
-    backgroundColor: "rgba(76, 175, 80, 0.14)",
-    borderColor: "rgba(76, 175, 80, 0.32)",
   },
   statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: "#00E5FF",
-  },
-  statusDotExpired: {
-    backgroundColor: "#FFFFFF",
-  },
-  statusDotActive: {
-    backgroundColor: "#4CAF50",
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 7,
   },
   statusPillText: {
-    color: "#00E5FF",
-    fontSize: 11,
-    fontWeight: "700",
-    textTransform: "uppercase",
-  },
-  statusPillTextExpired: {
-    color: "#FFFFFF",
-  },
-  statusPillTextActive: {
-    color: "#4CAF50",
-  },
-  daysRemainBox: {
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginVertical: 12,
-    borderWidth: 2,
-    alignItems: "center",
-  },
-  daysRemainBoxGreen: {
-    backgroundColor: "rgba(76, 175, 80, 0.1)",
-    borderColor: "#4CAF50",
-  },
-  daysRemainBoxYellow: {
-    backgroundColor: "rgba(255, 152, 0, 0.1)",
-    borderColor: "#00E5FF",
-  },
-  daysRemainBoxRed: {
-    backgroundColor: "rgba(244, 67, 54, 0.1)",
-    borderColor: "#E91E63",
-  },
-  daysRemainLabel: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: "rgba(255,255,255,0.7)",
-    letterSpacing: 1,
-    marginBottom: 4,
-  },
-  daysRemainValue: {
-    fontSize: 28,
+    fontSize: 14,
     fontWeight: "800",
-    color: "#00E5FF",
-  },
-  cardDetailsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(0,229,255,0.12)",
-  },
-  cardDetailItem: {
-    flex: 1,
-  },
-  cardDetailLabel: {
-    fontSize: 11,
-    color: "rgba(255,255,255,0.38)",
+    letterSpacing: 0,
     textTransform: "uppercase",
+    lineHeight: 18,
+  },
+  detailsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(0,229,255,0.14)",
+    paddingTop: 16,
+  },
+  detailCell: {
+    width: "50%",
+    marginBottom: 14,
+  },
+  detailLabel: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.45)",
+    fontWeight: "600",
+    letterSpacing: 0.8,
     marginBottom: 4,
   },
-  cardDetailValue: {
-    fontSize: 13,
-    color: "rgba(255,255,255,0.8)",
-    fontWeight: "600",
+  detailValue: {
+    fontSize: 15,
+    color: "#FFFFFF",
+    fontWeight: "700",
   },
-  cardFooter: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    borderTopWidth: 1,
-    borderTopColor: "rgba(0,229,255,0.16)",
-    paddingTop: 12,
-  },
-  cardFooterRight: {
-    alignItems: "flex-end",
-  },
-  cardFooterLabel: {
-    color: "rgba(255,255,255,0.38)",
-    fontSize: 11,
-    textTransform: "uppercase",
-  },
-  cardFooterValue: {
+  detailValueAccent: {
+    fontSize: 15,
     color: "#00E5FF",
-    fontSize: 14,
     fontWeight: "700",
-    marginTop: 2,
-  },
-  cardFooterDate: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 14,
-    fontWeight: "700",
-    marginTop: 2,
   },
   alertBanner: {
     marginBottom: 12,
@@ -824,55 +853,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
-  statsRow: {
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 16,
-  },
-  statCard: {
-    flex: 1,
-    borderRadius: 16,
-    paddingVertical: 13,
-    paddingHorizontal: 8,
-    backgroundColor: "rgba(10,46,61,0.6)",
-    borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.18)",
-    alignItems: "center",
-  },
-  statIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "rgba(0,229,255,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 6,
-  },
-  statValue: {
-    color: "#FFFFFF",
-    fontWeight: "800",
-    fontSize: 17,
-    textAlign: "center",
-  },
-  statLabel: {
-    marginTop: 2,
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 11,
-    textTransform: "uppercase",
-  },
   ctaWrap: {
+    marginTop: 4,
     marginBottom: 14,
   },
   ctaMain: {
-    borderRadius: 22,
+    borderRadius: 28,
     backgroundColor: "#00E5FF",
     paddingVertical: 16,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
-    gap: 8,
   },
   ctaMainText: {
+    marginLeft: 8,
     color: "#051A26",
     fontWeight: "800",
     fontSize: 16,
@@ -889,15 +883,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
   },
   packageBtnText: {
+    marginLeft: 8,
     color: "#E8FCFF",
     fontWeight: "700",
     fontSize: 14,
   },
-  
-  // 🔄 LOADING SECTION
   loadingSection: {
     marginTop: 16,
     paddingVertical: 24,
@@ -912,14 +904,12 @@ const styles = StyleSheet.create({
     color: "rgba(0,229,255,0.8)",
     fontWeight: "500",
   },
-  
-  // 🎨 BANNER DE SOPORTE MEJORADO
   supportBannerHighlight: {
-    marginHorizontal: 4,
-    marginVertical: 14,
+    marginHorizontal: 0,
+    marginBottom: 16,
     borderRadius: 16,
-    backgroundColor: "rgba(0,229,255,0.12)",
-    borderWidth: 1.5,
+    backgroundColor: "rgba(8, 40, 56, 0.85)",
+    borderWidth: 1,
     borderColor: "rgba(0,229,255,0.35)",
     padding: 14,
     flexDirection: "row",
@@ -933,30 +923,28 @@ const styles = StyleSheet.create({
   },
   supportBannerContent: {
     flex: 1,
-    marginHorizontal: 12,
+    marginRight: 12,
   },
   supportBannerTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: "700",
     color: "#00E5FF",
     marginBottom: 2,
   },
   supportBannerSubtitle: {
     fontSize: 12,
-    color: "rgba(255,255,255,0.7)",
+    color: "rgba(255,255,255,0.65)",
   },
   supportBannerBtn: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: "rgba(37,211,102,0.15)",
+    backgroundColor: "rgba(37,211,102,0.12)",
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: "rgba(37,211,102,0.35)",
+    borderColor: "rgba(37,211,102,0.55)",
   },
-
-  // 🔴 SECCIÓN SIN MEMBRESÍA
   noMembershipSection: {
     marginTop: 16,
     paddingVertical: 24,
@@ -989,9 +977,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
-    gap: 8,
   },
   ctaMiniText: {
+    marginLeft: 8,
     color: "#FFFFFF",
     fontWeight: "700",
     fontSize: 14,
