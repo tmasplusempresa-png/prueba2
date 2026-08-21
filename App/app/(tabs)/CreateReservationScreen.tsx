@@ -100,6 +100,11 @@ const CreateReservationScreen = () => {
   const scrollViewRef = useRef<ScrollView>(null);
   const keyboardOffsetAnim = useRef(new Animated.Value(0)).current;
   const mapKeyboardOffsetAnim = useRef(new Animated.Value(0)).current;
+  // Altura real del teclado. Antes el panel se subia -200 fijos, sin mirar el
+  // teclado ni el alto de pantalla, y eso se sumaba al KeyboardAvoidingView que
+  // ya estaba levantando el contenido: doble compensacion. El panel acababa
+  // montado sobre el header y la lista de sugerencias se quedaba sin sitio.
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   /* ── Map / Location refs ── */
   const mapRef = useRef<MapView>(null);
@@ -275,22 +280,27 @@ const CreateReservationScreen = () => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
-    const keyboardShowSub = Keyboard.addListener(showEvent, () => {
+    const keyboardShowSub = Keyboard.addListener(showEvent, (e: any) => {
+      const kbHeight = e?.endCoordinates?.height ?? 0;
+      setKeyboardHeight(kbHeight);
       // Step 2 animation
       Animated.timing(keyboardOffsetAnim, {
         toValue: -30,
         duration: 220,
         useNativeDriver: true,
       }).start();
-      // Step 1 animation (search panel up)
+      // Step 1: el KeyboardAvoidingView ya hace el grueso del trabajo. Aqui
+      // solo se ajusta un poco, acotado, para que el panel nunca se salga por
+      // arriba ni tape el header.
       Animated.timing(mapKeyboardOffsetAnim, {
-        toValue: -200,
+        toValue: -Math.min(kbHeight * 0.22, 70),
         duration: 220,
         useNativeDriver: true,
       }).start();
     });
 
     const keyboardHideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
       // Step 2 animation
       Animated.timing(keyboardOffsetAnim, {
         toValue: 0,
@@ -710,7 +720,15 @@ const CreateReservationScreen = () => {
     listView: {
       backgroundColor: 'rgba(4,39,58,0.98)', borderRadius: 14,
       borderWidth: 1, borderColor: 'rgba(0,229,255,0.35)',
-      marginTop: 4, maxHeight: 250, marginHorizontal: 0,
+      marginTop: 4,
+      // Con el teclado abierto ya no caben 250px: la lista se pasaba de largo
+      // y sus ultimos resultados quedaban debajo del teclado, sin poder tocarse.
+      // Se reparte el hueco real que queda, con piso para que siempre se vean
+      // un par de sugerencias.
+      maxHeight: keyboardHeight > 0
+        ? Math.max(140, Math.min(250, Dimensions.get('window').height - keyboardHeight - 300))
+        : 250,
+      marginHorizontal: 0,
       elevation: 8, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
     },
     row: { backgroundColor: 'rgba(10,46,61,0.6)', paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 0.5, borderBottomColor: 'rgba(0,229,255,0.1)' },
