@@ -78,7 +78,10 @@ yarn-error.*
 
 # local env files
 .env*.local
-
+.idea/
+../.idea/
+../.vscode/
+.tmp-bundle/
 # typescript
 *.tsbuildinfo
 
