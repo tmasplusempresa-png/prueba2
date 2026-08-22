@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { Text, TextInput, LogBox } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Constants from 'expo-constants';
@@ -130,7 +130,7 @@ export default function RootLayout() {
         const directUri = AuthSession.makeRedirectUri({ useProxy: false });
         console.log('Redirect URI (proxy):', proxyUri);
         console.log('Redirect URI (direct):', directUri);
-        console.log('App scheme from manifest:', Constants.expoConfig?.scheme || Constants.manifest?.scheme);
+        console.log('App scheme from manifest:', Constants.expoConfig?.scheme);
       } catch (e) {
         console.warn('Error generating redirect URIs:', e);
       }
