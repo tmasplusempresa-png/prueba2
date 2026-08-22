@@ -144,6 +144,12 @@ module.exports = {
         buildToolsVersion: "34.0.0",
         package: AppConfig.app_identifier,
         versionCode: AppConfig.android_app_version,
+        // Necesario para que expo-notifications inicialice Firebase y obtenga el
+        // token FCM en Android (sin esto: "Default FirebaseApp is not initialized"
+        // → getExpoPushTokenAsync falla → sin push en segundo plano).
+        // ⚠️ Requiere que exista App/google-services.json (bajarlo de Firebase
+        // Console → app Android com.releaseunocero) ANTES de compilar.
+        googleServicesFile: "./google-services.json",
         "permissions": [
             "CAMERA",
             "ACCESS_FINE_LOCATION",
