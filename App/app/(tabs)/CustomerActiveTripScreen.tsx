@@ -705,6 +705,9 @@ const CustomerActiveTripScreen = () => {
     if (booking?.status === 'COMPLETE' && !tripSummaryShownRef.current) {
       tripSummaryShownRef.current = true;
       openAlertModal(setTripSummaryVisible);
+      // 🔔 Notificación local de cierre — igual que ACCEPTED/ARRIVED/STARTED.
+      // COMPLETE no es "active trip status", así que la disparamos aquí una vez.
+      notifyTripStateChange(booking, 'customer', previousStatusRef.current).catch(() => {});
     }
   }, [booking?.status, openAlertModal]);
 

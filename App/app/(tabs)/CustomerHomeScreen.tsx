@@ -101,18 +101,41 @@ const Scalable = ({
   );
 };
 
-const ActionBtn = ({ icon, label, onPress }: { icon: any; label: string; onPress: () => void }) => {
+const ActionBtn = ({
+  icon,
+  label,
+  sub,
+  onPress,
+}: {
+  icon: any;
+  label: string;
+  sub: string;
+  onPress: () => void;
+}) => {
   const anim = useRef(new Animated.Value(0)).current;
   const onIn = () => Animated.spring(anim, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
   const onOut = () => Animated.spring(anim, { toValue: 0, useNativeDriver: true, speed: 20, bounciness: 10 }).start();
-  const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.85] });
-  const lift = anim.interpolate({ inputRange: [0, 1], outputRange: [0, -3] });
+  const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] });
+  const lift = anim.interpolate({ inputRange: [0, 1], outputRange: [0, -2] });
   return (
-    <TouchableOpacity style={s.actionItem} onPress={onPress} onPressIn={onIn} onPressOut={onOut} activeOpacity={1}>
-      <Animated.View style={[s.actionIconWrap, { transform: [{ scale }, { translateY: lift }] }]}>
-        <Ionicons name={icon} size={28} color="#00E5FF" />
+    <TouchableOpacity style={s.serviceCardWrap} onPress={onPress} onPressIn={onIn} onPressOut={onOut} activeOpacity={1}>
+      <Animated.View style={[s.serviceCard, { transform: [{ scale }, { translateY: lift }] }]}>
+        <View style={s.serviceCardContent}>
+          <View style={s.serviceIconWrap}>
+            <Ionicons name={icon} size={22} color="#00E5FF" />
+          </View>
+          <Text style={s.serviceTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>
+            {label}
+          </Text>
+          <Text style={s.serviceSub} numberOfLines={2}>
+            {sub}
+          </Text>
+          <View style={s.serviceCta}>
+            <Text style={s.serviceCtaTxt}>Solicitar</Text>
+            <Ionicons name="chevron-forward" size={14} color="#051A26" />
+          </View>
+        </View>
       </Animated.View>
-      <Text style={s.actionLabel}>{label}</Text>
     </TouchableOpacity>
   );
 };
@@ -402,10 +425,10 @@ const CustomerHomeScreen = () => {
   }, []);
 
   const SERVICES = [
-    { id: 'T+Plus Especial', label: 'T+Plus Especial', icon: 'star-outline' as const },
-    { id: 'T+Plus Particular', label: 'T+Plus Particular', icon: 'car-outline' as const },
-    { id: 'T+plus Van', label: 'T+plus Van', icon: 'car-outline' as const },
-    { id: 'T+plus taxi', label: 'T+plus taxi', icon: 'car-outline' as const }, 
+    { id: 'T+Plus Especial', label: 'T+Plus Especial', sub: 'Servicio premium y exclusivo.', icon: 'star-outline' as const },
+    { id: 'T+Plus Particular', label: 'T+Plus Particular', sub: 'Viajes cómodos y directos.', icon: 'car-outline' as const },
+    { id: 'T+plus Van', label: 'T+plus Van', sub: 'Ideal para grupos y equipaje.', icon: 'car-outline' as const },
+    { id: 'T+plus taxi', label: 'T+plus taxi', sub: 'Rápido, seguro y cercano.', icon: 'car-outline' as const },
   ];
   const BENEFITS = [
     { id: 'seg', icon: 'shield-checkmark-outline' as const, label: 'Seguridad', sub: 'Viajes protegidos' },
@@ -466,14 +489,16 @@ const CustomerHomeScreen = () => {
           </View>
           <View style={s.actionsGrid}>
             {SERVICES.map(sv => (
-              <ActionBtn key={sv.id} icon={sv.icon} label={sv.label} onPress={navigateToCreateReservation} />
+              <ActionBtn key={sv.id} icon={sv.icon} label={sv.label} sub={sv.sub} onPress={navigateToCreateReservation} />
             ))}
           </View>
         </Animatable.View>
         <Animatable.View animation="fadeInUp" duration={500} delay={250} useNativeDriver>
           <View style={s.sectionHeader}>
             <Text style={s.sectionTitle}>T+plus</Text>
-            <Text style={s.sectionSub}>Tu acceso inteligente</Text>
+            <View style={s.badge}>
+              <Text style={s.badgeText}>Tu acceso inteligente</Text>
+            </View>
           </View>
         </Animatable.View>
         <ScrollView
@@ -487,23 +512,23 @@ const CustomerHomeScreen = () => {
           onMomentumScrollEnd={onCardScroll}
           scrollEventThrottle={32}
         >
-          <Scalable onPress={() => nav.navigate('Carnet')} liftBy={-4} style={[s.tplusCard, s.cardCarnet]}>
-            <View style={s.cardIconWrap}><Ionicons name="card-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle}>¡Usa tu carnet!</Text>
-            <Text style={s.cardDesc}>Presenta tu carnet T+plus para identificarte fácilmente. ¡Es tu acceso seguro y confiable!</Text>
-            <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver carnet</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
-          </Scalable>
           <Scalable onPress={() => nav.navigate('ReservationsScreen')} liftBy={-4} style={[s.tplusCard, s.cardReservas]}>
             <View style={s.cardIconWrap}><Ionicons name="time-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle}>¡Tus Reservas!</Text>
+            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>¡Tus Reservas!</Text>
             <Text style={s.cardDesc}>Tienes 0 reservas activas. Toca aquí para ver detalles y estar al tanto de tus viajes.</Text>
             <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver reservas</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
           </Scalable>
           <Scalable onPress={() => nav.navigate('ReservationsScreen')} liftBy={-4} style={[s.tplusCard, s.cardHistorial]}>
             <View style={s.cardIconWrap}><Ionicons name="document-text-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle}>Historial</Text>
+            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>Historial</Text>
             <Text style={s.cardDesc}>Revisa tu historial de viajes, pagos y actividad reciente en un solo lugar.</Text>
             <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver historial</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
+          </Scalable>
+          <Scalable onPress={() => nav.navigate('Carnet')} liftBy={-4} style={[s.tplusCard, s.cardCarnet]}>
+            <View style={s.cardIconWrap}><Ionicons name="card-outline" size={40} color="#00E5FF" /></View>
+            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>¡Usa tu carnet!</Text>
+            <Text style={s.cardDesc}>Presenta tu carnet T+plus para identificarte fácilmente. ¡Es tu acceso seguro y confiable!</Text>
+            <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver carnet</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
           </Scalable>
         </ScrollView>
         <View style={s.dotsRow}>{[0, 1, 2].map(i => <View key={i} style={[s.dot, activeCard === i && s.dotActive]} />)}</View>
@@ -577,25 +602,102 @@ const s = StyleSheet.create({
   destIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#00E5FF', justifyContent: 'center', alignItems: 'center', shadowColor: '#00E5FF', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10, elevation: 8 },
   destText: { flex: 1, fontSize: 16, fontWeight: '700', color: '#EAF2F7', letterSpacing: -0.2 },
   destArrow: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', justifyContent: 'center', alignItems: 'center' },
-  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 14, marginTop: 4 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, marginTop: 4, flexWrap: 'wrap' },
   sectionTitle: { fontSize: 20, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3, marginRight: 8 },
   sectionSub: { fontSize: 13, color: 'rgba(255,255,255,0.5)' },
-  badge: { backgroundColor: 'rgba(0,229,255,0.15)', paddingVertical: 3, paddingHorizontal: 10, borderRadius: 20, marginLeft: 4 },
-  badgeText: { fontSize: 11, fontWeight: '600', color: '#00E5FF', letterSpacing: 0.5 },
-  actionsGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 28 },
+  badge: {
+    backgroundColor: 'rgba(0,229,255,0.15)',
+    paddingVertical: 3,
+    paddingHorizontal: 10,
+    borderRadius: 20,
+    marginLeft: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.22)',
+    maxWidth: '70%',
+  },
+  badgeText: { fontSize: 11, fontWeight: '600', color: '#00E5FF', letterSpacing: 0.5, flexShrink: 1 },
+  actionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 28,
+  },
+  serviceCardWrap: {
+    width: (SW - H_PAD * 2 - 12) / 2,
+    marginBottom: 12,
+  },
+  serviceCard: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    minHeight: 132,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.2)',
+    backgroundColor: 'rgba(10,46,61,0.94)',
+  },
+  serviceCardContent: {
+    padding: 14,
+  },
+  serviceIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  serviceTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#ffffff',
+    lineHeight: 18,
+    letterSpacing: -0.2,
+    marginBottom: 4,
+  },
+  serviceSub: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.65)',
+    lineHeight: 15,
+    marginBottom: 10,
+  },
+  serviceCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#00E5FF',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  serviceCtaTxt: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#051A26',
+    marginRight: 2,
+  },
   actionItem: { flex: 1, alignItems: 'center', paddingVertical: 12, paddingHorizontal: 4, borderRadius: 14 },
   actionIconWrap: { width: 56, height: 56, borderRadius: 14, backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)', justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
   actionLabel: { fontSize: 11, fontWeight: '500', color: 'rgba(255,255,255,0.7)', textAlign: 'center', lineHeight: 14 },
   cardsOuter: { marginHorizontal: -H_PAD },
   cardsContent: { paddingHorizontal: H_PAD, paddingBottom: 14 },
-  tplusCard: { width: CARD_W, minHeight: 240, borderRadius: 24, padding: 20, borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)', marginRight: CARD_GAP },
-  cardCarnet: { backgroundColor: 'rgba(0,229,255,0.1)' },
-  cardReservas: { backgroundColor: 'rgba(0,188,212,0.1)' },
-  cardHistorial: { backgroundColor: 'rgba(20,83,104,0.3)' },
-  cardTracking: { backgroundColor: 'rgba(0,100,80,0.3)' },
+  tplusCard: {
+    width: CARD_W,
+    minHeight: 240,
+    borderRadius: 24,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.2)',
+    marginRight: CARD_GAP,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(10,46,61,0.94)',
+  },
+  cardCarnet: { backgroundColor: 'rgba(10,46,61,0.94)' },
+  cardReservas: { backgroundColor: 'rgba(10,46,61,0.94)' },
+  cardHistorial: { backgroundColor: 'rgba(10,46,61,0.94)' },
+  cardTracking: { backgroundColor: 'rgba(10,46,61,0.94)' },
   cardIconWrap: { width: 60, height: 60, borderRadius: 14, backgroundColor: 'rgba(0,229,255,0.15)', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
   cardTitle: { fontSize: 18, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3, marginBottom: 6 },
-  cardDesc: { fontSize: 13, lineHeight: 19, color: 'rgba(255,255,255,0.5)', flex: 1, marginBottom: 12 },
+  cardDesc: { fontSize: 13, lineHeight: 19, color: 'rgba(255,255,255,0.65)', flexShrink: 1, marginBottom: 12 },
   cardAction: { flexDirection: 'row', alignItems: 'center' },
   cardActionTxt: { fontSize: 13, fontWeight: '600', color: '#00E5FF', marginRight: 4 },
   dotsRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 8, marginBottom: 16 },

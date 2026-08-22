@@ -14,6 +14,9 @@ import { useWalletAndMembershipSync } from '@/hooks/useWalletAndMembershipSync';
 import { useDriverCarSync } from '@/hooks/useDriverCarSync';
 import CancellationNotifier from '@/components/CancellationNotifier';
 import DriverLocationDisclosureGate from '@/components/DriverLocationDisclosureGate';
+import { setupNotificationHandler } from '@/hooks/NotificationService';
+import { stopNewServiceLoop } from '@/hooks/DriverNotificationService';
+import { usePushTokenRegistration } from '@/hooks/usePushTokenRegistration';
 
 // El SDK de Supabase, al arrancar, intenta refrescar la sesión guardada. Si el
 // refresh token fue revocado en el servidor (p. ej. tras un reset de contraseña,
@@ -44,11 +47,7 @@ if ((TextInput as any).defaultProps == null) (TextInput as any).defaultProps = {
  */
 export default function RootLayout() {
   // Permiso de notificaciones al arrancar, antes del login y por igual para
-  // cliente y conductor. Antes se pedia dentro de onAuthStateChange, o sea solo
-  // despues de iniciar sesion: quien nunca llegaba a loguearse no lo veia, y en
-  // el video de App Review el dialogo aparecia tarde y mezclado con el resto.
-  // Aqui solo se pide el permiso; el token de push se sigue obteniendo tras el
-  // login (necesita el usuario), y para entonces el permiso ya esta concedido.
+  // cliente y conductor. (Viene de main — mejora para el App Review.)
   useEffect(() => {
     let cancelled = false;
 
@@ -62,8 +61,7 @@ export default function RootLayout() {
 
         const Notifications = await import('expo-notifications');
         const { status } = await Notifications.getPermissionsAsync();
-        // Solo se pregunta si el usuario aun no ha decidido. Si ya nego, iOS no
-        // vuelve a mostrar el dialogo y reintentarlo no aporta nada.
+        // Solo se pregunta si el usuario aun no ha decidido.
         if (cancelled || status !== 'undetermined') return;
 
         await Notifications.requestPermissionsAsync();
@@ -74,6 +72,38 @@ export default function RootLayout() {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Configura el handler global de notificaciones antes que cualquier otro
+  // efecto. Sin esto, las push en foreground NO aparecen. También registra un
+  // listener que, ante push type='booking-taken', apaga el loop de sonido.
+  // (Nuestro trabajo, viene de dev.)
+  useEffect(() => {
+    setupNotificationHandler().catch((e) =>
+      console.warn('[RootLayout] setupNotificationHandler falló:', e),
+    );
+
+    let cleanup: (() => void) | null = null;
+    (async () => {
+      try {
+        const Notifications = await import('expo-notifications');
+        const sub = Notifications.addNotificationReceivedListener((notif) => {
+          const data = (notif?.request?.content?.data ?? {}) as any;
+          if (data?.type === 'booking-taken' && data?.bookingId) {
+            stopNewServiceLoop(String(data.bookingId)).catch(() => {
+              // ignore
+            });
+          }
+        });
+        cleanup = () => sub.remove();
+      } catch {
+        // expo-notifications no disponible (Expo Go / dev sin native module)
+      }
+    })();
+
+    return () => {
+      if (cleanup) cleanup();
     };
   }, []);
 
@@ -192,5 +222,6 @@ function GlobalServices() {
   useGlobalDriverTracking();
   useWalletAndMembershipSync();
   useDriverCarSync();
+  usePushTokenRegistration();
   return null;
 }

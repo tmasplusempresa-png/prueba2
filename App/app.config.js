@@ -144,6 +144,12 @@ module.exports = {
         buildToolsVersion: "34.0.0",
         package: AppConfig.app_identifier,
         versionCode: AppConfig.android_app_version,
+        // Necesario para que expo-notifications inicialice Firebase y obtenga el
+        // token FCM en Android (sin esto: "Default FirebaseApp is not initialized"
+        // → getExpoPushTokenAsync falla → sin push en segundo plano).
+        // ⚠️ Requiere que exista App/google-services.json (bajarlo de Firebase
+        // Console → app Android com.releaseunocero) ANTES de compilar.
+        googleServicesFile: "./google-services.json",
         "permissions": [
             "CAMERA",
             "ACCESS_FINE_LOCATION",
@@ -211,9 +217,18 @@ module.exports = {
         [
             "expo-notifications",
             {
-                "icon": "./assets/images/logo1024x1024.png",
+                // Ícono de la barra de estado: DEBE ser una silueta blanca sobre
+                // fondo transparente. Android usa solo el canal alfa y lo pinta
+                // blanco; un logo RGB sin alfa (logo1024x1024.png) salía
+                // recortado/como cuadro blanco. `color` es el tinte que Android
+                // aplica al ícono y al acento de la notificación.
+                "icon": "./assets/images/notification-icon.png",
+                "color": "#00E5FF",
                 "sounds": [
-                    "./assets/sounds/notifi.mpeg"
+                    "./assets/sounds/notifi.mpeg",
+                    "./assets/sounds/horn.wav",
+                    "./assets/sounds/repeat.wav",
+                    "./assets/sounds/firstoption.mp3"
                 ]
             }
         ],

@@ -78,7 +78,10 @@ yarn-error.*
 
 # local env files
 .env*.local
-
+.idea/
+../.idea/
+../.vscode/
+.tmp-bundle/
 # typescript
 *.tsbuildinfo
 
@@ -92,6 +95,5 @@ docs/api/
 .env.local
 .env.production
 
-.google-services.json
-
+tmasplus-d2401-firebase-adminsdk-fbsvc-27ac7ec71d.json
 #https://github.com/Angorannico/App_copia.git

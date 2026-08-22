@@ -56,24 +56,14 @@ try {
 
     if (_messagingModule) {
       try {
-        _messagingModule().setBackgroundMessageHandler(async (remoteMessage: any) => {
-          try {
-            const { data } = remoteMessage || {};
-            if (data) {
-              const body = typeof data.body === 'string' ? (JSON.parse(data.body).message || 'Nueva notificación') : 'Nueva notificación';
-              try {
-                const Notifications = await import('expo-notifications');
-                await Notifications.scheduleNotificationAsync({
-                  content: { title: data.title || 'Nueva Notificación', body },
-                  trigger: null,
-                });
-              } catch (nerr) {
-                console.warn('Could not schedule notification (expo-notifications not available):', nerr);
-              }
-            }
-          } catch (error) {
-            console.error('Error manejando el mensaje en segundo plano:', error);
-          }
+        _messagingModule().setBackgroundMessageHandler(async (_remoteMessage: any) => {
+          // ⚠️ NO presentar la notificación aquí. Los push de T+Plus llegan vía
+          // FCM con payload `notification`, así que Android YA muestra la
+          // notificación en segundo plano automáticamente. Llamar
+          // `scheduleNotificationAsync` aquí mostraba una SEGUNDA notificación
+          // → DUPLICADO en background (el gemelo del bug del `onMessage`).
+          // Se mantiene el handler registrado (react-native-firebase lo exige)
+          // pero sin re-presentar. El SO / expo-notifications = único presentador.
         });
       } catch (err) {
         console.warn('No se pudo configurar setBackgroundMessageHandler:', err);
@@ -371,13 +361,15 @@ const RootLayout = () => {
           if (_messagingModule) {
             const m = typeof _messagingModule === 'function' ? _messagingModule() : _messagingModule;
             if (m && typeof m.onMessage === 'function') {
-              unsubscribeMessage = m.onMessage(async (remoteMessage: any) => {
-                const { title = 'Nueva Notificación', message = 'Has recibido una nueva notificación' } = remoteMessage.data || {};
-                try {
-                  await Notifications.scheduleNotificationAsync({ content: { title, body: message }, trigger: null });
-                } catch (nerr) {
-                  console.warn('Could not schedule notification (expo-notifications not available):', nerr);
-                }
+              // ⚠️ NO re-presentar la notificación aquí. Expo Push entrega por
+              // debajo vía FCM, así que este `onMessage` recibe el MISMO mensaje
+              // que expo-notifications YA muestra; volver a llamar
+              // `scheduleNotificationAsync` generaba una notificación DUPLICADA
+              // en la cortina (dos al tiempo). Dejamos expo-notifications como
+              // ÚNICO presentador. Se conserva la suscripción por si más adelante
+              // se necesita procesar `data` (sin re-presentar).
+              unsubscribeMessage = m.onMessage(async (_remoteMessage: any) => {
+                // intencionalmente vacío: sin re-presentación para evitar duplicados
               });
             }
           }

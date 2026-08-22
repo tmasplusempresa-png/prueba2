@@ -115,6 +115,9 @@ const CreateReservationScreen = () => {
 
   const [myLat, setMyLat] = useState(COLOMBIA_CENTER.latitude);
   const [myLng, setMyLng] = useState(COLOMBIA_CENTER.longitude);
+  // true solo cuando el GPS real resolvió — evita sesgar el autocompletado al
+  // centro del país (valor inicial de myLat/myLng) antes de tener la ubicación.
+  const [hasMyLocation, setHasMyLocation] = useState(false);
   const [origin, setOrigin] = useState<any>(params.origin || null);
   const [destination, setDestination] = useState<any>(params.destination || null);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
@@ -160,6 +163,7 @@ const CreateReservationScreen = () => {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         setMyLat(loc.coords.latitude);
         setMyLng(loc.coords.longitude);
+        setHasMyLocation(true);
         if (!origin) {
           // Reverse geocode para obtener dirección real en lugar de "Mi ubicación actual"
           try {
@@ -321,21 +325,30 @@ const CreateReservationScreen = () => {
     };
   }, [keyboardOffsetAnim, mapKeyboardOffsetAnim]);
 
-  /* ── Fit map to both markers ── */
+  /* ── Enfoque del mapa: centra en cada punto al ingresarlo (origen o destino,
+     manual o automático). Cuando ya hay ruta trazada, el encuadre completo lo
+     hace el efecto "Animar mapa cuando aparece la ruta" de más abajo. ── */
   useEffect(() => {
-    if (origin?.latitude && destination?.latitude && mapRef.current) {
-      // Si tenemos la ruta completa, usar eso; si no, solo los 2 puntos
-      const coordsToFit = routeCoords.length > 0 
-        ? routeCoords 
-        : [
-            { latitude: origin.latitude, longitude: origin.longitude },
-            { latitude: destination.latitude, longitude: destination.longitude },
-          ];
-      
-      mapRef.current.fitToCoordinates(coordsToFit, {
-        edgePadding: { top: 200, right: 50, bottom: 280, left: 50 },
-        animated: true,
-      });
+    if (!mapRef.current) return;
+
+    // Ya hay ruta calculada → el efecto de abajo la encuadra. No competir.
+    if (routeCoords.length > 2) return;
+
+    // Destino recién ingresado (aún sin ruta) → centrar en el destino.
+    if (destination?.latitude) {
+      mapRef.current.animateToRegion(
+        { latitude: destination.latitude, longitude: destination.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+        600,
+      );
+      return;
+    }
+
+    // Solo origen todavía → centrar en el origen.
+    if (origin?.latitude) {
+      mapRef.current.animateToRegion(
+        { latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+        600,
+      );
     }
   }, [origin, destination, routeCoords]);
 
@@ -922,7 +935,16 @@ const CreateReservationScreen = () => {
                 enablePoweredByContainer={false}
                 nearbyPlacesAPI="GooglePlacesSearch"
                 onPress={(data, details) => handleLocationSelect(data, details, 'origin')}
-                query={{ key: GOOGLE_MAPS_KEY, language: 'es', components: 'country:co', sessiontoken: sessionTokenOrigin.current }}
+                query={{
+                  key: GOOGLE_MAPS_KEY,
+                  language: 'es',
+                  components: 'country:co',
+                  // Sesgo por ubicación: prioriza resultados cerca del usuario
+                  // (radio 30 km) solo cuando el GPS real ya resolvió. Bias
+                  // suave — no excluye destinos lejanos (viajes intermunicipales).
+                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
+                  sessiontoken: sessionTokenOrigin.current,
+                }}
                 styles={gpStyles}
                 textInputProps={{
                   placeholderTextColor: 'rgba(255,255,255,0.4)',
@@ -950,7 +972,14 @@ const CreateReservationScreen = () => {
                 enablePoweredByContainer={false}
                 nearbyPlacesAPI="GooglePlacesSearch"
                 onPress={(data, details) => handleLocationSelect(data, details, 'destination')}
-                query={{ key: GOOGLE_MAPS_KEY, language: 'es', components: 'country:co', sessiontoken: sessionTokenDest.current }}
+                query={{
+                  key: GOOGLE_MAPS_KEY,
+                  language: 'es',
+                  components: 'country:co',
+                  // Mismo sesgo por ubicación que el origen (ver comentario arriba).
+                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
+                  sessiontoken: sessionTokenDest.current,
+                }}
                 styles={gpStyles}
                 textInputProps={{
                   placeholderTextColor: 'rgba(255,255,255,0.4)',

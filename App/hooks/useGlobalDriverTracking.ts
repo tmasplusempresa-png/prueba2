@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useSelector } from 'react-redux';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { RootState } from '@/common/store/store';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import {
@@ -8,6 +9,15 @@ import {
 } from '@/common/services/driverLocationTask';
 
 const ACTIVE_STATUSES = ['ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED'];
+
+// Watchdog anti-kill: si el foreground service muere silenciosamente en OEMs
+// agresivos (MIUI, EMUI, ColorOS), `hasStartedLocationUpdatesAsync` puede
+// seguir devolviendo true pero ya no llegan puntos. Cada WATCHDOG_INTERVAL_MS
+// verificamos el timestamp del último insert; si excede WATCHDOG_GAP_MS con
+// booking activo, forzamos stop+start para revivir el service.
+const WATCHDOG_INTERVAL_MS = 30_000;
+const WATCHDOG_GAP_MS = 60_000;
+const LAST_INSERT_KEY = 'driver_tracking_last_insert';
 
 function pickUserType(user: any, profile: any): string {
   return String(
@@ -74,6 +84,7 @@ export function useGlobalDriverTracking() {
     let cancelled = false;
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let publicDriverId: string | null = null;
+    let currentActiveBookingId: string | null = null;
 
     const reevaluate = async () => {
       if (cancelled) return;
@@ -100,6 +111,7 @@ export function useGlobalDriverTracking() {
         if (cancelled) return;
 
         const activeBookingId: string | undefined = rows?.[0]?.id;
+        currentActiveBookingId = activeBookingId ?? null;
         console.log('[GlobalDriverTracking] bookings query rows:', rows?.length ?? 0, rows?.[0] ?? 'none');
         if (activeBookingId) {
           console.log('[GlobalDriverTracking] active booking found:', activeBookingId, rows[0].status);
@@ -150,11 +162,54 @@ export function useGlobalDriverTracking() {
       reevaluate();
     }, 15000);
 
+    // Watchdog anti-kill: detecta gaps prolongados sin puntos GPS y fuerza
+    // restart del foreground service. Muchas veces `hasStartedLocationUpdatesAsync`
+    // sigue reportando true tras un kill silencioso del OEM — el único signal
+    // fiable es la ausencia de inserts recientes.
+    const watchdogInterval = setInterval(async () => {
+      if (cancelled) return;
+      if (!currentActiveBookingId || !publicDriverId) return;
+      try {
+        const raw = await AsyncStorage.getItem(LAST_INSERT_KEY);
+        if (!raw) {
+          // Sin ningún punto insertado aún: puede ser normal en los primeros
+          // segundos tras aceptar. No forzamos restart.
+          return;
+        }
+        const last = JSON.parse(raw) as { lat: number; lng: number; time: number };
+        const gap = Date.now() - (last?.time ?? 0);
+        if (gap > WATCHDOG_GAP_MS) {
+          console.warn(
+            '[GlobalDriverTracking] watchdog: gap de ' + Math.round(gap / 1000) +
+            's sin puntos GPS con booking activo ' + currentActiveBookingId +
+            ' — forzando stop+start del tracking',
+          );
+          await stopDriverLocationTracking();
+          await startDriverLocationTracking(currentActiveBookingId, publicDriverId);
+          // Registrar el gap en BD para auditoría posterior. Best effort:
+          // si la tabla notification_events aún no existe (feature futura),
+          // el error se ignora y no rompe el flujo del watchdog.
+          try {
+            await supabase.from('notification_events' as any).insert({
+              user_id: publicDriverId,
+              event_type: 'tracking_gap',
+              booking_id: currentActiveBookingId,
+            } as any);
+          } catch {
+            // tabla no existe todavía o inserción bloqueada por RLS — ignorar
+          }
+        }
+      } catch (e) {
+        console.warn('[GlobalDriverTracking] watchdog exception:', e);
+      }
+    }, WATCHDOG_INTERVAL_MS);
+
     setupChannel();
 
     return () => {
       cancelled = true;
       clearInterval(pollInterval);
+      clearInterval(watchdogInterval);
       if (channel) supabase.removeChannel(channel);
       stopDriverLocationTracking();
     };

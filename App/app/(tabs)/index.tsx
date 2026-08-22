@@ -61,6 +61,7 @@ import DriverReservationsScreen from "./DriverReservationsScreen";
 import * as Speech from "expo-speech";
 import { useAppDispatch } from "../../common/store/hooks";
 import { showDriverActiveNotification, dismissDriverNotification, updateDriverNotification } from '@/hooks/DriverNotificationService';
+import { requestIgnoreBatteryOptimization } from '@/common/services/batteryOptimizationPrompt';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 
 const tourImage = require("../../assets/images/icon.png");
@@ -1395,6 +1396,13 @@ const MapScreen = () => {
       // Show persistent notification
       const name = dbFirstName || user?.firstName || user?.first_name || '';
       showDriverActiveNotification(name).catch((e) => console.log('[GO-DEBUG] showDriverActiveNotification error:', e));
+      // Pedir desactivación de battery optimization (Android). Sin esto,
+      // OEMs agresivos matan el foreground service de tracking y booking_tracking
+      // queda vacío. Se muestra una vez cada 30 días o hasta que el usuario
+      // marca "No molestar". No-op en iOS.
+      requestIgnoreBatteryOptimization().catch((e) =>
+        console.warn('[GO-DEBUG] batteryOptimizationPrompt error:', e),
+      );
     } else {
       setIsMapVisible(false);
       // Dismiss persistent notification

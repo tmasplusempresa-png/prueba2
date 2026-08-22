@@ -702,16 +702,12 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         drop: `${completeReservation.drop_lat}, ${completeReservation.drop_lng}`,
       });
 
-      // Send notifications
-      if (reservation.customer_token) {
-        sendPushNotification(
-          reservation.customer_token,
-          isImmediate ? '¡Conductor en camino! 🚗' : '¡Reserva Aceptada! ✅',
-          isImmediate
-            ? `Tu servicio ${reservation.reference} ha sido aceptado por ${driverName}.`
-            : `Tu reserva ${reservation.reference} ha sido aceptada por ${driverName}. Revisa los detalles del conductor en la app.`,
-        );
-      }
+      // ⛔ NOTIFICACIÓN AL CLIENTE: se envía SOLO desde el servidor.
+      // El Database Webhook `booking-events` → `bookingWebhookDispatcher`
+      // detecta la transición a ACCEPTED y despacha el push "Conductor asignado"
+      // al cliente (canal bookings-v2). Enviarlo también desde aquí (vía la
+      // función legacy `treasupdate`) causaba la NOTIFICACIÓN DUPLICADA.
+      // Fuente única de verdad = el dispatcher del servidor.
 
       // To driver (self): confirmation
       const driverToken = user?.pushToken || user?.push_token;

@@ -17,6 +17,7 @@
     "docs": "typedoc",
     "docs:watch": "typedoc --watch",
     "dev": "APP_VARIANT=development npx expo start",
+    "push:test": "bash scripts/send-test-push.sh",
     "update-version": "node scripts/updateVersion.js",
     "auto:sub:android": "eas build --platform android --auto-submit",
     "auto:sub:ios": "eas build --platform ios --auto-submit",

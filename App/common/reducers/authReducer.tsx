@@ -78,6 +78,8 @@ const authSlice = createSlice({
           verifyId: action.payload.license_number,
           docType: 'Cédula',
           emailVerified: Boolean((state.user as any)?.email_confirmed_at) || Boolean(action.payload.is_verified),
+          push_token: action.payload.push_token,
+          pushToken: action.payload.push_token,
         };
 
         state.user = mergedUser;
@@ -100,9 +102,12 @@ const authSlice = createSlice({
       state.verificationId = action.payload;
     },
     updatePushToken: (state, action: PayloadAction<string>) => {
-      // ✅ PushToken se maneja en el perfil, no en el usuario de Supabase
       if (state.profile) {
         state.profile.push_token = action.payload;
+      }
+      if (state.user) {
+        (state.user as any).push_token = action.payload;
+        (state.user as any).pushToken = action.payload;
       }
     },
     updateUserProfile: (state, action: PayloadAction<Partial<UserProfile>>) => {

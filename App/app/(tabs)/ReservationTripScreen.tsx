@@ -531,18 +531,16 @@ const ReservationTripScreen = () => {
 
       // 📱 Notify customer with waiting message
       if (reservation.customer_token) {
-        // Primera notificación: Conductor llegó, código en 3 minutos
-        sendPushNotification(
-          reservation.customer_token,
-          `📍 Tu conductor ha llegado`,
-          `El conductor está en el punto de recogida. El código de verificación se compartirá en 3 minutos. Reserva ${reservation.reference}`,
-        );
-        
+        // ⛔ "Conductor ha llegado": la envía SOLO el servidor. El Database
+        // Webhook `bookingWebhookDispatcher` despacha el push de ARRIVED al
+        // cliente. Duplicarla aquí generaba doble notificación. Se conservan las
+        // notificaciones de PAGO abajo porque llevan info que el dispatcher no da.
+
         // Notificación de pago
         if (paymentMode === 'cash') {
           sendPushNotification(
             reservation.customer_token,
-            `${reservation.customer_name}, tu conductor ha llegado!`,
+            `${reservation.customer_name}, pago en efectivo`,
             `Pago en efectivo por $${(reservation.estimate || reservation.price || 0).toLocaleString('es-CO')}. El viaje comenzará pronto.`,
           );
         } else {
@@ -593,13 +591,11 @@ const ReservationTripScreen = () => {
                 '🚗 Viaje en curso',
                 `Llevando a ${reservation.customer_name} al destino — ${reservation.drop_address || 'Destino'}`,
               ).catch(() => {});
-              if (reservation.customer_token) {
-                sendPushNotification(
-                  reservation.customer_token,
-                  '¡Tu viaje ha comenzado! 🚗',
-                  `Tu reserva ${reservation.reference} está en camino al destino.`,
-                );
-              }
+              // ⛔ Push de "viaje iniciado" al cliente: se quita el envío legacy
+              // (treasupdate) desde aquí. STARTED lo notifica la alerta local del
+              // cliente (`notifyTripStateChange`), fuente única para este estado.
+              // (Opcional futuro: mover STARTED al dispatcher del servidor y
+              //  excluirlo también del local — ver plan de notificaciones.)
             } catch {
               showAlert('error', 'Error', 'No se pudo iniciar el viaje.');
             } finally {
@@ -923,13 +919,10 @@ const ReservationTripScreen = () => {
       setPhase('TRIP_COMPLETE');
       // Restore the default driver-online notification
       showDriverActiveNotification().catch(() => {});
-      if (reservation.customer_token) {
-        sendPushNotification(
-          reservation.customer_token,
-          'Viaje completado ✅',
-          `Tu reserva ${reservation.reference} ha sido completada. ¡Gracias por viajar con T+Plus!`,
-        );
-      }
+      // ⛔ "Viaje completado": la envía SOLO el servidor. El Database Webhook
+      // `bookingWebhookDispatcher` despacha el push de COMPLETE al cliente
+      // ("Servicio finalizado"). Enviarla también aquí duplicaba la notificación.
+      // Fuente única de verdad = el dispatcher del servidor.
       showAlert('success',
         '¡Viaje Completado!',
         `La reserva ${reservation.reference} ha sido completada exitosamente.`,

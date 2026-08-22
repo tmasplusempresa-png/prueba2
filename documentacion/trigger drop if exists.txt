@@ -1,5 +1,0 @@
-drop trigger if exists trg_auth_user_confirmed on auth.users;
-
-create trigger trg_auth_user_confirmed
-  after insert or update on auth.users
-  for each row execute procedure public.handle_auth_user_confirmed();

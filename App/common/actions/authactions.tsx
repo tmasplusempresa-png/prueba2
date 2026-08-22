@@ -282,6 +282,11 @@ export const updateProfileImage = (imageBlob) => {
 export const updatePushToken = (token: string, platform: string) => {
   return async (dispatch: Dispatch) => {
     try {
+      if (!token || token === 'token_error') {
+        console.warn('updatePushToken: token inválido, no se guarda en BD');
+        return;
+      }
+
       const session = await Auth.getCurrentSession();
       const authUser = session?.user;
 
@@ -290,21 +295,29 @@ export const updatePushToken = (token: string, platform: string) => {
         return;
       }
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('users')
         .update({
           push_token: token,
           user_platform: platform,
         })
-        .eq('auth_id', authUser.id);
+        .eq('auth_id', authUser.id)
+        .select('id, push_token, user_platform')
+        .maybeSingle();
 
       if (error) {
         console.warn('updatePushToken: Supabase update failed:', error.message);
         return;
       }
 
+      if (!data) {
+        console.warn('updatePushToken: 0 filas actualizadas para auth_id', authUser.id);
+        return;
+      }
+
+      console.log('[PushToken] guardado en users.id=', data.id);
       dispatch({
-        type: "UPDATE_PUSH_TOKEN",
+        type: 'auth/updatePushToken',
         payload: token,
       });
     } catch (error) {
