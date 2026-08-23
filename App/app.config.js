@@ -149,7 +149,7 @@ module.exports = {
         // → getExpoPushTokenAsync falla → sin push en segundo plano).
         // ⚠️ Requiere que exista App/google-services.json (bajarlo de Firebase
         // Console → app Android com.releaseunocero) ANTES de compilar.
-        googleServicesFile: process.env.GOOGLE_SERVICES_JSON ?? "./google-services.json",
+        googleServicesFile: process.env.GOOGLE_SERVICES_JSON || "./google-services.json",
         "permissions": [
             "CAMERA",
             "ACCESS_FINE_LOCATION",
