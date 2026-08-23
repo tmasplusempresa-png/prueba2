@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1029819554796",
+    "project_id": "tmasplus-d2401",
+    "storage_bucket": "tmasplus-d2401.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1029819554796:android:983b7c268450446d30fec9",
+        "android_client_info": {
+          "package_name": "com.releaseunocero"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCx4Bjnc1hd72H2zc6eNYxhdHrd9kZOgzw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
