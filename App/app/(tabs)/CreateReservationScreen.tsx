@@ -21,6 +21,7 @@ import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/Supabas
 import { FareCalculator } from '@/common/actions/FareCalculator';
 import { isNearAirport } from '@/common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
+import { LinearGradient } from 'expo-linear-gradient';
 
 const { width: SW } = Dimensions.get('window');
 
@@ -156,44 +157,56 @@ const CreateReservationScreen = () => {
 
   /* ── Auto-detect current location ── */
   useEffect(() => {
+    if (params.origin) return;
+    let cancelled = false;
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      if (status !== 'granted' || cancelled) return;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        if (cancelled) return;
         setMyLat(loc.coords.latitude);
         setMyLng(loc.coords.longitude);
         setHasMyLocation(true);
-        if (!origin) {
-          // Reverse geocode para obtener dirección real en lugar de "Mi ubicación actual"
-          try {
-            const resp = await fetch(
-              `https://maps.googleapis.com/maps/api/geocode/json?latlng=${loc.coords.latitude},${loc.coords.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
-            );
-            const data = await resp.json();
-            const addr = data.results?.[0]?.formatted_address || 'Mi ubicación actual';
-            setOrigin({
-              latitude: loc.coords.latitude,
-              longitude: loc.coords.longitude,
-              title: addr,
-            });
-            originAutoRef.current?.setAddressText(addr);
-          } catch {
-            setOrigin({
-              latitude: loc.coords.latitude,
-              longitude: loc.coords.longitude,
-              title: 'Mi ubicación actual',
-            });
-            originAutoRef.current?.setAddressText('Mi ubicación actual');
-          }
-        }
+
+        let addr = 'Mi ubicación actual';
+        try {
+          const resp = await fetch(
+            `https://maps.googleapis.com/maps/api/geocode/json?latlng=${loc.coords.latitude},${loc.coords.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
+          );
+          const data = await resp.json();
+          addr = data.results?.[0]?.formatted_address || addr;
+        } catch {}
+
+        if (cancelled) return;
+        setOrigin({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+          title: addr,
+        });
+        // El autocomplete puede montarse después del GPS: reintentar setAddressText
+        const applyText = () => originAutoRef.current?.setAddressText?.(addr);
+        applyText();
+        setTimeout(applyText, 250);
+        setTimeout(applyText, 800);
+
         mapRef.current?.animateToRegion(
           { latitude: loc.coords.latitude, longitude: loc.coords.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
           800,
         );
       } catch {}
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [params.origin]);
+
+  /* Si el origen ya está en estado, sincronizar el input al montar el paso mapa */
+  useEffect(() => {
+    if (step !== 'map' || !origin?.title) return;
+    const apply = () => originAutoRef.current?.setAddressText?.(origin.title);
+    apply();
+    const t = setTimeout(apply, 200);
+    return () => clearTimeout(t);
+  }, [step, origin?.title]);
 
   /* ── Cargar vehículos y tarifas desde car_types ── */
   useEffect(() => {
@@ -722,22 +735,21 @@ const CreateReservationScreen = () => {
 
   /* ── Google Places styles ── */
   const gpStyles = {
-    container: { flex: 0, zIndex: 1000 },
+    container: { flex: 0, zIndex: 1000, backgroundColor: 'transparent' },
     textInputContainer: { backgroundColor: 'transparent' },
     textInput: {
       height: 50, fontSize: 15, fontWeight: '500' as const,
-      color: '#FFF', backgroundColor: 'rgba(4,39,58,0.95)',
+      color: '#FFF', backgroundColor: 'rgba(10,46,61,0.85)',
       borderRadius: 14, borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.38)',
-      paddingHorizontal: 44, paddingVertical: 10,
+      // Izquierda para el punto; derecha simétrica. Evita textAlign center:
+      // en Android el caret queda pegado a la derecha con placeholder vacío.
+      paddingLeft: 36, paddingRight: 36, paddingVertical: 10,
+      textAlign: 'left' as const,
     },
     listView: {
-      backgroundColor: 'rgba(4,39,58,0.98)', borderRadius: 14,
+      backgroundColor: 'rgba(5,26,38,0.98)', borderRadius: 14,
       borderWidth: 1, borderColor: 'rgba(0,229,255,0.35)',
       marginTop: 4,
-      // Con el teclado abierto ya no caben 250px: la lista se pasaba de largo
-      // y sus ultimos resultados quedaban debajo del teclado, sin poder tocarse.
-      // Se reparte el hueco real que queda, con piso para que siempre se vean
-      // un par de sugerencias.
       maxHeight: keyboardHeight > 0
         ? Math.max(140, Math.min(250, Dimensions.get('window').height - keyboardHeight - 300))
         : 250,
@@ -753,18 +765,20 @@ const CreateReservationScreen = () => {
   /* ══════════════════ RENDER ══════════════════ */
   return (
     <View style={st.root}>
-      {/* Header */}
-      <View style={[st.header, { paddingTop: topPad }]}>
-        <TouchableOpacity
-          style={st.backBtn}
-          onPress={() => (step === 'details' && !params.origin) ? setStep('map') : nav.goBack()}
-          activeOpacity={0.75}
-        >
-          <Ionicons name="chevron-back" size={24} color="#FFF" />
-        </TouchableOpacity>
-        <Text style={st.headerTitle}>{step === 'map' ? 'Selecciona tu ruta' : 'Detalles de Reserva'}</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      {/* Header solo en detalles; en mapa el back flota sobre el mapa */}
+      {step === 'details' && (
+        <View style={[st.header, { paddingTop: topPad }]}>
+          <TouchableOpacity
+            style={st.backBtn}
+            onPress={() => (!params.origin ? setStep('map') : nav.goBack())}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="chevron-back" size={24} color="#FFF" />
+          </TouchableOpacity>
+          <Text style={st.headerTitle}>Detalles de Reserva</Text>
+          <View style={{ width: 40 }} />
+        </View>
+      )}
 
       {/* ════ STEP 1: MAP ════ */}
       {step === 'map' && (
@@ -873,6 +887,22 @@ const CreateReservationScreen = () => {
               )}
             </MapView>
 
+            {/* Degradado suave oscuro superior hasta el botón volver */}
+            <LinearGradient
+              pointerEvents="none"
+              colors={['rgba(5,26,38,0.72)', 'rgba(5,26,38,0.28)', 'rgba(5,26,38,0)']}
+              locations={[0, 0.55, 1]}
+              style={[st.mapTopFade, { height: topPad + 52 }]}
+            />
+
+            <TouchableOpacity
+              style={[st.mapBackBtn, { top: topPad }]}
+              onPress={() => nav.goBack()}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="chevron-back" size={24} color="#FFF" />
+            </TouchableOpacity>
+
             {/* Zoom controls */}
             <View style={st.zoomControls}>
               <TouchableOpacity style={st.zoomBtn} onPress={handleZoomIn} activeOpacity={0.8}>
@@ -903,9 +933,13 @@ const CreateReservationScreen = () => {
 
             {/* 🆕 Hint discreto cuando no se está reubicando y hay markers */}
             {!relocatingMarker && origin && destination && (
-              <View style={st.mapHintPill}>
-                <Ionicons name="information-circle-outline" size={14} color="#00E5FF" />
-                <Text style={st.mapHintText}>Toca o arrastra los marcadores para reubicar</Text>
+              <View style={[st.mapHintWrap, { top: topPad + 4 }]} pointerEvents="none">
+                <View style={st.mapHintPill}>
+                  <Ionicons name="information-circle-outline" size={13} color="#00E5FF" />
+                  <Text style={st.mapHintText} numberOfLines={1}>
+                    Toca o arrastra los puntos para reubicar
+                  </Text>
+                </View>
               </View>
             )}
           </View>
@@ -923,6 +957,10 @@ const CreateReservationScreen = () => {
               },
             ]}
           >
+            {/* Título dentro de la tarjeta inferior */}
+            <Text style={st.panelTitle}>Asigna tu ruta</Text>
+            <Text style={st.panelSubtitle}>Ingresa tu dirección de destino</Text>
+
             {/* Origin input */}
             <View style={{ zIndex: 20 }}>
               <View style={st.inputIconWrap}><View style={[st.inputDot, { backgroundColor: '#00E676' }]} /></View>
@@ -1307,9 +1345,30 @@ const st = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
+  mapBackBtn: {
+    position: 'absolute', left: 16, zIndex: 40,
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(5,26,38,0.88)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 6,
+  },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
 
   mapContainer: { flex: 1 },
+  mapTopFade: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 30,
+  },
+  panelTitle: {
+    fontSize: 20, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3, marginBottom: 4,
+    textAlign: 'center',
+  },
+  panelSubtitle: {
+    fontSize: 13, fontWeight: '400', color: 'rgba(255,255,255,0.45)', marginBottom: 16,
+    textAlign: 'center',
+  },
   myLocBtn: {
     position: 'absolute', bottom: 120, right: 16, width: 44, height: 44, borderRadius: 22,
     backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
@@ -1317,7 +1376,7 @@ const st = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
   },
   zoomControls: {
-    position: 'absolute', left: 16, top: 220, gap: 8,
+    position: 'absolute', left: 16, bottom: 120, gap: 8,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
   },
   zoomBtn: {
@@ -1342,18 +1401,37 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(5,26,38,0.85)',
     alignItems: 'center', justifyContent: 'center',
   },
-  mapHintPill: {
-    position: 'absolute', top: 14, alignSelf: 'center',
-    backgroundColor: 'rgba(5,26,38,0.88)',
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14,
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)',
+  mapHintWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 35,
   },
-  mapHintText: { color: '#00E5FF', fontSize: 11, fontWeight: '600' },
+  mapHintPill: {
+    height: 32,
+    maxWidth: '78%',
+    backgroundColor: 'rgba(5,26,38,0.88)',
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  mapHintText: {
+    color: '#00E5FF',
+    fontSize: 11,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
   searchPanel: {
-    backgroundColor: 'rgba(5,26,38,0.95)', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 40,
+    backgroundColor: '#051A26',
+    paddingHorizontal: 16, paddingTop: 18, paddingBottom: 40,
     borderTopLeftRadius: 28, borderTopRightRadius: 28, marginTop: -60,
     borderTopWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+    overflow: 'hidden',
   },
   inputIconWrap: { position: 'absolute', left: 14, top: 15, zIndex: 20 },
   inputDot: { width: 10, height: 10, borderRadius: 5 },

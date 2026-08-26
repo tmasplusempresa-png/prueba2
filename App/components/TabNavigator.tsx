@@ -1,5 +1,6 @@
 ﻿import React, { useMemo } from "react";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
+import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import HomeScreen from "@/app/(tabs)/index";
 import ProfileScreen from "@/app/(tabs)/ProfileScreen";
@@ -8,49 +9,27 @@ import SearchScreen from "@/app/(tabs)/SearchScreen";
 import CustomerMap from "@/app/(tabs)/CustomerMap";
 import TripPreviewScreen from "@/app/(tabs)/TripPreviewScreen";
 import CustomerHomeScreen from "@/app/(tabs)/CustomerHomeScreen";
+import ReservationsScreen from "@/app/(tabs)/ReservationsScreen";
 import CarsScreen from "@/app/Vehicle/carScreen";
 import ActiveBookingScreen from "@/app/Booking/ActiveBookingScreen";
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
-import { AntDesign, Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { Platform, Dimensions, useColorScheme, StyleSheet, View, ActivityIndicator } from "react-native";
 import { colors } from "@/scripts/theme";
+import CustomerBottomNav from "@/components/CustomerBottomNav";
 
 const Tab = createBottomTabNavigator();
+const CustomerTabs = createMaterialTopTabNavigator();
 const Stack = createNativeStackNavigator();
 const { height, width } = Dimensions.get("window");
 
-// Stack Navigator for Customer Map with Trip Preview
-const CustomerMapStackNavigator: React.FC = () => {
-  return (
-    <Stack.Navigator
-      screenOptions={{ 
-        headerShown: false,
-        animationEnabled: Platform.OS !== "android"
-      }}
-      initialRouteName="CustomerMapHome"
-    >
-      <Stack.Screen 
-        name="CustomerMapHome" 
-        component={CustomerMap}
-        options={{ headerShown: false }}
-      />
-      <Stack.Screen 
-        name="TripPreviewScreen" 
-        component={TripPreviewScreen}
-        options={{ headerShown: false }}
-      />
-    </Stack.Navigator>
-  );
-};
-
-// Stack Navigator for Customer — starts at new home screen
-const CustomerStackNavigator: React.FC = () => {
+const CustomerHomeStack: React.FC = () => {
   return (
     <Stack.Navigator
       screenOptions={{
         headerShown: false,
-        animationEnabled: Platform.OS !== "android",
+        animation: Platform.OS === "android" ? "none" : "default",
       }}
       initialRouteName="CustomerHome"
     >
@@ -61,13 +40,104 @@ const CustomerStackNavigator: React.FC = () => {
   );
 };
 
+/**
+ * Customer root: swipeable tabs + one persistent bottom bar.
+ * Order: Home ↔ Historial ↔ Lugares ↔ Profile
+ * "Viajar" opens CreateReservation (action, not a tab page).
+ */
+const CustomerTabNavigator: React.FC = () => {
+  return (
+    <View style={styles.customerRoot}>
+      <CustomerTabs.Navigator
+        initialRouteName="Home"
+        tabBarPosition="bottom"
+        tabBar={(props) => (
+          <View style={styles.floatingTabBar} pointerEvents="box-none">
+            <CustomerBottomNav {...props} />
+          </View>
+        )}
+        screenOptions={{
+          swipeEnabled: true,
+          lazy: true,
+        }}
+      >
+        <CustomerTabs.Screen name="Home" component={CustomerHomeStack} options={{ title: "Inicio" }} />
+        <CustomerTabs.Screen name="Historial" component={ReservationsScreen} options={{ title: "Historial" }} />
+        <CustomerTabs.Screen name="Lugares" component={SearchScreen} options={{ title: "Lugares" }} />
+        <CustomerTabs.Screen name="Profile" component={ProfileScreen} options={{ title: "Perfil" }} />
+      </CustomerTabs.Navigator>
+    </View>
+  );
+};
+
 const useHasNotch = () => {
-  return Platform.OS === "ios" &&
+  return (
+    Platform.OS === "ios" &&
     !Platform.isPad &&
-    !Platform.isTVOS &&
+    !(Platform as any).isTVOS &&
     [780, 812, 844, 852, 896, 926, 932].some(
-      size => height === size || width === size
-    );
+      (size) => height === size || width === size
+    )
+  );
+};
+
+const DriverTabNavigator: React.FC = () => {
+  const user = useSelector((state: RootState) => state.auth.user);
+  const hasNotch = useHasNotch();
+  const colorScheme = useColorScheme();
+  const tabBarActiveTintColor = "#00f4f5";
+  const tabBarInactiveTintColor = colorScheme === "dark" ? "#888888" : (colors as any).HEADER;
+
+  const tabScreens = useMemo(
+    () => [
+      { name: "Map", component: HomeScreen, title: "Inicio", icon: "map-outline" as const },
+      { name: "Wallet", component: WalletScreen, title: "Billetera", icon: "card-outline" as const },
+      { name: "CarsScreen", component: CarsScreen, title: "Vehiculo", icon: "car-outline" as const },
+      { name: "SearchScreen", component: SearchScreen, title: "Favoritos", icon: "star-outline" as const },
+      {
+        name: "RideList",
+        component: ActiveBookingScreen,
+        title: "Historial",
+        icon: "book" as const,
+        badge: true,
+        badgeCount: (user as any)?.activeBookings?.length || 0,
+      },
+      { name: "Profile", component: ProfileScreen, title: "Perfil", icon: "person-outline" as const },
+    ],
+    [user]
+  );
+
+  return (
+    <Tab.Navigator
+      initialRouteName="Map"
+      screenOptions={({ route }) => {
+        const screen = tabScreens.find((s) => s.name === route.name);
+        return {
+          headerShown: false,
+          tabBarIcon: ({ color, size }) => {
+            const iconName = screen?.icon;
+            if (!iconName) return null;
+            return <Ionicons name={iconName} size={size} color={color} />;
+          },
+          tabBarActiveTintColor,
+          tabBarInactiveTintColor,
+          tabBarBadge: screen?.badge && screen.badgeCount > 0 ? screen.badgeCount : undefined,
+          tabBarBadgeStyle: styles.badge,
+          tabBarStyle: { display: "none", height: hasNotch ? 80 : 55 },
+          tabBarLabelStyle: styles.label,
+        };
+      }}
+    >
+      {tabScreens.map((screen) => (
+        <Tab.Screen
+          key={screen.name}
+          name={screen.name}
+          component={screen.component}
+          options={{ headerShown: false, title: screen.title }}
+        />
+      ))}
+    </Tab.Navigator>
+  );
 };
 
 const TabNavigator: React.FC = () => {
@@ -90,86 +160,6 @@ const TabNavigator: React.FC = () => {
     }
     return null;
   }, [currentUserTypeRaw]);
-  const hasNotch = useHasNotch();
-  const colorScheme = useColorScheme();
-
-  const tabBarActiveTintColor = "#00f4f5";
-  const tabBarInactiveTintColor = colorScheme === 'dark' ? '#888888' : colors.HEADER;
-
-  const tabBarStyle = {
-    backgroundColor: colorScheme === 'dark' ? '#000000' : '#FFFFFF',
-    height: hasNotch ? 80 : 55,
-  };
-
-  // Build screens first and then pick a sensible initial route.
-  // Default to the first available tab when no user-specific home exists.
-
-  const tabScreens = useMemo(() => {
-    const screens = [];
-
-    if (currentUserType === "driver") {
-      screens.push(
-        {
-          name: "Map",
-          component: HomeScreen,
-          title: "Inicio",
-          icon: "map-outline",
-        },
-        {
-          name: "Wallet",
-          component: WalletScreen,
-          title: "Billetera",
-          icon: "card-outline",
-        },
-        {
-          name: "CarsScreen",
-          component: CarsScreen,
-          title: "Vehiculo",
-          icon: "car-outline",
-        }
-      );
-    }
-
-    if (currentUserType === "customer") {
-      screens.push({
-        name: "CustMap",
-        component: CustomerStackNavigator,
-        title: "Inicio",
-        icon: "home-outline",
-      });
-    }
-
-    screens.push(
-      {
-        name: "SearchScreen",
-        component: SearchScreen, 
-        title: "Favoritos",
-        icon: "star-outline",
-      },
-      {
-        name: "RideList",
-        component: ActiveBookingScreen,
-        title: "Historial",
-        icon: "book",
-        badge: true,
-        badgeCount: (user as any)?.activeBookings?.length || 0,
-      },
-      {
-        name: "Profile",
-        component: ProfileScreen,
-        title: "Perfil",
-        icon: "person-outline",
-      }
-    );
-
-    return screens;
-  }, [currentUserType, user]);
-
-  const initialRoute = useMemo(() => {
-    if (currentUserType === "driver") return "Map";
-    if (currentUserType === "customer") return "CustMap";
-    return tabScreens[0]?.name ?? "RideList";
-  }, [currentUserType, tabScreens]);
 
   if (!currentUserType) {
     return (
@@ -179,47 +169,26 @@ const TabNavigator: React.FC = () => {
     );
   }
 
-  return (
-    <Tab.Navigator
-      initialRouteName={initialRoute}
-      screenOptions={({ route }) => {
-        const screen = tabScreens.find(s => s.name === route.name);
-        return {
-          animationEnabled: Platform.OS !== "android",
-          tabBarIcon: ({ color, size }) => {
-            const iconName = screen?.icon;
-            if (iconName) {
-              const IconComponent = AntDesign.name === iconName ? AntDesign : Ionicons;
-              return <IconComponent name={iconName} size={size} color={color} />;
-            }
-            return null;
-          },
-          tabBarActiveTintColor,
-          tabBarInactiveTintColor,
-          tabBarBadge:
-            screen?.badge && screen.badgeCount > 0 ? screen.badgeCount : undefined,
-          tabBarBadgeStyle: styles.badge,
-          tabBarStyle: { display: "none" },
-          tabBarLabelStyle: styles.label,
-        };
-      }}
-    >
-      {tabScreens.map(screen => (
-        <Tab.Screen
-          key={screen.name}
-          name={screen.name}
-          component={screen.component}
-          options={{
-            headerShown: false,
-            title: screen.title,
-          }}
-        />
-      ))}
-    </Tab.Navigator>
-  );
+  if (currentUserType === "customer") {
+    return <CustomerTabNavigator />;
+  }
+
+  return <DriverTabNavigator />;
 };
 
 const styles = StyleSheet.create({
+  customerRoot: {
+    flex: 1,
+    backgroundColor: "#051A26",
+  },
+  floatingTabBar: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "transparent",
+    overflow: "visible",
+  },
   loadingWrap: {
     flex: 1,
     alignItems: "center",

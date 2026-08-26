@@ -21,6 +21,7 @@ import { logout } from "@/common/reducers/authReducer";
 import { AppConfig } from "@/config/AppConfig";
 import { getDriverOwnReferralCode, DriverReferralCode } from "@/common/services/referralsService";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
 
@@ -394,20 +395,28 @@ const ProfileScreen = ({ navigation }: Props) => {
     navigation.navigate("HomeScreen");
   };
 
+  const isCustomer = currentUserType === "customer";
+  const navBottomPad = useCustomerNavBottomPad();
+
   return (
     <View style={styles.container}>
       <Image source={BG_IMAGE} style={styles.bgImage} resizeMode="cover" />
       <View pointerEvents="none" style={styles.bgOverlay} />
       {/* Eliminado: círculos/ellipses de fondo (bgGlowTop y bgGlowBottom) */}
 
-      <View style={styles.headerArea}>
-        <TouchableOpacity style={styles.headerBackBtn} onPress={goBackFromProfile} activeOpacity={0.85}>
-          <Ionicons name="arrow-back" size={20} color="#00E5FF" />
-        </TouchableOpacity>
+      <View style={[styles.headerArea, isCustomer && styles.headerAreaCentered]}>
+        {!isCustomer && (
+          <TouchableOpacity style={styles.headerBackBtn} onPress={goBackFromProfile} activeOpacity={0.85}>
+            <Ionicons name="arrow-back" size={20} color="#00E5FF" />
+          </TouchableOpacity>
+        )}
         <Text style={styles.headerTitle}>Mi Perfil</Text>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.contentArea}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={[styles.contentArea, isCustomer && { paddingBottom: navBottomPad + 36 }]}
+      >
         <View style={styles.userCard}>
           <View style={styles.avatarRing}>
             {(user as any)?.profile_image ? (
@@ -572,6 +581,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "rgba(0,229,255,0.08)",
     backgroundColor: "rgba(5,26,38,0.82)",
+  },
+  headerAreaCentered: {
+    justifyContent: "center",
   },
   headerBackBtn: {
     width: 36,

@@ -19,6 +19,7 @@ import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 const PAGE_SIZE = 50;
@@ -186,7 +187,8 @@ const ReservationsScreen = () => {
   const user    = useSelector((s: RootState) => s.auth.user)    as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
-  const bottomPad = insets.bottom + 120;
+  const navBottomPad = useCustomerNavBottomPad();
+  const bottomPad = navBottomPad + 20;
 
   // profile.id = users.id (UUID interno guardado en bookings.customer)
   // user.auth_id = Supabase Auth UUID (distinto al anterior, no se usa en bookings)
@@ -357,11 +359,9 @@ const ReservationsScreen = () => {
         <View style={styles.glowBottomLeft} />
       </View>
 
-      {/* Header */}
+      {/* Header — sin botón volver: esta pantalla es destino del tab bar */}
       <View style={[styles.header, { paddingTop: topPad }]}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
-          <Ionicons name="chevron-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
+        <View style={styles.headerSpacer} />
         <Text style={styles.headerTitle}>Tus Reservas</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -509,11 +509,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingBottom: 16,
     backgroundColor: 'rgba(5,26,38,0.82)',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  backBtn: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center', justifyContent: 'center',
   },
   headerTitle: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3 },
   headerSpacer: { width: 40 },

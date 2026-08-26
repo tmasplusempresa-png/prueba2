@@ -27,6 +27,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { API_KEY } from "@/config/AppConfig";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 
 // ── Supabase REST directo (el cliente JS cuelga) ──
 const MAX_FAVORITES = 5;
@@ -108,8 +109,18 @@ const DiamondParticle = ({ size, x, y, color, duration, delay }: typeof PARTICLE
 };
 
 export default function FavoritesScreen({ navigation }: Props) {
-  const user = useSelector((state: RootState) => state.auth.user);
-  const profile = useSelector((state: RootState) => state.auth.profile);
+  const user = useSelector((state: RootState) => state.auth.user) as any;
+  const profile = useSelector((state: RootState) => state.auth.profile) as any;
+  const navBottomPad = useCustomerNavBottomPad();
+  const isCustomer = String(
+    profile?.user_type ||
+      user?.usertype ||
+      user?.user_type ||
+      user?.userType ||
+      user?.user_metadata?.usertype ||
+      user?.user_metadata?.user_type ||
+      ''
+  ).toLowerCase() === 'customer';
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
@@ -589,12 +600,16 @@ export default function FavoritesScreen({ navigation }: Props) {
           },
         ]}
       >
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={{ padding: 10, marginRight: 12 }}
-        >
-          <AntDesign name="arrow-left" size={24} color="#E9F6FF" />
-        </TouchableOpacity> 
+        {isCustomer ? (
+          <View style={{ width: 44, marginRight: 12 }} />
+        ) : (
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={{ padding: 10, marginRight: 12 }}
+          >
+            <AntDesign name="arrow-left" size={24} color="#E9F6FF" />
+          </TouchableOpacity>
+        )}
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Mis Direcciones</Text>
           <Text style={styles.headerSubtitle}>
@@ -725,7 +740,7 @@ export default function FavoritesScreen({ navigation }: Props) {
             data={filteredAddresses}
             renderItem={renderAddressItem}
             keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[styles.listContent, isCustomer && { paddingBottom: navBottomPad + 30 }]}
             showsVerticalScrollIndicator={false}
             ListEmptyComponent={renderEmptyList}
             keyboardShouldPersistTaps="handled"

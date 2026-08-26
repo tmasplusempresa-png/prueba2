@@ -26,6 +26,7 @@ import * as Speech from 'expo-speech';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import BookingRealtimeService from '@/common/services/BookingRealtimeService';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 const CARD_W = 260;
@@ -175,11 +176,9 @@ const CustomerHomeScreen = () => {
   const scrollY = useRef(new Animated.Value(0)).current;
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOp = useRef(new Animated.Value(0.5)).current;
-  const navPulseScale = useRef(new Animated.Value(1)).current;
-  const navPulseOp = useRef(new Animated.Value(0.45)).current;
   const bellAnim = useRef(new Animated.Value(0)).current;
-  const navCtrScale = useRef(new Animated.Value(1)).current;
   const navigateLockRef = useRef(false);
+  const navBottomPad = useCustomerNavBottomPad();
 
   const greeting = useCallback(() => {
     const h = new Date().getHours();
@@ -366,31 +365,6 @@ const CustomerHomeScreen = () => {
     };
   }, [isFocused, nav]);
 
-  useEffect(() => {
-    if (!isFocused) {
-      navPulseScale.stopAnimation();
-      navPulseOp.stopAnimation();
-      navPulseScale.setValue(1);
-      navPulseOp.setValue(0.45);
-      return;
-    }
-
-    const loop = Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
-          Animated.timing(navPulseScale, { toValue: 2.4, duration: 2400, useNativeDriver: true }),
-          Animated.timing(navPulseScale, { toValue: 1, duration: 0, useNativeDriver: true }),
-        ]),
-        Animated.sequence([
-          Animated.timing(navPulseOp, { toValue: 0, duration: 2400, useNativeDriver: true }),
-          Animated.timing(navPulseOp, { toValue: 0.45, duration: 0, useNativeDriver: true }),
-        ]),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [isFocused, navPulseOp, navPulseScale]);
-
   const navigateToCreateReservation = useCallback(() => {
     if (navigateLockRef.current) return;
     navigateLockRef.current = true;
@@ -403,20 +377,11 @@ const CustomerHomeScreen = () => {
     });
   }, [nav]);
 
-  const onCenterPress = useCallback(() => {
-    Animated.sequence([
-      Animated.timing(navCtrScale, { toValue: 0.88, duration: 100, useNativeDriver: true }),
-      Animated.spring(navCtrScale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 14 }),
-    ]).start();
-    navigateToCreateReservation();
-  }, [navCtrScale, navigateToCreateReservation]);
-
   const firstName = dbFirstName || profile?.first_name || profile?.firstName || user?.first_name || user?.firstName || user?.user_metadata?.first_name || user?.user_metadata?.firstName || '';
   const lastName = dbLastName || profile?.last_name || profile?.lastName || user?.last_name || user?.lastName || user?.user_metadata?.last_name || user?.user_metadata?.lastName || '';
   const displayName = firstName ? `${firstName}${lastName ? ' ' + lastName : ''}` : 'Usuario';
   const headerTopPad = Math.max(insets.top, Platform.OS === 'ios' ? 14 : 10) + 6;
-  const navBottomOffset = insets.bottom + 10;
-  const scrollBottomPad = 160 + navBottomOffset;
+  const scrollBottomPad = 60 + navBottomPad;
   const headerBgOp = scrollY.interpolate({ inputRange: [0, 40], outputRange: [0, 1], extrapolate: 'clamp' });
   const bellRot = bellAnim.interpolate({ inputRange: [-15, 0, 15], outputRange: ['-15deg', '0deg', '15deg'] });
 
@@ -512,13 +477,13 @@ const CustomerHomeScreen = () => {
           onMomentumScrollEnd={onCardScroll}
           scrollEventThrottle={32}
         >
-          <Scalable onPress={() => nav.navigate('ReservationsScreen')} liftBy={-4} style={[s.tplusCard, s.cardReservas]}>
+          <Scalable onPress={() => nav.navigate('Historial')} liftBy={-4} style={[s.tplusCard, s.cardReservas]}>
             <View style={s.cardIconWrap}><Ionicons name="time-outline" size={40} color="#00E5FF" /></View>
             <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>¡Tus Reservas!</Text>
             <Text style={s.cardDesc}>Tienes 0 reservas activas. Toca aquí para ver detalles y estar al tanto de tus viajes.</Text>
             <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver reservas</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
           </Scalable>
-          <Scalable onPress={() => nav.navigate('ReservationsScreen')} liftBy={-4} style={[s.tplusCard, s.cardHistorial]}>
+          <Scalable onPress={() => nav.navigate('Historial')} liftBy={-4} style={[s.tplusCard, s.cardHistorial]}>
             <View style={s.cardIconWrap}><Ionicons name="document-text-outline" size={40} color="#00E5FF" /></View>
             <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>Historial</Text>
             <Text style={s.cardDesc}>Revisa tu historial de viajes, pagos y actividad reciente en un solo lugar.</Text>
@@ -557,21 +522,6 @@ const CustomerHomeScreen = () => {
           ))}
         </View>
       </Animated.ScrollView>
-      <View style={[s.bottomNav, { bottom: navBottomOffset }]}>
-        <View style={s.navItems}>
-          <View style={s.navItem}><Ionicons name="home" size={22} color="#00E5FF" /><Text style={[s.navLbl, s.navLblActive]}>Inicio</Text><View style={s.navInd} /></View>
-          <TouchableOpacity style={s.navItem} onPress={() => nav.navigate('ReservationsScreen')} activeOpacity={0.7}><Ionicons name="pulse-outline" size={22} color="rgba(255,255,255,0.3)" /><Text style={s.navLbl}>Historial</Text></TouchableOpacity>
-          <TouchableOpacity style={s.navCenterItem} onPress={onCenterPress} activeOpacity={1}>
-            <View style={s.navCenterPulseWrap}>
-              <Animated.View pointerEvents="none" style={[s.navCenterPulseRing, { transform: [{ scale: navPulseScale }], opacity: navPulseOp }]} />
-              <Animated.View style={[s.navCenterBtn, { transform: [{ scale: navCtrScale }] }]}><Ionicons name="navigate" size={26} color="#051A26" /></Animated.View>
-            </View>
-            <Text style={s.navLbl}>Viajar</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={s.navItem} onPress={() => nav.navigate('Search')} activeOpacity={0.7}><Ionicons name="location-outline" size={22} color="rgba(255,255,255,0.3)" /><Text style={s.navLbl}>Lugares</Text></TouchableOpacity>
-          <TouchableOpacity style={s.navItem} onPress={() => nav.navigate('Profile')} activeOpacity={0.7}><Ionicons name="person-outline" size={22} color="rgba(255,255,255,0.3)" /><Text style={s.navLbl}>Perfil</Text></TouchableOpacity>
-        </View>
-      </View>
     </View>
   );
 };
@@ -719,16 +669,6 @@ const s = StyleSheet.create({
   benefitIconWrap: { width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(0,229,255,0.15)', justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
   benefitLabel: { fontSize: 14, fontWeight: '600', color: '#ffffff', marginBottom: 2 },
   benefitSub: { fontSize: 12, color: 'rgba(255,255,255,0.5)', textAlign: 'center' },
-  bottomNav: { position: 'absolute', left: 0, right: 0, paddingHorizontal: 16 },
-  navItems: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 8, paddingHorizontal: 8, borderRadius: 28, backgroundColor: 'rgba(8,35,50,0.92)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)', shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 16, elevation: 20 },
-  navItem: { alignItems: 'center', paddingVertical: 8, paddingHorizontal: 8, borderRadius: 14, minWidth: 52, position: 'relative' },
-  navCenterItem: { alignItems: 'center', paddingHorizontal: 8 },
-  navCenterPulseWrap: { width: 56, height: 56, marginTop: -16, marginBottom: 2, justifyContent: 'center', alignItems: 'center' },
-  navCenterPulseRing: { position: 'absolute', left: -4, right: -4, top: -4, bottom: -4, borderRadius: 32, borderWidth: 2, borderColor: 'rgba(0,229,255,0.35)' },
-  navCenterBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#00E5FF', justifyContent: 'center', alignItems: 'center', shadowColor: '#00E5FF', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 12, elevation: 12 },
-  navLbl: { fontSize: 10, fontWeight: '500', letterSpacing: 0.3, color: 'rgba(255,255,255,0.3)', marginTop: 2 },
-  navLblActive: { color: '#00E5FF' },
-  navInd: { position: 'absolute', bottom: 0, alignSelf: 'center', width: 20, height: 2, borderRadius: 2, backgroundColor: '#00E5FF' },
 });
 
 export default CustomerHomeScreen;
