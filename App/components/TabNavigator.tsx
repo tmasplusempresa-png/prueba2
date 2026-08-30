@@ -1,5 +1,4 @@
 ﻿import React, { useMemo } from "react";
-import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import HomeScreen from "@/app/(tabs)/index";
@@ -10,19 +9,17 @@ import CustomerMap from "@/app/(tabs)/CustomerMap";
 import TripPreviewScreen from "@/app/(tabs)/TripPreviewScreen";
 import CustomerHomeScreen from "@/app/(tabs)/CustomerHomeScreen";
 import ReservationsScreen from "@/app/(tabs)/ReservationsScreen";
+import DriverActivityScreen from "@/app/(tabs)/DriverActivityScreen";
 import CarsScreen from "@/app/Vehicle/carScreen";
-import ActiveBookingScreen from "@/app/Booking/ActiveBookingScreen";
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
-import { Ionicons } from "@expo/vector-icons";
-import { Platform, Dimensions, useColorScheme, StyleSheet, View, ActivityIndicator } from "react-native";
-import { colors } from "@/scripts/theme";
+import { Platform, StyleSheet, View, ActivityIndicator } from "react-native";
 import CustomerBottomNav from "@/components/CustomerBottomNav";
+import DriverBottomNav from "@/components/DriverBottomNav";
 
-const Tab = createBottomTabNavigator();
 const CustomerTabs = createMaterialTopTabNavigator();
+const DriverTabs = createMaterialTopTabNavigator();
 const Stack = createNativeStackNavigator();
-const { height, width } = Dimensions.get("window");
 
 const CustomerHomeStack: React.FC = () => {
   return (
@@ -70,73 +67,33 @@ const CustomerTabNavigator: React.FC = () => {
   );
 };
 
-const useHasNotch = () => {
-  return (
-    Platform.OS === "ios" &&
-    !Platform.isPad &&
-    !(Platform as any).isTVOS &&
-    [780, 812, 844, 852, 896, 926, 932].some(
-      (size) => height === size || width === size
-    )
-  );
-};
-
+/**
+ * Driver root: swipeable tabs + one persistent bottom bar.
+ * Order: Vehículo ↔ Billetera ↔ GO ↔ Historial ↔ Perfil
+ */
 const DriverTabNavigator: React.FC = () => {
-  const user = useSelector((state: RootState) => state.auth.user);
-  const hasNotch = useHasNotch();
-  const colorScheme = useColorScheme();
-  const tabBarActiveTintColor = "#00f4f5";
-  const tabBarInactiveTintColor = colorScheme === "dark" ? "#888888" : (colors as any).HEADER;
-
-  const tabScreens = useMemo(
-    () => [
-      { name: "Map", component: HomeScreen, title: "Inicio", icon: "map-outline" as const },
-      { name: "Wallet", component: WalletScreen, title: "Billetera", icon: "card-outline" as const },
-      { name: "CarsScreen", component: CarsScreen, title: "Vehiculo", icon: "car-outline" as const },
-      { name: "SearchScreen", component: SearchScreen, title: "Favoritos", icon: "star-outline" as const },
-      {
-        name: "RideList",
-        component: ActiveBookingScreen,
-        title: "Historial",
-        icon: "book" as const,
-        badge: true,
-        badgeCount: (user as any)?.activeBookings?.length || 0,
-      },
-      { name: "Profile", component: ProfileScreen, title: "Perfil", icon: "person-outline" as const },
-    ],
-    [user]
-  );
-
   return (
-    <Tab.Navigator
-      initialRouteName="Map"
-      screenOptions={({ route }) => {
-        const screen = tabScreens.find((s) => s.name === route.name);
-        return {
-          headerShown: false,
-          tabBarIcon: ({ color, size }) => {
-            const iconName = screen?.icon;
-            if (!iconName) return null;
-            return <Ionicons name={iconName} size={size} color={color} />;
-          },
-          tabBarActiveTintColor,
-          tabBarInactiveTintColor,
-          tabBarBadge: screen?.badge && screen.badgeCount > 0 ? screen.badgeCount : undefined,
-          tabBarBadgeStyle: styles.badge,
-          tabBarStyle: { display: "none", height: hasNotch ? 80 : 55 },
-          tabBarLabelStyle: styles.label,
-        };
-      }}
-    >
-      {tabScreens.map((screen) => (
-        <Tab.Screen
-          key={screen.name}
-          name={screen.name}
-          component={screen.component}
-          options={{ headerShown: false, title: screen.title }}
-        />
-      ))}
-    </Tab.Navigator>
+    <View style={styles.driverRoot}>
+      <DriverTabs.Navigator
+        initialRouteName="Map"
+        tabBarPosition="bottom"
+        tabBar={(props) => (
+          <View style={styles.floatingTabBar} pointerEvents="box-none">
+            <DriverBottomNav {...props} />
+          </View>
+        )}
+        screenOptions={{
+          swipeEnabled: true,
+          lazy: true,
+        }}
+      >
+        <DriverTabs.Screen name="Cars" component={CarsScreen} options={{ title: "Vehículo" }} />
+        <DriverTabs.Screen name="Wallet" component={WalletScreen} options={{ title: "Billetera" }} />
+        <DriverTabs.Screen name="Map" component={HomeScreen} options={{ title: "GO", lazy: false }} />
+        <DriverTabs.Screen name="Historial" component={DriverActivityScreen} options={{ title: "Historial" }} />
+        <DriverTabs.Screen name="Profile" component={ProfileScreen} options={{ title: "Perfil" }} />
+      </DriverTabs.Navigator>
+    </View>
   );
 };
 
@@ -181,6 +138,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#051A26",
   },
+  driverRoot: {
+    flex: 1,
+    backgroundColor: "#051A26",
+  },
   floatingTabBar: {
     position: "absolute",
     left: 0,
@@ -194,13 +155,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#041B2D",
-  },
-  badge: {
-    transform: [{ scaleX: 1 }],
-  },
-  label: {
-    fontSize: 14,
-    transform: [{ scaleX: 1 }],
   },
 });
 

@@ -1,18 +1,11 @@
-import React, { useEffect, useState, useRef, ReactNode } from "react";
-import {
-  View,
-  Platform,
-  StyleSheet,
-  Text,
-  Image,
-} from "react-native";
+import React, { useCallback, useEffect, useMemo, useState, useRef, ReactNode, forwardRef, useImperativeHandle } from "react";
+import { View, StyleSheet } from "react-native";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { useSelector } from "react-redux";
-import { RootState } from "@/common/store";
-import markerIcon from "@/assets/images/NavegApp.png";
 import { getDistance } from "geolib";
+import { DRIVER_LOCATION_PUCK_IMAGE } from '@/components/DriverMapLocationMarker';
+import { getGoogleMapStyle, GoogleMapTheme } from '@/config/googleMapsDarkStyle';
 
 const DEFAULT_REGION = {
   latitude: 4.7110,
@@ -21,219 +14,57 @@ const DEFAULT_REGION = {
   longitudeDelta: 0.005,
 };
 
-// Define estilos para el modo claro
-const mapStyleLight = [
-  {
-    elementType: "labels.text.fill",
-    stylers: [{ color: "#523735" }],
-  },
-  // Agrega más estilos según sea necesario
-];
+export type MapViewMode = '2D' | '3D';
 
-// Define estilos para el modo oscuro
-const darkMapStyle = [
-  {
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#212121",
-      },
-    ],
-  },
-  {
-    elementType: "labels.icon",
-    stylers: [
-      {
-        visibility: "off",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#757575",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#212121",
-      },
-    ],
-  },
-  {
-    featureType: "administrative",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#757575",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.country",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#9e9e9e",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.land_parcel",
-    stylers: [
-      {
-        visibility: "off",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.locality",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#bdbdbd",
-      },
-    ],
-  },
-  {
-    featureType: "poi",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#757575",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#181818",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#616161",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#1b1b1b",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry.fill",
-    stylers: [
-      {
-        color: "#2c2c2c",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#8a8a8a",
-      },
-    ],
-  },
-  {
-    featureType: "road.arterial",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#373737",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#3c3c3c",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway.controlled_access",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#4e4e4e",
-      },
-    ],
-  },
-  {
-    featureType: "road.local",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#616161",
-      },
-    ],
-  },
-  {
-    featureType: "transit",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#757575",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#000000",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#3d3d3d",
-      },
-    ],
-  },
-];
+export interface MapSensorHandle {
+  locateUser: () => void;
+  setViewMode: (mode: MapViewMode) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+}
 
 interface MapSensorProps {
   children?: ReactNode;
   currentPosition?: [number, number] | null;
+  viewMode?: MapViewMode;
+  mapTheme?: GoogleMapTheme;
+  mapBottomPadding?: number;
 }
 
 type CameraSnapshot = {
   latitude: number;
   longitude: number;
   heading: number;
+  pitch: number;
 };
 
-const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null }) => {
+const pitchForMode = (mode: MapViewMode) => (mode === '3D' ? 68 : 0);
+const DEFAULT_ZOOM = 19;
+const MIN_ZOOM = 14;
+const MAX_ZOOM = 21;
+
+const clampAccuracy = (meters: number | null | undefined) =>
+  Math.min(Math.max(meters ?? 30, 12), 120);
+
+/** Radio visible del área de precisión — crece al alejar zoom para no perderse en pantalla. */
+const accuracyRadiusForZoom = (baseMeters: number, zoom: number) => {
+  const levelsOut = Math.max(0, DEFAULT_ZOOM - zoom);
+  const scaled = baseMeters * Math.pow(2, levelsOut * 0.92);
+  return Math.min(Math.max(scaled, baseMeters), 1000);
+};
+
+const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
+  ({ children, currentPosition = null, viewMode = '3D', mapTheme = 'dark', mapBottomPadding = 0 }, ref) => {
   const mapRef = useRef<MapView>(null);
   const headingRef = useRef(0);
   const lastCameraRef = useRef<CameraSnapshot | null>(null);
   const hasMountedCameraRef = useRef(false);
+  const viewModeRef = useRef<MapViewMode>(viewMode);
+  const zoomRef = useRef(DEFAULT_ZOOM);
+  const regionRef = useRef({
+    latitude: currentPosition ? currentPosition[1] : DEFAULT_REGION.latitude,
+    longitude: currentPosition ? currentPosition[0] : DEFAULT_REGION.longitude,
+  });
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -254,6 +85,49 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
   });
   const [heading, setHeading] = useState(0);
   const [locationReady, setLocationReady] = useState(false);
+  const [locationAccuracy, setLocationAccuracy] = useState(30);
+  const [mapZoom, setMapZoom] = useState(DEFAULT_ZOOM);
+  const [areaPulse, setAreaPulse] = useState(0.5);
+
+  const mapStyle = useMemo(() => getGoogleMapStyle(mapTheme), [mapTheme]);
+
+  const displayAccuracyRadius = useMemo(
+    () => accuracyRadiusForZoom(clampAccuracy(locationAccuracy), mapZoom),
+    [locationAccuracy, mapZoom],
+  );
+
+  const areaFillColor = useMemo(
+    () => `rgba(0, 229, 255, ${0.08 + areaPulse * 0.1})`,
+    [areaPulse],
+  );
+  const areaStrokeColor = useMemo(
+    () => `rgba(0, 229, 255, ${0.22 + areaPulse * 0.14})`,
+    [areaPulse],
+  );
+
+  useEffect(() => {
+    let frame = 0;
+    const start = Date.now();
+    const tick = () => {
+      const t = (Date.now() - start) / 1800;
+      setAreaPulse(0.5 + 0.5 * Math.sin(t * Math.PI * 2));
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  const syncMapZoom = useCallback(async () => {
+    try {
+      const camera = await mapRef.current?.getCamera();
+      if (camera?.zoom != null) {
+        zoomRef.current = camera.zoom;
+        setMapZoom(camera.zoom);
+      }
+    } catch {
+      /* noop */
+    }
+  }, []);
 
   const syncCamera = (
     latitude: number,
@@ -261,6 +135,7 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
     nextHeading: number,
     duration: number,
     force = false,
+    pitch = pitchForMode(viewModeRef.current),
   ) => {
     const lastCamera = lastCameraRef.current;
     const headingDelta = lastCamera ? Math.abs(lastCamera.heading - nextHeading) : Number.POSITIVE_INFINITY;
@@ -271,21 +146,57 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
         )
       : Number.POSITIVE_INFINITY;
 
-    if (!force && lastCamera && movedMeters < 4 && headingDelta < 8) {
+    if (!force && lastCamera && movedMeters < 4 && headingDelta < 8 && lastCamera.pitch === pitch) {
       return;
     }
 
-    lastCameraRef.current = { latitude, longitude, heading: nextHeading };
+    lastCameraRef.current = { latitude, longitude, heading: nextHeading, pitch };
+    regionRef.current = { latitude, longitude };
     mapRef.current?.animateCamera(
       {
         center: { latitude, longitude },
         heading: nextHeading,
-        pitch: 68,
-        zoom: 19,
+        pitch,
+        zoom: zoomRef.current,
       },
       { duration }
     );
   };
+
+  const animateZoom = (delta: number) => {
+    zoomRef.current = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current + delta));
+    setMapZoom(zoomRef.current);
+    const { latitude, longitude } = regionRef.current;
+    mapRef.current?.animateCamera(
+      {
+        center: { latitude, longitude },
+        heading: headingRef.current,
+        pitch: pitchForMode(viewModeRef.current),
+        zoom: zoomRef.current,
+      },
+      { duration: 220 },
+    );
+  };
+
+  useImperativeHandle(ref, () => ({
+    locateUser: () => {
+      const { latitude, longitude } = regionRef.current;
+      syncCamera(latitude, longitude, headingRef.current, 450, true);
+    },
+    setViewMode: (mode: MapViewMode) => {
+      viewModeRef.current = mode;
+      const { latitude, longitude } = regionRef.current;
+      syncCamera(latitude, longitude, headingRef.current, 500, true, pitchForMode(mode));
+    },
+    zoomIn: () => animateZoom(1),
+    zoomOut: () => animateZoom(-1),
+  }));
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+    const { latitude, longitude } = regionRef.current;
+    syncCamera(latitude, longitude, headingRef.current, 500, true, pitchForMode(viewMode));
+  }, [viewMode]);
 
   useEffect(() => {
     let subscription: Location.LocationSubscription | null = null;
@@ -302,11 +213,13 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
         const first = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.High,
         });
-        const { latitude, longitude, heading: h } = first.coords;
+        const { latitude, longitude, heading: h, accuracy } = first.coords;
         const resolvedHeading = h || 0;
         setRegion(prev => ({ ...prev, latitude, longitude }));
+        regionRef.current = { latitude, longitude };
         setHeading(resolvedHeading);
         headingRef.current = resolvedHeading;
+        setLocationAccuracy(clampAccuracy(accuracy));
         setLocationReady(true);
         syncCamera(latitude, longitude, resolvedHeading, 400, true);
         hasMountedCameraRef.current = true;
@@ -317,11 +230,13 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
       subscription = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Highest, distanceInterval: 2, timeInterval: 1500 },
         (loc) => {
-          const { latitude, longitude, heading: h } = loc.coords;
+          const { latitude, longitude, heading: h, accuracy } = loc.coords;
           const newHeading = (h !== null && !isNaN(h)) ? h : headingRef.current;
           setRegion(prev => ({ ...prev, latitude, longitude }));
+          regionRef.current = { latitude, longitude };
           setHeading(newHeading);
           headingRef.current = newHeading;
+          setLocationAccuracy(clampAccuracy(accuracy));
           syncCamera(latitude, longitude, newHeading, hasMountedCameraRef.current ? 800 : 400, !hasMountedCameraRef.current);
           hasMountedCameraRef.current = true;
         }
@@ -332,10 +247,24 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
     return () => { subscription?.remove(); };
   }, []);
 
+  const restoreCameraAfterMount = useCallback(() => {
+    const { latitude, longitude } = regionRef.current;
+    requestAnimationFrame(() => {
+      mapRef.current?.setCamera({
+        center: { latitude, longitude },
+        heading: headingRef.current,
+        pitch: pitchForMode(viewModeRef.current),
+        zoom: zoomRef.current,
+        altitude: 200,
+      });
+    });
+  }, []);
+
   useEffect(() => {
     if (currentPosition) {
       const [longitude, latitude] = currentPosition;
       setRegion(prev => ({ ...prev, latitude, longitude }));
+      regionRef.current = { latitude, longitude };
       syncCamera(latitude, longitude, headingRef.current, 400, true);
       hasMountedCameraRef.current = true;
     }
@@ -344,35 +273,53 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
   return (
     <View style={styles.container}>
       <MapView
+        key={`driver-map-${mapTheme}`}
         ref={mapRef}
         style={styles.map}
         provider={PROVIDER_GOOGLE}
-        showsUserLocation={true}
+        customMapStyle={mapStyle}
+        showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
         scrollEnabled={true}
         zoomEnabled={true}
         rotateEnabled={true}
         pitchEnabled={true}
+        onMapReady={restoreCameraAfterMount}
+        onRegionChangeComplete={() => { syncMapZoom(); }}
+        mapPadding={{
+          top: 0,
+          right: 0,
+          bottom: mapBottomPadding,
+          left: 0,
+        }}
         initialCamera={{
           center: { latitude: region.latitude, longitude: region.longitude },
-          pitch: 68,
+          pitch: pitchForMode(viewMode),
           heading,
-          zoom: 19,
+          zoom: zoomRef.current,
           altitude: 200,
         }}
       >
         {locationReady && (
-          <Marker
-            coordinate={{ latitude: region.latitude, longitude: region.longitude }}
-            anchor={{ x: 0.5, y: 0.5 }}
-            flat={true}
-            rotation={heading}
-          >
-            <View style={styles.markerWrap}>
-              <Image source={markerIcon} style={styles.markerImg} />
-            </View>
-          </Marker>
+          <>
+            <Circle
+              center={{ latitude: region.latitude, longitude: region.longitude }}
+              radius={displayAccuracyRadius}
+              fillColor={areaFillColor}
+              strokeColor={areaStrokeColor}
+              strokeWidth={1}
+              zIndex={1}
+            />
+            <Marker
+              coordinate={{ latitude: region.latitude, longitude: region.longitude }}
+              anchor={{ x: 0.5, y: 0.5 }}
+              flat={viewMode === '3D'}
+              rotation={viewMode === '3D' ? heading : 0}
+              image={DRIVER_LOCATION_PUCK_IMAGE}
+              zIndex={2}
+            />
+          </>
         )}
         {children}
       </MapView>
@@ -387,14 +334,13 @@ const MapSensor: React.FC<MapSensorProps> = ({ children, currentPosition = null 
       />
     </View>
   );
-};
+});
+
+MapSensor.displayName = 'MapSensor';
 
 const styles = StyleSheet.create({
   container: { ...StyleSheet.absoluteFillObject },
   map: { ...StyleSheet.absoluteFillObject },
-  markerWrap: { alignItems: 'center', justifyContent: 'center' },
-  markerImg: { width: 52, height: 52, resizeMode: 'contain' },
 });
 
 export default React.memo(MapSensor);
-

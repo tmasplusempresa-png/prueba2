@@ -25,6 +25,8 @@ import { useIsFocused } from "@react-navigation/native";
 import { RootState } from "@/common/store";
 import { VEHICLE_RULES } from "@/common/utils/vehicleRules";
 import { toCanonicalCarType } from "@/common/utils/carType";
+import { useDriverNavBottomPad, useIsDriverUser } from "@/components/DriverBottomNav";
+import { FIXED_TEXT_PROPS } from "@/common/utils/typography";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -125,6 +127,8 @@ const CarsScreen = ({ navigation }: Props) => {
   const insets = useSafeAreaInsets();
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const isFocused = useIsFocused();
+  const isDriverUser = useIsDriverUser();
+  const driverNavPad = useDriverNavBottomPad();
 
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,7 +157,11 @@ const CarsScreen = ({ navigation }: Props) => {
   const heroScale = useRef(new Animated.Value(0.96)).current;
 
   const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
-  const contentBottomPadding = Platform.OS === "android" ? Math.max(insets.bottom, 12) + 88 : insets.bottom + 100;
+  const contentBottomPadding = isDriverUser
+    ? driverNavPad + 24
+    : Platform.OS === "android"
+      ? Math.max(insets.bottom, 12) + 88
+      : insets.bottom + 100;
   const modalBottomPadding = insets.bottom + 20;
 
   const vehicleLimitReached = vehicles.length >= VEHICLE_RULES.MAX_VEHICLES_PER_DRIVER;
@@ -405,13 +413,15 @@ const CarsScreen = ({ navigation }: Props) => {
       <View pointerEvents="none" style={styles.bgGlowBottom} />
 
       <Animated.View style={[styles.header, { paddingTop: headerTopPadding, opacity: headerOpacity }]}>        
-        <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()} activeOpacity={0.84}>
-          <Ionicons name="arrow-back" size={20} color="#FFFFFF" />
-        </TouchableOpacity>
+        {!isDriverUser ? (
+          <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()} activeOpacity={0.84}>
+            <Ionicons name="arrow-back" size={20} color="#FFFFFF" />
+          </TouchableOpacity>
+        ) : null}
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerEyebrow}>T+plus</Text>
-          <Text style={styles.headerTitle}>Mis Vehiculos</Text>
+        <View style={[styles.headerTitleWrap, isDriverUser && styles.headerTitleWrapDriver]}>
+          <Text {...FIXED_TEXT_PROPS} style={styles.headerEyebrow}>T+plus</Text>
+          <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={styles.headerTitle}>Mis Vehiculos</Text>
         </View>
 
         <TouchableOpacity
@@ -431,8 +441,8 @@ const CarsScreen = ({ navigation }: Props) => {
         <Animated.View style={{ transform: [{ scale: heroScale }] }}>
           <View style={styles.heroCard}>
             <Text style={styles.heroTag}>Crear Vehiculo</Text>
-            <Text style={styles.heroTitle}>Tu acceso inteligente para conducir en T+plus</Text>
-            <Text style={styles.heroText}>
+            <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={styles.heroTitle}>Tu acceso inteligente para conducir en T+plus</Text>
+            <Text {...FIXED_TEXT_PROPS} numberOfLines={4} style={styles.heroText}>
               Administra tus vehiculos, activa el que usaras hoy y agrega uno nuevo cuando lo necesites.
             </Text>
 
@@ -478,17 +488,23 @@ const CarsScreen = ({ navigation }: Props) => {
             {vehicles.map((car: any, index: number) => (
               <AnimatedCard key={car.id || `v-${index}`} index={index} style={styles.vehicleCard}>
                 <TouchableOpacity activeOpacity={0.92} onPress={() => openDetails(car)}>
-                  <View style={styles.vehicleImageWrap}>
-                    <Image
-                      source={car?.car_image ? { uri: car.car_image } : getCategoryImage(car?.carType)}
-                      style={styles.vehicleImage}
-                      resizeMode="cover"
-                    />
+                  <View style={styles.statusPillRow}>
                     <View style={[styles.statusPill, car?.active ? styles.statusPillActive : styles.statusPillInactive]}>
                       <View style={[styles.statusDot, { backgroundColor: car?.active ? '#00E5FF' : 'rgba(255,255,255,0.4)' }]} />
                       <Text style={[styles.statusPillText, car?.active ? styles.statusPillTextActive : styles.statusPillTextInactive]}>
                         {car?.active ? "Activo" : "Inactivo"}
                       </Text>
+                    </View>
+                  </View>
+                  <View style={styles.vehicleImageStage}>
+                    <View style={styles.vehicleImageFloat}>
+                      <View style={styles.vehicleImageShadowWrap}>
+                        <Image
+                          source={car?.car_image ? { uri: car.car_image } : getCategoryImage(car?.carType)}
+                          style={styles.vehicleImage}
+                          resizeMode="contain"
+                        />
+                      </View>
                     </View>
                   </View>
 
@@ -499,18 +515,18 @@ const CarsScreen = ({ navigation }: Props) => {
                     <View style={styles.vehicleMetaRow}>
                       <View style={styles.vehicleMetaItem}>
                         <Ionicons name="speedometer-outline" size={14} color="rgba(255,255,255,0.5)" style={{ marginBottom: 4 }} />
-                        <Text style={styles.vehicleMetaLabel}>Servicio</Text>
-                        <Text style={styles.vehicleMetaValue}>{car?.carType || "No definido"}</Text>
+                        <Text style={styles.vehicleMetaLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>Servicio</Text>
+                        <Text style={styles.vehicleMetaValue} numberOfLines={2}>{car?.carType || "No definido"}</Text>
                       </View>
                       <View style={styles.vehicleMetaItem}>
                         <Ionicons name="color-palette-outline" size={14} color="rgba(255,255,255,0.5)" style={{ marginBottom: 4 }} />
-                        <Text style={styles.vehicleMetaLabel}>Color</Text>
-                        <Text style={styles.vehicleMetaValue}>{car?.vehicleColor || "No definido"}</Text>
+                        <Text style={styles.vehicleMetaLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>Color</Text>
+                        <Text style={styles.vehicleMetaValue} numberOfLines={2}>{car?.vehicleColor || "No definido"}</Text>
                       </View>
                       <View style={styles.vehicleMetaItem}>
                         <Ionicons name="flame-outline" size={14} color="rgba(255,255,255,0.5)" style={{ marginBottom: 4 }} />
-                        <Text style={styles.vehicleMetaLabel}>Combustible</Text>
-                        <Text style={styles.vehicleMetaValue}>{car?.vehicleFuel || "—"}</Text>
+                        <Text style={styles.vehicleMetaLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>Combustible</Text>
+                        <Text style={styles.vehicleMetaValue} numberOfLines={2}>{car?.vehicleFuel || "—"}</Text>
                       </View>
                     </View>
                   </View>
@@ -581,11 +597,17 @@ const CarsScreen = ({ navigation }: Props) => {
 
             {selectedCar && (
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalContent}>
-                <Image
-                  source={selectedCar?.car_image ? { uri: selectedCar.car_image } : getCategoryImage(selectedCar?.carType)}
-                  style={styles.modalVehicleImage}
-                  resizeMode="cover"
-                />
+                <View style={styles.modalImageStage}>
+                  <View style={styles.modalImageFloat}>
+                    <View style={styles.modalImageShadowWrap}>
+                      <Image
+                        source={selectedCar?.car_image ? { uri: selectedCar.car_image } : getCategoryImage(selectedCar?.carType)}
+                        style={styles.modalVehicleImage}
+                        resizeMode="contain"
+                      />
+                    </View>
+                  </View>
+                </View>
 
                 {/* Info rápida dentro del modal */}
                 <View style={styles.modalQuickInfo}>
@@ -698,9 +720,17 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.12)",
     backgroundColor: "rgba(255,255,255,0.06)",
   },
+  iconBtnSpacer: {
+    width: 42,
+    height: 42,
+  },
   headerTitleWrap: {
     flex: 1,
     paddingHorizontal: 12,
+  },
+  headerTitleWrapDriver: {
+    flex: 1,
+    paddingHorizontal: 0,
   },
   headerEyebrow: {
     fontSize: 11,
@@ -710,10 +740,10 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: "800",
+    fontSize: 18,
+    fontWeight: "700",
     color: "#FFFFFF",
-    letterSpacing: -0.4,
+    letterSpacing: -0.3,
   },
   headerCreateBtn: {
     width: 42,
@@ -850,26 +880,53 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(0,229,255,0.14)",
     backgroundColor: "rgba(10,46,61,0.54)",
-    padding: 14,
+    padding: 16,
+    overflow: "hidden",
+  },
+  statusPillRow: {
+    flexDirection: 'row',
+    marginBottom: 10,
+  },
+  vehicleImageStage: {
+    position: "relative",
+    height: 168,
+    marginBottom: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "visible",
+  },
+  vehicleImageFloat: {
+    width: "100%",
+    height: 156,
+    borderRadius: 22,
+    backgroundColor: "rgba(0,229,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "visible",
   },
   vehicleImageWrap: {
     position: "relative",
     marginBottom: 14,
   },
   vehicleImage: {
-    width: "100%",
-    height: 170,
-    borderRadius: 18,
+    width: '100%',
+    height: '100%',
+  },
+  vehicleImageShadowWrap: {
+    width: '88%',
+    height: '88%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.38,
+    shadowRadius: 16,
+    elevation: 14,
   },
   statusPill: {
-    position: "absolute",
-    top: 12,
-    right: 12,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 5,
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 5,
   },
   statusDot: {
@@ -916,27 +973,34 @@ const styles = StyleSheet.create({
   },
   vehicleMetaRow: {
     flexDirection: "row",
-    gap: 10,
+    gap: 8,
   },
   vehicleMetaItem: {
     flex: 1,
-    borderRadius: 16,
-    padding: 12,
+    minWidth: 0,
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
     backgroundColor: "rgba(255,255,255,0.05)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
   },
   vehicleMetaLabel: {
-    fontSize: 11,
+    fontSize: 9,
     color: "rgba(255,255,255,0.52)",
     textTransform: "uppercase",
-    letterSpacing: 0.8,
+    letterSpacing: 0.4,
     marginBottom: 4,
+    textAlign: "center",
+    width: "100%",
   },
   vehicleMetaValue: {
-    fontSize: 13,
+    fontSize: 12,
     color: "#FFFFFF",
     fontWeight: "700",
+    textAlign: "center",
+    width: "100%",
   },
   vehicleActions: {
     flexDirection: "row",
@@ -1083,11 +1147,33 @@ const styles = StyleSheet.create({
   modalContent: {
     paddingBottom: 24,
   },
-  modalVehicleImage: {
-    width: "100%",
-    height: 210,
-    borderRadius: 20,
+  modalImageStage: {
+    height: 220,
     marginBottom: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalImageFloat: {
+    width: '100%',
+    height: 210,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,229,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'visible',
+  },
+  modalVehicleImage: {
+    width: '100%',
+    height: '100%',
+  },
+  modalImageShadowWrap: {
+    width: '88%',
+    height: '88%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.38,
+    shadowRadius: 16,
+    elevation: 14,
   },
   modalQuickInfo: {
     flexDirection: "row",

@@ -114,6 +114,10 @@ const authSlice = createSlice({
       if (state.profile) {
         state.profile = { ...state.profile, ...action.payload };
       }
+      if (state.user && action.payload.driver_active_status !== undefined) {
+        (state.user as any).driver_active_status = action.payload.driver_active_status;
+        (state.user as any).driverActiveStatus = action.payload.driver_active_status;
+      }
     },
     loadSession: (state, action: PayloadAction<SupabaseUser | null>) => {
       if (action.payload) {

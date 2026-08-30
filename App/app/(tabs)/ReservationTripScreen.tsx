@@ -16,6 +16,7 @@ import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import supabase from '@/config/SupabaseConfig';
 import { activeTripBookings } from '@/hooks/useDriverCancellationWatcher';
+import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 // Agora disabled for build - import { AGORA_APP_ID } from '@/config/AgoraConfig';
 import { updateDriverNotification, showDriverActiveNotification } from '@/hooks/DriverNotificationService';
@@ -1052,7 +1053,7 @@ const ReservationTripScreen = () => {
         }}
         showsUserLocation
         showsMyLocationButton={false}
-        customMapStyle={darkMapStyle}
+        customMapStyle={GOOGLE_MAPS_DARK_STYLE}
       >
         {/* Pickup marker */}
         {pickupLat && pickupLng && (
@@ -1604,18 +1605,6 @@ const ReservationTripScreen = () => {
 };
 
 export default ReservationTripScreen;
-
-const darkMapStyle = [
-  { elementType: 'geometry', stylers: [{ color: '#212121' }] },
-  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#757575' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#212121' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#2c2c2c' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#212121' }] },
-  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#3c3c3c' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#000000' }] },
-  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#3d3d3d' }] },
-];
 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#051A26' },

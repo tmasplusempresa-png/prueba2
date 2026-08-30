@@ -4,13 +4,16 @@ import {
   ActivityIndicator, RefreshControl, Platform, Dimensions,
 } from 'react-native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
+import { selectDriverOnline } from '@/components/DriverBottomNav';
+import { invokeDriverGoActivate, invokeDriverGoDeactivate } from '@/common/utils/driverGoBridge';
+import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
 import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
@@ -64,6 +67,7 @@ type Reservation = {
 
 type DriverReservationsScreenProps = {
   embedded?: boolean;
+  initialTab?: 'reservations' | 'immediate';
 };
 
 const formatDate = (ts: string) => {
@@ -141,12 +145,14 @@ const getDistanceKm = (
   return earthRadiusKm * c;
 };
 
-const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreenProps) => {
+const DriverReservationsScreen = ({ embedded = false, initialTab: initialTabProp }: DriverReservationsScreenProps) => {
   const nav = useNavigation<any>();
+  const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const dispatch = useAppDispatch();
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
+  const driverOnline = useSelector(selectDriverOnline);
   const memberships = useSelector((s: RootState) => s.memberships.memberships);
 
   // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
@@ -186,7 +192,23 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
   const [activeCarType, setActiveCarType] = useState<string | null>(null);
 
   /* ── Tab selector: Reservas vs Inmediatos ── */
-  const [activeTab, setActiveTab] = useState<'reservations' | 'immediate'>('immediate');
+  const routeInitialTab = route.params?.initialTab as 'reservations' | 'immediate' | undefined;
+  const [activeTab, setActiveTab] = useState<'reservations' | 'immediate'>(
+    () => initialTabProp || routeInitialTab || 'reservations',
+  );
+  useEffect(() => {
+    const tab = initialTabProp || routeInitialTab;
+    if (tab) setActiveTab(tab);
+  }, [initialTabProp, routeInitialTab]);
+
+  const wasOnlineRef = useRef(driverOnline);
+  useEffect(() => {
+    if (embedded && driverOnline && !wasOnlineRef.current) {
+      setActiveTab('immediate');
+    }
+    wasOnlineRef.current = driverOnline;
+  }, [driverOnline, embedded]);
+
   const [immediateServices, setImmediateServices] = useState<Reservation[]>([]);
   const [searchingImmediate, setSearchingImmediate] = useState(false);
   const rangeKm = IMMEDIATE_RANGE_KM;
@@ -514,12 +536,17 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
     return () => clearInterval(interval);
   }, [fetchReservations]);
 
-  /* ── Auto-refresh inmediatos cada 10 segundos (siempre, no solo en su tab) ── */
+  /* ── Auto-refresh inmediatos cada 10 segundos (solo con GO activo) ── */
   useEffect(() => {
+    if (!driverOnline) {
+      setImmediateServices([]);
+      setSearchingImmediate(false);
+      return;
+    }
     searchImmediateServices();
     const interval = setInterval(searchImmediateServices, 10000);
     return () => clearInterval(interval);
-  }, [searchImmediateServices]);
+  }, [driverOnline, searchImmediateServices]);
 
   const handleAccept = async (reservation: Reservation) => {
     const isImmmediate = reservation.booking_type === 'immediate';
@@ -918,34 +945,52 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         <View style={s.bgOverlay} />
       </View>
 
-      <View style={[s.header, embedded && s.headerEmbedded, { paddingTop: topPad }]}> 
-        {embedded ? (
-          <View style={s.headerSpacer} />
-        ) : (
+      <View style={[s.header, embedded && s.headerEmbedded, { paddingTop: topPad }]}>
+        {!embedded ? (
           <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
             <Ionicons name="chevron-back" size={24} color="#FFF" />
           </TouchableOpacity>
-        )}
-        <Text style={s.headerTitle}>
-          {activeTab === 'reservations' ? 'Reservas Disponibles' : 'Servicios Inmediatos'}
-        </Text>
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          {activeTab === 'immediate' && (
-            <TouchableOpacity 
-              style={[s.refreshBtn, searchingImmediate && { opacity: 0.6 }]}
-              onPress={searchImmediateServices}
-              disabled={searchingImmediate}
-              activeOpacity={0.75}
+        ) : null}
+        <View style={[s.headerTitleWrap, embedded && s.headerTitleWrapEmbedded]}>
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            {...(!embedded ? { adjustsFontSizeToFit: true, minimumFontScale: 0.85 } : {})}
+            style={[s.headerTitle, embedded && s.headerTitleEmbedded]}
+          >
+            {activeTab === 'reservations' ? 'Reservas Disponibles' : 'Servicios Inmediatos'}
+          </Text>
+        </View>
+        <View style={s.headerActions}>
+          {embedded && driverOnline && (
+            <TouchableOpacity
+              style={s.disconnectSwitch}
+              activeOpacity={0.85}
+              onPress={() => invokeDriverGoDeactivate()}
             >
-              {searchingImmediate ? (
-                <ActivityIndicator color="#00E5FF" size="small" />
-              ) : (
-                <Text style={{ fontSize: 12, fontWeight: '700', color: '#00E5FF' }}>GO</Text>
-              )}
+              <Text {...FIXED_TEXT_PROPS} style={s.disconnectSwitchLabel}>Desconectar</Text>
+              <View style={s.disconnectSwitchKnob}>
+                <Image
+                  source={require('@/assets/images/logo-Preview-Photoroom.png')}
+                  style={s.disconnectSwitchLogo}
+                  resizeMode="contain"
+                />
+              </View>
             </TouchableOpacity>
           )}
-          <TouchableOpacity 
-            style={s.refreshBtn} 
+          {activeTab === 'immediate' && !driverOnline && (
+            <TouchableOpacity
+              style={s.goToggleBtn}
+              onPress={() => invokeDriverGoActivate()}
+              activeOpacity={0.75}
+            >
+              <Text {...FIXED_TEXT_PROPS} style={s.goToggleText}>GO</Text>
+            </TouchableOpacity>
+          )}
+          {(activeTab === 'reservations' || (activeTab === 'immediate' && driverOnline)) && (
+          <TouchableOpacity
+            style={s.refreshBtn}
             onPress={() => {
               setRefreshing(true);
               if (activeTab === 'reservations') {
@@ -953,16 +998,17 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
               } else {
                 searchImmediateServices();
               }
-            }} 
+            }}
             activeOpacity={0.75}
           >
             <Ionicons name="refresh" size={20} color="#00E5FF" />
           </TouchableOpacity>
+          )}
         </View>
       </View>
 
       {/* Tab selector */}
-      <View style={s.tabContainer}>
+      <View style={[s.tabContainer, embedded && s.tabContainerEmbedded]}>
         <TouchableOpacity 
           style={[s.tab, activeTab === 'reservations' && s.tabActive]}
           onPress={() => {
@@ -971,18 +1017,34 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
           }}
         >
           <Ionicons name="calendar-outline" size={16} color={activeTab === 'reservations' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
-          <Text style={[s.tabTxt, activeTab === 'reservations' && s.tabTxtActive]}>Reservas</Text>
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            {...(!embedded ? { adjustsFontSizeToFit: true, minimumFontScale: 0.8 } : {})}
+            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'reservations' && s.tabTxtActive]}
+          >
+            Reservas
+          </Text>
         </TouchableOpacity>
         
         <TouchableOpacity 
           style={[s.tab, activeTab === 'immediate' && s.tabActive]}
           onPress={() => {
             setActiveTab('immediate');
-            searchImmediateServices();
+            if (driverOnline) {
+              searchImmediateServices();
+            }
           }}
         >
           <Ionicons name="flash-outline" size={16} color={activeTab === 'immediate' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
-          <Text style={[s.tabTxt, activeTab === 'immediate' && s.tabTxtActive]}>
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            {...(!embedded ? { adjustsFontSizeToFit: true, minimumFontScale: 0.75 } : {})}
+            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'immediate' && s.tabTxtActive]}
+          >
             Inmediatos ({rangeKm}km)
           </Text>
         </TouchableOpacity>
@@ -1004,23 +1066,35 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
             activeTab === 'reservations' ? EmptyState : (
               <View style={s.emptyWrap}>
                 <Ionicons
-                  name={!activeCarType ? 'car-outline' : locationDenied ? 'location-outline' : 'flash-outline'}
+                  name={
+                    !driverOnline
+                      ? 'flash-outline'
+                      : !activeCarType
+                        ? 'car-outline'
+                        : locationDenied
+                          ? 'location-outline'
+                          : 'flash-outline'
+                  }
                   size={60}
                   color="rgba(0,229,255,0.3)"
                 />
                 <Text style={s.emptyTitle}>
-                  {!activeCarType
-                    ? 'Activa un vehículo'
-                    : locationDenied
-                      ? 'Activa la ubicación'
-                      : 'No hay servicios inmediatos cerca'}
+                  {!driverOnline
+                    ? 'Inicia GO para buscar'
+                    : !activeCarType
+                      ? 'Activa un vehículo'
+                      : locationDenied
+                        ? 'Activa la ubicación'
+                        : 'No hay servicios inmediatos cerca'}
                 </Text>
                 <Text style={s.emptySub}>
-                  {!activeCarType
-                    ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
-                    : locationDenied
-                      ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
-                      : `Solo servicios a menos de ${rangeKm} km y de tu categoría (${activeCarType}).`}
+                  {!driverOnline
+                    ? 'Conductor desconectado, activa GO para buscar servicios inmediatos.'
+                    : !activeCarType
+                      ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
+                      : locationDenied
+                        ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
+                        : `Solo servicios a menos de ${rangeKm} km y de tu categoría (${activeCarType}).`}
                 </Text>
               </View>
             )
@@ -1060,8 +1134,7 @@ export default DriverReservationsScreen;
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#051A26' },
   rootEmbedded: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,229,255,0.2)',
+    borderTopWidth: 0,
   },
   bgImage: { ...StyleSheet.absoluteFillObject, opacity: 0.3 },
   bgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(5,26,38,0.78)' },
@@ -1073,19 +1146,96 @@ const s = StyleSheet.create({
   },
   headerEmbedded: {
     paddingBottom: 10,
+    paddingHorizontal: 14,
+    borderBottomWidth: 0,
+    borderTopWidth: 0,
+    backgroundColor: '#051A26',
   },
-  headerSpacer: {
-    width: 40,
-    height: 40,
+  headerTitleWrap: {
+    flex: 1,
+    paddingHorizontal: 8,
+    minWidth: 0,
+  },
+  headerTitleWrapEmbedded: {
+    paddingHorizontal: 0,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
+  },
+  disconnectSwitch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: 118,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.3)',
+    paddingLeft: 10,
+    paddingRight: 2,
+  },
+  disconnectSwitchLabel: {
+    color: '#00E5FF',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.1,
+  },
+  disconnectSwitchKnob: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  disconnectSwitchLogo: {
+    width: 18,
+    height: 18,
   },
   backBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
+  headerTitleEmbedded: { fontSize: 16 },
   refreshBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
+  },
+  goToggleBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00E5FF',
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  goToggleBtnActive: {
+    backgroundColor: '#00E5FF',
+  },
+  goToggleLogo: {
+    width: 22,
+    height: 22,
+  },
+  goToggleText: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#051A26',
+    letterSpacing: 0.4,
   },
   list: { paddingHorizontal: 18, paddingTop: 14 },
   loadingWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
@@ -1157,9 +1307,14 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(5,26,38,0.6)',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
   },
+  tabContainerEmbedded: {
+    backgroundColor: '#051A26',
+    borderBottomWidth: 0,
+    borderTopWidth: 0,
+  },
   tab: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 10, paddingHorizontal: 12,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start', gap: 6,
+    paddingVertical: 10, paddingHorizontal: 14,
     borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.05)',
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
   },
@@ -1167,6 +1322,7 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(0,229,255,0.12)',
     borderColor: 'rgba(0,229,255,0.3)',
   },
-  tabTxt: { fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.5)' },
+  tabTxt: { fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.5)', flexShrink: 1 },
+  tabTxtEmbedded: { fontSize: 12, flexShrink: 0 },
   tabTxtActive: { color: '#00E5FF', fontWeight: '700' },
 });

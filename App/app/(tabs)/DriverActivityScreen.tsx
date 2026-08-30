@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -95,7 +96,9 @@ const FloatingEmptyIcon = ({ name }: { name: React.ComponentProps<typeof Ionicon
 const DriverActivityScreen = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+  const isDriverUser = useIsDriverUser();
+  const driverNavPad = useDriverNavBottomPad();
+  const topPad = Platform.OS === 'android' ? Math.max(insets.top, 10) + 8 : 10;
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
 
@@ -262,10 +265,15 @@ const DriverActivityScreen = () => {
 
       {/* Header */}
       <View style={[st.header, { paddingTop: topPad }]}>
-        <TouchableOpacity style={st.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
-          <Ionicons name="chevron-back" size={24} color="#FFF" />
-        </TouchableOpacity>
-        <Text style={st.headerTitle}>Mis Viajes</Text>
+        {!isDriverUser ? (
+          <TouchableOpacity style={st.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
+            <Ionicons name="chevron-back" size={24} color="#FFF" />
+          </TouchableOpacity>
+        ) : null}
+        <View style={[st.headerTitleWrap, isDriverUser && st.headerTitleWrapDriver]}>
+          {isDriverUser ? <Text style={st.headerEyebrow}>T+plus</Text> : null}
+          <Text style={st.headerTitle}>Mis Viajes</Text>
+        </View>
         <TouchableOpacity
           style={st.refreshHeaderBtn}
           onPress={() => { setRefreshing(true); fetchReservations(); }}
@@ -303,20 +311,26 @@ const DriverActivityScreen = () => {
         <View style={st.earningsRow}>
           <View style={st.earnBlock}>
             <Text style={st.earnLabel}>Hoy</Text>
-            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.day.total)}</Text>
-            <Text style={st.earnCount}>{earnings.day.count} viaje{earnings.day.count === 1 ? '' : 's'}</Text>
+            <Text style={st.earnAmount} numberOfLines={1}>{fmtMoney(earnings.day.total)}</Text>
+            <Text style={st.earnCount} numberOfLines={1}>
+              {earnings.day.count} {earnings.day.count === 1 ? 'viaje' : 'viajes'}
+            </Text>
           </View>
           <View style={st.earnDivider} />
           <View style={st.earnBlock}>
             <Text style={st.earnLabel}>Semana</Text>
-            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.week.total)}</Text>
-            <Text style={st.earnCount}>{earnings.week.count} viaje{earnings.week.count === 1 ? '' : 's'}</Text>
+            <Text style={st.earnAmount} numberOfLines={1}>{fmtMoney(earnings.week.total)}</Text>
+            <Text style={st.earnCount} numberOfLines={1}>
+              {earnings.week.count} {earnings.week.count === 1 ? 'viaje' : 'viajes'}
+            </Text>
           </View>
           <View style={st.earnDivider} />
           <View style={st.earnBlock}>
             <Text style={st.earnLabel}>Mes</Text>
-            <Text style={st.earnAmount} numberOfLines={1} adjustsFontSizeToFit>{fmtMoney(earnings.month.total)}</Text>
-            <Text style={st.earnCount}>{earnings.month.count} viaje{earnings.month.count === 1 ? '' : 's'}</Text>
+            <Text style={st.earnAmount} numberOfLines={1}>{fmtMoney(earnings.month.total)}</Text>
+            <Text style={st.earnCount} numberOfLines={1}>
+              {earnings.month.count} {earnings.month.count === 1 ? 'viaje' : 'viajes'}
+            </Text>
           </View>
         </View>
       </Animatable.View>
@@ -382,7 +396,7 @@ const DriverActivityScreen = () => {
           data={currentData}
           keyExtractor={item => item.id}
           renderItem={renderCompletaItem}
-          contentContainerStyle={[st.list, { paddingBottom: insets.bottom + 30 }]}
+          contentContainerStyle={[st.list, { paddingBottom: isDriverUser ? driverNavPad + 24 : insets.bottom + 30 }]}
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <EmptyState
@@ -420,6 +434,25 @@ const st = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
+  backBtnSpacer: {
+    width: 40,
+    height: 40,
+  },
+  headerTitleWrap: {
+    flex: 1,
+    paddingHorizontal: 12,
+  },
+  headerTitleWrapDriver: {
+    flex: 1,
+    paddingHorizontal: 0,
+  },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#00E5FF',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
   headerTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
   refreshHeaderBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
@@ -449,11 +482,18 @@ const st = StyleSheet.create({
   earningsHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
   earningsTitle: { fontSize: 13, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.3 },
   earningsRow: { flexDirection: 'row', alignItems: 'stretch' },
-  earnBlock: { flex: 1, alignItems: 'center', paddingHorizontal: 4 },
+  earnBlock: { flex: 1, alignItems: 'center', paddingHorizontal: 2, minWidth: 0 },
   earnDivider: { width: 1, backgroundColor: 'rgba(0,229,255,0.12)' },
   earnLabel: { fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
-  earnAmount: { fontSize: 15, fontWeight: '800', color: '#FFF', letterSpacing: -0.3 },
-  earnCount: { fontSize: 10, color: 'rgba(255,255,255,0.45)', marginTop: 2 },
+  earnAmount: { fontSize: 14, fontWeight: '800', color: '#FFF', letterSpacing: -0.3, flexShrink: 0 },
+  earnCount: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.55)',
+    marginTop: 4,
+    textAlign: 'center',
+    width: '100%',
+    flexShrink: 0,
+  },
   /* Day search */
   daySearchBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,

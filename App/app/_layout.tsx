@@ -29,6 +29,8 @@ LogBox.ignoreLogs([
   /Invalid Refresh Token/,
   /Refresh Token Not Found/,
   /AuthApiError/,
+  /linking in multiple places/,
+  /deep links should only be handled/,
 ]);
 
 // Desactivar el escalado de fuente del sistema — la app usa su propio tamaño fijo

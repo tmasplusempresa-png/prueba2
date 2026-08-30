@@ -22,6 +22,8 @@ import { AppConfig } from "@/config/AppConfig";
 import { getDriverOwnReferralCode, DriverReferralCode } from "@/common/services/referralsService";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
+import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
 
@@ -38,6 +40,7 @@ type PickerItem = {
 const BG_IMAGE = require("../../assets/images/bg.png");
 
 const ProfileScreen = ({ navigation }: Props) => {
+  const insets = useSafeAreaInsets();
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const profile = useSelector((state: RootState) => state.auth.profile) as any;
   const dispatch = useDispatch();
@@ -396,7 +399,13 @@ const ProfileScreen = ({ navigation }: Props) => {
   };
 
   const isCustomer = currentUserType === "customer";
-  const navBottomPad = useCustomerNavBottomPad();
+  const isDriverUser = useIsDriverUser();
+  const hideNavBack = isCustomer || isDriverUser;
+  const centerHeader = isCustomer;
+  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
+  const customerNavPad = useCustomerNavBottomPad();
+  const driverNavPad = useDriverNavBottomPad();
+  const navBottomPad = isCustomer ? customerNavPad : isDriverUser ? driverNavPad : 36;
 
   return (
     <View style={styles.container}>
@@ -404,18 +413,25 @@ const ProfileScreen = ({ navigation }: Props) => {
       <View pointerEvents="none" style={styles.bgOverlay} />
       {/* Eliminado: círculos/ellipses de fondo (bgGlowTop y bgGlowBottom) */}
 
-      <View style={[styles.headerArea, isCustomer && styles.headerAreaCentered]}>
-        {!isCustomer && (
+      <View style={[styles.headerArea, centerHeader && styles.headerAreaCentered, { paddingTop: isDriverUser ? headerTopPadding : Math.max(insets.top, 12) + 8 }]}>
+        {!hideNavBack && (
           <TouchableOpacity style={styles.headerBackBtn} onPress={goBackFromProfile} activeOpacity={0.85}>
             <Ionicons name="arrow-back" size={20} color="#00E5FF" />
           </TouchableOpacity>
         )}
-        <Text style={styles.headerTitle}>Mi Perfil</Text>
+        {isDriverUser ? (
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerEyebrow}>T+plus</Text>
+            <Text style={styles.headerTitle}>Mi Perfil</Text>
+          </View>
+        ) : (
+          <Text style={styles.headerTitle}>Mi Perfil</Text>
+        )}
       </View>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={[styles.contentArea, isCustomer && { paddingBottom: navBottomPad + 36 }]}
+        contentContainerStyle={[styles.contentArea, centerHeader && { paddingBottom: navBottomPad + 36 }]}
       >
         <View style={styles.userCard}>
           <View style={styles.avatarRing}>
@@ -573,14 +589,23 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,188,212,0.05)",
   },
   headerArea: {
-    paddingTop: 58,
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     paddingBottom: 14,
     flexDirection: "row",
     alignItems: "center",
     borderBottomWidth: 1,
     borderBottomColor: "rgba(0,229,255,0.08)",
     backgroundColor: "rgba(5,26,38,0.82)",
+  },
+  headerTitleWrap: {
+    flex: 1,
+  },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#00E5FF",
+    textTransform: "uppercase",
+    letterSpacing: 1,
   },
   headerAreaCentered: {
     justifyContent: "center",
@@ -598,9 +623,9 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: "#FFFFFF",
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: "700",
-    letterSpacing: -0.4,
+    letterSpacing: -0.3,
   },
   contentArea: {
     position: "relative",

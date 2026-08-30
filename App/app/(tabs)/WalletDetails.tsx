@@ -10,7 +10,9 @@ import {
   Image,
   Linking,
   ActivityIndicator,
+  Platform,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons, MaterialIcons, FontAwesome, Feather } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -29,10 +31,15 @@ import {
 import { listenToSettingsChanges, selectSettings } from "@/common/reducers/settingsSlice";
 import { supabase } from "@/config/SupabaseConfig";
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
+import { useDriverNavBottomPad, useIsDriverUser } from "@/components/DriverBottomNav";
 
 type Props = NativeStackScreenProps<any>;
 
 const WalletDetails = ({ navigation }: Props) => {
+  const isDriverUser = useIsDriverUser();
+  const driverNavPad = useDriverNavBottomPad();
+  const insets = useSafeAreaInsets();
+  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
   const user = useSelector((state: RootState) => state.auth.user);
   const profile = useSelector((state: RootState) => state.auth.profile);
   const walletHistory = useSelector(selectWalletHistory);
@@ -355,11 +362,16 @@ const WalletDetails = ({ navigation }: Props) => {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.headerIconBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={22} color="#D9F6FF" />
-        </TouchableOpacity>
-        <Text style={styles.headerText}>Mi Billetera</Text>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
+        {!isDriverUser ? (
+          <TouchableOpacity style={styles.headerIconBtn} onPress={() => navigation.goBack()}>
+            <Ionicons name="chevron-back" size={22} color="#D9F6FF" />
+          </TouchableOpacity>
+        ) : null}
+        <View style={[styles.headerTitleWrap, isDriverUser && styles.headerTitleWrapDriver]}>
+          {isDriverUser ? <Text style={styles.headerEyebrow}>T+plus</Text> : null}
+          <Text style={isDriverUser ? styles.headerTitle : styles.headerText}>Mi Billetera</Text>
+        </View>
         <TouchableOpacity
           style={styles.headerIconBtn}
           onPress={() => Linking.openURL("https://wa.me/573118841054")}
@@ -369,7 +381,7 @@ const WalletDetails = ({ navigation }: Props) => {
       </View>
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, isDriverUser && { paddingBottom: driverNavPad + 24 }]}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.cardWrap}>
@@ -665,9 +677,29 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingTop: 48,
     paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingBottom: 14,
+  },
+  headerTitleWrap: {
+    flex: 1,
+    paddingHorizontal: 12,
+  },
+  headerTitleWrapDriver: {
+    flex: 1,
+    paddingHorizontal: 0,
+  },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#00E5FF",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: -0.3,
   },
   headerIconBtn: {
     width: 42,
@@ -679,10 +711,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  headerIconSpacer: {
+    width: 42,
+    height: 42,
+  },
   headerText: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "700",
     color: "#FFFFFF",
+    letterSpacing: -0.3,
   },
   scroll: {
     flex: 1,
