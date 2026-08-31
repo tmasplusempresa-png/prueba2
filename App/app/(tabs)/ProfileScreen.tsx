@@ -431,7 +431,7 @@ const ProfileScreen = ({ navigation }: Props) => {
 
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={[styles.contentArea, centerHeader && { paddingBottom: navBottomPad + 36 }]}
+        contentContainerStyle={[styles.contentArea, { paddingBottom: navBottomPad + 36 }]}
       >
         <View style={styles.userCard}>
           <View style={styles.avatarRing}>

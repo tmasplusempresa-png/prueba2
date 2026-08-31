@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Image,
   Platform, ActivityIndicator, Dimensions, Keyboard, KeyboardAvoidingView,
   TouchableWithoutFeedback, Animated,
 } from 'react-native';
@@ -22,6 +22,8 @@ import { FareCalculator } from '@/common/actions/FareCalculator';
 import { isNearAirport } from '@/common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
 import { LinearGradient } from 'expo-linear-gradient';
+import { getGoogleMapStyle, GoogleMapTheme } from '@/config/googleMapsDarkStyle';
+import { CLIENT_ORIGIN_MARKER_IMAGE, CLIENT_ORIGIN_PIN_SIZE } from '@/components/ClientOriginMapMarker';
 
 const { width: SW } = Dimensions.get('window');
 
@@ -52,6 +54,9 @@ const DEFAULT_VEHICLE_RATES: Record<string, any> = {
 };
 
 const COLOMBIA_CENTER = { latitude: 4.6097, longitude: -74.0817, latitudeDelta: 0.08, longitudeDelta: 0.06 };
+const MAP_MIN_ZOOM = 14;
+const MAP_MAX_ZOOM = 18;
+const MAP_REGION_DELTA = 0.012;
 
 type FavoritePlace = {
   id: string;
@@ -113,6 +118,8 @@ const CreateReservationScreen = () => {
   const destAutoRef = useRef<any>(null);
   const sessionTokenOrigin = useRef<string | null>(null);
   const sessionTokenDest = useRef<string | null>(null);
+  const programmaticMoveRef = useRef(false);
+  const geocodeSeqRef = useRef(0);
 
   const [myLat, setMyLat] = useState(COLOMBIA_CENTER.latitude);
   const [myLng, setMyLng] = useState(COLOMBIA_CENTER.longitude);
@@ -146,6 +153,8 @@ const CreateReservationScreen = () => {
 
   /* ── UI state ── */
   const [step, setStep] = useState<'map' | 'details'>(params.origin ? 'details' : 'map');
+  const [mapTheme, setMapTheme] = useState<GoogleMapTheme>('dark');
+  const [mapDragging, setMapDragging] = useState(false);
 
   /* ── Favorite places ── */
   const [favoritePlaces, setFavoritePlaces] = useState<FavoritePlace[]>([]);
@@ -190,8 +199,9 @@ const CreateReservationScreen = () => {
         setTimeout(applyText, 250);
         setTimeout(applyText, 800);
 
+        programmaticMoveRef.current = true;
         mapRef.current?.animateToRegion(
-          { latitude: loc.coords.latitude, longitude: loc.coords.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+          { latitude: loc.coords.latitude, longitude: loc.coords.longitude, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA },
           800,
         );
       } catch {}
@@ -338,32 +348,15 @@ const CreateReservationScreen = () => {
     };
   }, [keyboardOffsetAnim, mapKeyboardOffsetAnim]);
 
-  /* ── Enfoque del mapa: centra en cada punto al ingresarlo (origen o destino,
-     manual o automático). Cuando ya hay ruta trazada, el encuadre completo lo
-     hace el efecto "Animar mapa cuando aparece la ruta" de más abajo. ── */
+  /* ── Enfoque del mapa: solo centrar al elegir destino (el origen lo controla el pin fijo). ── */
   useEffect(() => {
-    if (!mapRef.current) return;
-
-    // Ya hay ruta calculada → el efecto de abajo la encuadra. No competir.
-    if (routeCoords.length > 2) return;
-
-    // Destino recién ingresado (aún sin ruta) → centrar en el destino.
-    if (destination?.latitude) {
-      mapRef.current.animateToRegion(
-        { latitude: destination.latitude, longitude: destination.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-        600,
-      );
-      return;
-    }
-
-    // Solo origen todavía → centrar en el origen.
-    if (origin?.latitude) {
-      mapRef.current.animateToRegion(
-        { latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-        600,
-      );
-    }
-  }, [origin, destination, routeCoords]);
+    if (!mapRef.current || routeCoords.length > 2 || !destination?.latitude) return;
+    programmaticMoveRef.current = true;
+    mapRef.current.animateToRegion(
+      { latitude: destination.latitude, longitude: destination.longitude, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA },
+      600,
+    );
+  }, [destination?.latitude, destination?.longitude, routeCoords.length]);
 
   const calculateRoute = async () => {
     if (!origin?.latitude || !destination?.latitude) return;
@@ -434,63 +427,55 @@ const CreateReservationScreen = () => {
   }, [origin, destination, tripType]);
 
 
-  /* ── Click-to-Relocate Handlers ── */
-  const handleOriginPress = () => {
-    setRelocatingMarker('origin');
-    setTempMarkerCoord(null);
-  };
-  
+  /* ── Origen fijo al centro: mover el mapa, no el pin ── */
+  const updateOriginFromCenter = useCallback(async (latitude: number, longitude: number) => {
+    const seq = ++geocodeSeqRef.current;
+    try {
+      const resp = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
+      );
+      const data = await resp.json();
+      if (seq !== geocodeSeqRef.current) return;
+      const addr = data.results?.[0]?.formatted_address || 'Punto de recogida';
+      setOrigin({ latitude, longitude, title: addr });
+      originAutoRef.current?.setAddressText(addr);
+    } catch {
+      if (seq !== geocodeSeqRef.current) return;
+      setOrigin({ latitude, longitude, title: 'Punto de recogida' });
+    }
+  }, []);
+
   const handleDestinationPress = () => {
     setRelocatingMarker('destination');
     setTempMarkerCoord(null);
   };
-  
+
   const handleMapPress = async (e: any) => {
-    if (!relocatingMarker) return;
-    
+    if (relocatingMarker !== 'destination') return;
+
     const { coordinate } = e.nativeEvent;
     setTempMarkerCoord(coordinate);
-    
+
     try {
-      // Reverse geocode para obtener la dirección
       const resp = await fetch(
         `https://maps.googleapis.com/maps/api/geocode/json?latlng=${coordinate.latitude},${coordinate.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
       );
       const data = await resp.json();
       const addr = data.results?.[0]?.formatted_address || 'Nueva ubicación';
-      
-      if (relocatingMarker === 'origin') {
-        setOrigin({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: addr,
-        });
-        originAutoRef.current?.setAddressText(addr);
-      } else {
-        setDestination({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: addr,
-        });
-        destAutoRef.current?.setAddressText(addr);
-      }
-    } catch (err) {
-      console.error('Error geocoding:', err);
-      if (relocatingMarker === 'origin') {
-        setOrigin({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: 'Nueva ubicación (Origen)',
-        });
-        originAutoRef.current?.setAddressText('Nueva ubicación (Origen)');
-      } else {
-        setDestination({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: 'Nueva ubicación (Destino)',
-        });
-        destAutoRef.current?.setAddressText('Nueva ubicación (Destino)');
-      }
+
+      setDestination({
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+        title: addr,
+      });
+      destAutoRef.current?.setAddressText(addr);
+    } catch {
+      setDestination({
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+        title: 'Nueva ubicación (Destino)',
+      });
+      destAutoRef.current?.setAddressText('Nueva ubicación (Destino)');
     } finally {
       setRelocatingMarker(null);
       setTempMarkerCoord(null);
@@ -503,6 +488,7 @@ const CreateReservationScreen = () => {
       // Pequeño delay para que el polyline ya esté renderizado
       const timer = setTimeout(() => {
         if (mapRef.current) {
+          programmaticMoveRef.current = true;
           mapRef.current.fitToCoordinates(routeCoords, {
             edgePadding: { top: 200, right: 50, bottom: 280, left: 50 },
             animated: true,
@@ -522,13 +508,15 @@ const CreateReservationScreen = () => {
       setOrigin(loc);
       originAutoRef.current?.setAddressText(data.description);
       sessionTokenOrigin.current = null;
+      programmaticMoveRef.current = true;
     } else {
       setDestination(loc);
       destAutoRef.current?.setAddressText(data.description);
       sessionTokenDest.current = null;
+      programmaticMoveRef.current = true;
     }
     Keyboard.dismiss();
-    mapRef.current?.animateToRegion({ latitude: lat, longitude: lng, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 600);
+    mapRef.current?.animateToRegion({ latitude: lat, longitude: lng, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA }, 600);
   };
 
   /* ── Marker drag end → reverse geocode ── */
@@ -564,27 +552,51 @@ const CreateReservationScreen = () => {
 
   /* ── Center on my location ── */
   const centerOnMe = () => {
-    if (mapRef.current && myLat) {
-      mapRef.current.animateToRegion({ latitude: myLat, longitude: myLng, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 600);
-    }
+    if (!mapRef.current || !myLat) return;
+    programmaticMoveRef.current = true;
+    mapRef.current.animateToRegion(
+      { latitude: myLat, longitude: myLng, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA },
+      600,
+    );
+    updateOriginFromCenter(myLat, myLng);
   };
 
   /* ── Zoom controls ── */
   const handleZoomIn = () => {
-    if (mapRef.current) {
-      mapRef.current.getCamera().then((cam: any) => {
-        mapRef.current?.animateCamera({ zoom: cam.zoom + 1 }, { duration: 300 });
-      });
-    }
+    if (!mapRef.current) return;
+    programmaticMoveRef.current = true;
+    mapRef.current.getCamera().then((cam: any) => {
+      const zoom = cam.zoom ?? 15;
+      const next = Math.min(MAP_MAX_ZOOM, zoom + 1);
+      mapRef.current?.animateCamera({ zoom: next, center: cam.center }, { duration: 300 });
+    });
   };
 
   const handleZoomOut = () => {
-    if (mapRef.current) {
-      mapRef.current.getCamera().then((cam: any) => {
-        mapRef.current?.animateCamera({ zoom: Math.max(cam.zoom - 1, 3) }, { duration: 300 });
-      });
-    }
+    if (!mapRef.current) return;
+    programmaticMoveRef.current = true;
+    mapRef.current.getCamera().then((cam: any) => {
+      const zoom = cam.zoom ?? 15;
+      const next = Math.max(MAP_MIN_ZOOM, zoom - 1);
+      mapRef.current?.animateCamera({ zoom: next, center: cam.center }, { duration: 300 });
+    });
   };
+
+  const handleMapRegionChange = useCallback(() => {
+    setMapDragging(true);
+  }, []);
+
+  const handleMapRegionChangeComplete = useCallback((region: { latitude: number; longitude: number }) => {
+    setMapDragging(false);
+    if (programmaticMoveRef.current) {
+      programmaticMoveRef.current = false;
+      return;
+    }
+    if (!hasMyLocation && !params.origin) return;
+    updateOriginFromCenter(region.latitude, region.longitude);
+  }, [hasMyLocation, params.origin, updateOriginFromCenter]);
+
+  const mapStyle = getGoogleMapStyle(mapTheme);
 
 
   const canContinue = !!origin && !!destination && distance > 0 && !calculating;
@@ -790,43 +802,23 @@ const CreateReservationScreen = () => {
           {/* Map */}
           <View style={st.mapContainer}>
             <MapView
+              key={`reservation-map-${mapTheme}`}
               ref={mapRef}
               style={StyleSheet.absoluteFillObject}
               provider={PROVIDER_GOOGLE}
+              customMapStyle={mapStyle}
               showsUserLocation
               showsMyLocationButton={false}
-              initialRegion={{ latitude: myLat, longitude: myLng, latitudeDelta: 0.015, longitudeDelta: 0.015 }}
+              showsCompass={false}
+              rotateEnabled
+              initialRegion={{ latitude: myLat, longitude: myLng, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA }}
               zoomControlEnabled={false}
               loadingEnabled
               loadingIndicatorColor="#00E5FF"
               onPress={handleMapPress}
+              onRegionChange={handleMapRegionChange}
+              onRegionChangeComplete={handleMapRegionChangeComplete}
             >
-              {origin && relocatingMarker !== 'origin' && (
-                <Marker
-                  coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                  title="📍 Origen"
-                  description={origin.title}
-                  draggable
-                  onPress={handleOriginPress}
-                  onDragStart={() => handleMarkerDragStart('origin')}
-                  onDragEnd={e => handleMarkerDragEnd(e, 'origin')}
-                >
-                  <View style={{
-                    backgroundColor: '#00FF7F',
-                    borderRadius: 50,
-                    padding: 8,
-                    borderWidth: 3,
-                    borderColor: '#FFFFFF',
-                    shadowColor: '#00FF7F',
-                    shadowOffset: { width: 0, height: 0 },
-                    shadowOpacity: 0.8,
-                    shadowRadius: 8,
-                    elevation: 10,
-                  }}>
-                    <Ionicons name="location" size={18} color="#051A26" style={{ fontWeight: '900' }} />
-                  </View>
-                </Marker>
-              )}
               {destination && relocatingMarker !== 'destination' && (
                 <Marker
                   coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
@@ -887,6 +879,18 @@ const CreateReservationScreen = () => {
               )}
             </MapView>
 
+            {/* Pin de recogida fijo al centro — se mueve el mapa, no el icono */}
+            <View pointerEvents="none" style={st.centerPinWrap}>
+              <View style={st.centerPinGlow}>
+                <Image
+                  source={CLIENT_ORIGIN_MARKER_IMAGE}
+                  style={{ width: CLIENT_ORIGIN_PIN_SIZE, height: CLIENT_ORIGIN_PIN_SIZE }}
+                  resizeMode="contain"
+                />
+              </View>
+              {mapDragging && <View style={st.centerPinDot} />}
+            </View>
+
             {/* Degradado suave oscuro superior hasta el botón volver */}
             <LinearGradient
               pointerEvents="none"
@@ -903,27 +907,40 @@ const CreateReservationScreen = () => {
               <Ionicons name="chevron-back" size={24} color="#FFF" />
             </TouchableOpacity>
 
-            {/* Zoom controls */}
-            <View style={st.zoomControls}>
-              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomIn} activeOpacity={0.8}>
+            {/* Controles izquierda: tema + zoom */}
+            <View style={st.leftMapControls}>
+              <TouchableOpacity
+                style={st.mapCtrlBtn}
+                onPress={() => setMapTheme(prev => (prev === 'dark' ? 'light' : 'dark'))}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name={mapTheme === 'dark' ? 'moon' : 'sunny'}
+                  size={20}
+                  color="#00E5FF"
+                />
+              </TouchableOpacity>
+              <TouchableOpacity style={st.mapCtrlBtn} onPress={handleZoomIn} activeOpacity={0.8}>
                 <Ionicons name="add" size={20} color="#00E5FF" />
               </TouchableOpacity>
-              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomOut} activeOpacity={0.8}>
+              <TouchableOpacity style={st.mapCtrlBtn} onPress={handleZoomOut} activeOpacity={0.8}>
                 <Ionicons name="remove" size={20} color="#00E5FF" />
               </TouchableOpacity>
             </View>
 
-            {/* Center on my location */}
-            <TouchableOpacity style={st.myLocBtn} onPress={centerOnMe} activeOpacity={0.8}>
-              <Ionicons name="locate" size={22} color="#00E5FF" />
-            </TouchableOpacity>
+            {/* Controles derecha: ubicación */}
+            <View style={st.rightMapControls}>
+              <TouchableOpacity style={st.mapCtrlBtn} onPress={centerOnMe} activeOpacity={0.8}>
+                <Ionicons name="locate" size={22} color="#00E5FF" />
+              </TouchableOpacity>
+            </View>
 
             {/* 🆕 Banner de instrucciones cuando se está reubicando */}
-            {relocatingMarker && (
+            {relocatingMarker === 'destination' && (
               <View style={st.relocatingBanner}>
                 <Ionicons name="hand-left-outline" size={18} color="#00E5FF" />
                 <Text style={st.relocatingText}>
-                  {`Toca el mapa para ubicar el ${relocatingMarker === 'origin' ? 'origen' : 'destino'}`}
+                  Toca el mapa para ubicar el destino
                 </Text>
                 <TouchableOpacity onPress={() => setRelocatingMarker(null)} style={st.cancelRelocateBtn}>
                   <Ionicons name="close" size={18} color="#FFF" />
@@ -931,13 +948,14 @@ const CreateReservationScreen = () => {
               </View>
             )}
 
-            {/* 🆕 Hint discreto cuando no se está reubicando y hay markers */}
-            {!relocatingMarker && origin && destination && (
+            {!relocatingMarker && (
               <View style={[st.mapHintWrap, { top: topPad + 4 }]} pointerEvents="none">
                 <View style={st.mapHintPill}>
                   <Ionicons name="information-circle-outline" size={13} color="#00E5FF" />
                   <Text style={st.mapHintText} numberOfLines={1}>
-                    Toca o arrastra los puntos para reubicar
+                    {destination
+                      ? 'Mueve el mapa para ajustar recogida · toca destino para reubicar'
+                      : 'Mueve el mapa para elegir tu punto de recogida'}
                   </Text>
                 </View>
               </View>
@@ -1353,7 +1371,38 @@ const st = StyleSheet.create({
   },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
 
-  mapContainer: { flex: 1 },
+  mapContainer: { flex: 1, position: 'relative' },
+  centerPinWrap: {
+    position: 'absolute',
+    left: '50%',
+    top: '50%',
+    marginLeft: -CLIENT_ORIGIN_PIN_SIZE / 2,
+    marginTop: -CLIENT_ORIGIN_PIN_SIZE,
+    zIndex: 40,
+    elevation: 40,
+    alignItems: 'center',
+  },
+  centerPinGlow: {
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  centerPinDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+    marginTop: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.25)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.35,
+    shadowRadius: 2,
+    elevation: 6,
+  },
   mapTopFade: {
     position: 'absolute',
     top: 0,
@@ -1369,21 +1418,36 @@ const st = StyleSheet.create({
     fontSize: 13, fontWeight: '400', color: 'rgba(255,255,255,0.45)', marginBottom: 16,
     textAlign: 'center',
   },
-  myLocBtn: {
-    position: 'absolute', bottom: 120, right: 16, width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  leftMapControls: {
+    position: 'absolute',
+    left: 16,
+    bottom: 120,
+    gap: 10,
+    zIndex: 30,
+    elevation: 30,
   },
-  zoomControls: {
-    position: 'absolute', left: 16, bottom: 120, gap: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  rightMapControls: {
+    position: 'absolute',
+    right: 16,
+    bottom: 120,
+    gap: 10,
+    zIndex: 30,
+    elevation: 30,
   },
-  zoomBtn: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  mapCtrlBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(5,26,38,0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.3)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   /* ═══ Relocating UI (overlay sobre el mapa) ═══ */
   relocatingBanner: {

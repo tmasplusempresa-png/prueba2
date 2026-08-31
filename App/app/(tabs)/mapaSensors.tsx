@@ -21,6 +21,7 @@ export interface MapSensorHandle {
   setViewMode: (mode: MapViewMode) => void;
   zoomIn: () => void;
   zoomOut: () => void;
+  resetMapNorth: () => void;
 }
 
 interface MapSensorProps {
@@ -29,6 +30,7 @@ interface MapSensorProps {
   viewMode?: MapViewMode;
   mapTheme?: GoogleMapTheme;
   mapBottomPadding?: number;
+  onMapBearingChange?: (bearing: number) => void;
 }
 
 type CameraSnapshot = {
@@ -54,12 +56,13 @@ const accuracyRadiusForZoom = (baseMeters: number, zoom: number) => {
 };
 
 const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
-  ({ children, currentPosition = null, viewMode = '3D', mapTheme = 'dark', mapBottomPadding = 0 }, ref) => {
+  ({ children, currentPosition = null, viewMode = '3D', mapTheme = 'dark', mapBottomPadding = 0, onMapBearingChange }, ref) => {
   const mapRef = useRef<MapView>(null);
   const headingRef = useRef(0);
   const lastCameraRef = useRef<CameraSnapshot | null>(null);
   const hasMountedCameraRef = useRef(false);
   const viewModeRef = useRef<MapViewMode>(viewMode);
+  const northUpLockedRef = useRef(false);
   const zoomRef = useRef(DEFAULT_ZOOM);
   const regionRef = useRef({
     latitude: currentPosition ? currentPosition[1] : DEFAULT_REGION.latitude,
@@ -117,6 +120,9 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
     return () => cancelAnimationFrame(frame);
   }, []);
 
+  const resolveCameraHeading = (gpsHeading: number) =>
+    northUpLockedRef.current ? 0 : gpsHeading;
+
   const syncMapZoom = useCallback(async () => {
     try {
       const camera = await mapRef.current?.getCamera();
@@ -124,10 +130,16 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
         zoomRef.current = camera.zoom;
         setMapZoom(camera.zoom);
       }
+      if (camera?.heading != null) {
+        if (northUpLockedRef.current && Math.abs(camera.heading) > 1.5) {
+          northUpLockedRef.current = false;
+        }
+        onMapBearingChange?.(camera.heading);
+      }
     } catch {
       /* noop */
     }
-  }, []);
+  }, [onMapBearingChange]);
 
   const syncCamera = (
     latitude: number,
@@ -137,8 +149,9 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
     force = false,
     pitch = pitchForMode(viewModeRef.current),
   ) => {
+    const cameraHeading = resolveCameraHeading(nextHeading);
     const lastCamera = lastCameraRef.current;
-    const headingDelta = lastCamera ? Math.abs(lastCamera.heading - nextHeading) : Number.POSITIVE_INFINITY;
+    const headingDelta = lastCamera ? Math.abs(lastCamera.heading - cameraHeading) : Number.POSITIVE_INFINITY;
     const movedMeters = lastCamera
       ? getDistance(
           { latitude: lastCamera.latitude, longitude: lastCamera.longitude },
@@ -150,12 +163,13 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
       return;
     }
 
-    lastCameraRef.current = { latitude, longitude, heading: nextHeading, pitch };
+    lastCameraRef.current = { latitude, longitude, heading: cameraHeading, pitch };
     regionRef.current = { latitude, longitude };
+    onMapBearingChange?.(cameraHeading);
     mapRef.current?.animateCamera(
       {
         center: { latitude, longitude },
-        heading: nextHeading,
+        heading: cameraHeading,
         pitch,
         zoom: zoomRef.current,
       },
@@ -167,10 +181,11 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
     zoomRef.current = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current + delta));
     setMapZoom(zoomRef.current);
     const { latitude, longitude } = regionRef.current;
+    const cameraHeading = resolveCameraHeading(headingRef.current);
     mapRef.current?.animateCamera(
       {
         center: { latitude, longitude },
-        heading: headingRef.current,
+        heading: cameraHeading,
         pitch: pitchForMode(viewModeRef.current),
         zoom: zoomRef.current,
       },
@@ -184,12 +199,33 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
       syncCamera(latitude, longitude, headingRef.current, 450, true);
     },
     setViewMode: (mode: MapViewMode) => {
+      northUpLockedRef.current = false;
       viewModeRef.current = mode;
       const { latitude, longitude } = regionRef.current;
       syncCamera(latitude, longitude, headingRef.current, 500, true, pitchForMode(mode));
     },
     zoomIn: () => animateZoom(1),
     zoomOut: () => animateZoom(-1),
+    resetMapNorth: () => {
+      northUpLockedRef.current = true;
+      const { latitude, longitude } = regionRef.current;
+      lastCameraRef.current = {
+        latitude,
+        longitude,
+        heading: 0,
+        pitch: pitchForMode(viewModeRef.current),
+      };
+      onMapBearingChange?.(0);
+      mapRef.current?.animateCamera(
+        {
+          center: { latitude, longitude },
+          heading: 0,
+          pitch: pitchForMode(viewModeRef.current),
+          zoom: zoomRef.current,
+        },
+        { duration: 350 },
+      );
+    },
   }));
 
   useEffect(() => {
@@ -286,7 +322,8 @@ const MapSensor = forwardRef<MapSensorHandle, MapSensorProps>(
         rotateEnabled={true}
         pitchEnabled={true}
         onMapReady={restoreCameraAfterMount}
-        onRegionChangeComplete={() => { syncMapZoom(); }}
+        onRegionChange={syncMapZoom}
+        onRegionChangeComplete={syncMapZoom}
         mapPadding={{
           top: 0,
           right: 0,

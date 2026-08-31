@@ -57,6 +57,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import BottomSheet from "@gorhom/bottom-sheet"; // Importa el BottomSheet
 import MapSensor, { MapSensorHandle, MapViewMode } from "./mapaSensors";
 import type { GoogleMapTheme } from '@/config/googleMapsDarkStyle';
+import MapCompassIcon from '@/components/MapCompassIcon';
 import { LinearGradient } from 'expo-linear-gradient';
 import DriverReservationsScreen from "./DriverReservationsScreen";
 import * as Speech from "expo-speech";
@@ -965,6 +966,7 @@ const MapScreen = () => {
   const mapSensorRef = useRef<MapSensorHandle>(null);
   const [mapViewMode, setMapViewMode] = useState<MapViewMode>('3D');
   const [mapTheme, setMapTheme] = useState<GoogleMapTheme>('dark');
+  const [mapBearing, setMapBearing] = useState(0);
   const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
@@ -2521,6 +2523,7 @@ const MapScreen = () => {
               viewMode={mapViewMode}
               mapTheme={mapTheme}
               mapBottomPadding={mapBottomPadding}
+              onMapBearingChange={setMapBearing}
             />
             <View pointerEvents="box-none" style={nS.driverOverlay}>
             {isDriverView && (
@@ -2572,6 +2575,13 @@ const MapScreen = () => {
                   }}
                 >
                   <Text style={nS.driverMapCtrlTxt}>{mapViewMode}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => mapSensorRef.current?.resetMapNorth()}
+                >
+                  <MapCompassIcon heading={mapBearing} />
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={nS.driverMapCtrlBtn}
