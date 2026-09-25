@@ -429,40 +429,50 @@ const RootLayout = () => {
   }, []);
 
   useEffect(() => {
+    console.log('[tabs/_layout] montado — listener auth activo');
     checkAppVersion(dispatch);
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      const user = session?.user ?? null;
-      if (user) {
-        dispatch(login(user));
-        // Profile data will be fetched as needed in individual screens
-        const token = (await GetPushToken()) || "token_error";
-        dispatch(updatePushToken(token, Platform.OS === "ios" ? "IOS" : "ANDROID"));
-        // La ubicación en SEGUNDO PLANO ya NO se solicita aquí: violaba la
-        // Prominent Disclosure de Google (se pedía a todos al iniciar sesión,
-        // sin explicación previa). Ahora solo se solicita a los conductores,
-        // tras aceptar la divulgación, cuando empieza un viaje activo
-        // (ver DriverLocationDisclosureGate y driverLocationTask).
-        await startForegroundLocationUpdates(dispatch);
-        
-        // ✅ RESTAURAR ESTADO DE VIAJES ACTIVOS Y NOTIFICACIONES
-        await restoreAppState(user.id);
-      } else {
-        dispatch(logout());
-
-        // ✅ LIMPIAR NOTIFICACIONES Y ESTADO AL CERRAR SESIÓN
-        await cancelActiveTripNotification();
-        await dismissDriverNotification();
-        await clearActiveTripId();
-        await setDriverModeActive(false);
-
-        // Limpiar flags de saludo por voz para que se vuelva a saludar en el próximo login
-        try {
-          const keys = await AsyncStorage.getAllKeys();
-          const greetedKeys = keys.filter((k) => k.startsWith('greeted_'));
-          if (greetedKeys.length > 0) await AsyncStorage.multiRemove(greetedKeys);
-        } catch {}
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // NUNCA await supabase.auth / I/O pesado dentro de este callback:
+      // bloquea el lock de GoTrue y puede terminar en SIGNED_OUT espurio.
+      if (process.env.NODE_ENV === 'development' && event !== 'TOKEN_REFRESHED') {
+        console.log('[auth:tabs/_layout]', event, session?.user?.id || 'No user');
       }
-      setAuthStateChecked(true);
+
+      // Ignorar refresh: no re-login ni side effects (push/GPS/restore).
+      if (event === 'TOKEN_REFRESHED') return;
+
+      const user = session?.user ?? null;
+      if (user && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'USER_UPDATED')) {
+        dispatch(login(user));
+        setAuthStateChecked(true);
+        if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+          const uid = user.id;
+          setTimeout(async () => {
+            try {
+              const token = (await GetPushToken()) || "token_error";
+              dispatch(updatePushToken(token, Platform.OS === "ios" ? "IOS" : "ANDROID"));
+              await startForegroundLocationUpdates(dispatch);
+              await restoreAppState(uid);
+            } catch (e) {
+              console.warn('[tabs/_layout] post-login side effects:', (e as any)?.message);
+            }
+          }, 0);
+        }
+      } else if (event === 'SIGNED_OUT' || !user) {
+        dispatch(logout());
+        setAuthStateChecked(true);
+        setTimeout(async () => {
+          try {
+            await cancelActiveTripNotification();
+            await dismissDriverNotification();
+            await clearActiveTripId();
+            await setDriverModeActive(false);
+            const keys = await AsyncStorage.getAllKeys();
+            const greetedKeys = keys.filter((k) => k.startsWith('greeted_'));
+            if (greetedKeys.length > 0) await AsyncStorage.multiRemove(greetedKeys);
+          } catch {}
+        }, 0);
+      }
     });
 
     return () => subscription.unsubscribe();

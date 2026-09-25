@@ -5,7 +5,7 @@ import Constants from 'expo-constants';
 import Navigation from './Navigation/Navigation';
 import { Provider } from 'react-redux';
 import store from '@/common/store';
-import supabase, { Auth, clearStoredSession, isPasswordRecoveryInProgress } from '@/config/SupabaseConfig';
+import supabase, { Auth, clearStoredSession, getSafeSession, isPasswordRecoveryInProgress } from '@/config/SupabaseConfig';
 import { login, logout, setProfile } from '@/common/reducers/authReducer';
 // Define la background location task antes de que el OS pueda despacharla.
 import '@/common/services/driverLocationTask';
@@ -117,23 +117,59 @@ export default function RootLayout() {
 
   useEffect(() => {
     let isMounted = true;
+    let lastProfileAuthId: string | null = null;
 
     const loadProfile = async (authUid: string) => {
       try {
-        const { data } = await supabase
+        // Sin JWT = rol anon → vista users toca persona sin GRANT → spam 42501.
+        // No otorgamos SELECT a anon; simplemente no consultamos deslogueados.
+        const session = await getSafeSession();
+        if (!session?.access_token) {
+          console.warn('[loadProfile] omitido: sin JWT (evita permission denied en persona)');
+          return;
+        }
+        if (lastProfileAuthId === authUid) {
+          return; // Evita tormenta en TOKEN_REFRESHED / listeners duplicados
+        }
+        lastProfileAuthId = authUid;
+
+        // Preferir RPC (SECURITY DEFINER) si existe
+        try {
+          const { data: rpcData, error: rpcError } = await supabase.rpc('get_perfil_movil' as any);
+          if (!rpcError && rpcData) {
+            const profile = rpcData as any;
+            if (profile.blocked === true) {
+              console.warn('[loadProfile] cuenta bloqueada (rpc) — cerrando sesión');
+              await clearStoredSession('blocked-account');
+              if (isMounted) store.dispatch(logout());
+              return;
+            }
+            if (isMounted) store.dispatch(setProfile(profile));
+            return;
+          }
+        } catch {
+          // fallback a vista users
+        }
+
+        const { data, error } = await supabase
           .from('users')
           .select('*')
           .eq('auth_id', authUid)
-          .single();
-        // Si el administrador bloqueó la cuenta, cerrar la sesión restaurada.
-        if (data && (data as any).blocked) {
-          await supabase.auth.signOut();
-          await clearStoredSession();
+          .maybeSingle();
+        if (error) {
+          console.warn('[loadProfile] error:', error.message);
+          return;
+        }
+        if (data && (data as any).blocked === true) {
+          console.warn('[loadProfile] cuenta bloqueada — cerrando sesión');
+          await clearStoredSession('blocked-account');
           if (isMounted) store.dispatch(logout());
           return;
         }
-        if (data) store.dispatch(setProfile(data as any));
-      } catch {}
+        if (data && isMounted) store.dispatch(setProfile(data as any));
+      } catch (e) {
+        console.warn('[loadProfile] exception:', (e as any)?.message);
+      }
     };
 
     const syncInitialSession = async () => {
@@ -144,37 +180,58 @@ export default function RootLayout() {
 
         if (session?.user) {
           store.dispatch(login(session.user));
-          // Carga el perfil para que profile.id (users.id) esté disponible
-          // en toda la app — necesario para filtrar bookings correctamente.
           await loadProfile(session.user.id);
-        } else {
-          store.dispatch(logout());
         }
       } catch (e) {
         console.warn('Error syncing initial auth session:', e);
-        await clearStoredSession();
-        if (isMounted) {
-          store.dispatch(logout());
-        }
       }
     };
 
     syncInitialSession();
 
+    let _lastRefreshLogAt = 0;
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
+      if (process.env.NODE_ENV === 'development') {
+        if (event === 'TOKEN_REFRESHED') {
+          const now = Date.now();
+          if (now - _lastRefreshLogAt >= 60_000) {
+            _lastRefreshLogAt = now;
+            console.log('[auth:_layout]', event, session?.user?.id || 'No user');
+          }
+        } else {
+          console.log('[auth:_layout]', event, session?.user?.id || 'No user');
+        }
+      }
       // Durante el restablecimiento por deep link no tocamos el estado global de
       // auth: la sesión es temporal y solo sirve para que ResetPassword pueda
       // llamar a updateUser. Así el navegador no conmuta de stack ni desmonta
       // la pantalla. (PASSWORD_RECOVERY también lo ignoramos por seguridad.)
       if (event === 'PASSWORD_RECOVERY' || isPasswordRecoveryInProgress()) return;
-      if (session?.user) {
-        store.dispatch(login(session.user));
-        loadProfile(session.user.id);
-      } else {
+
+      // TOKEN_REFRESHED: NO dispatch(login). Cada login pisa el user mergeado
+      // (persona.id) y re-dispara efectos → getSession storm → rotación de
+      // refresh_token → SIGNED_OUT.
+      if (event === 'TOKEN_REFRESHED') return;
+
+      if (event === 'SIGNED_OUT' || !session?.user) {
+        lastProfileAuthId = null;
         store.dispatch(logout());
+        return;
+      }
+
+      if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'USER_UPDATED') {
+        store.dispatch(login(session.user));
+      }
+
+      if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+        const uid = session.user.id;
+        setTimeout(() => {
+          if (isMounted) loadProfile(uid);
+        }, 0);
       }
     });
 

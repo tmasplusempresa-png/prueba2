@@ -47,9 +47,9 @@ import { Ionicons, AntDesign, MaterialIcons } from "@expo/vector-icons";
 import RNPickerSelect from "react-native-picker-select";
 import * as ImagePicker from "expo-image-picker";
 import { Button, Input } from "react-native-elements";
-import { ActivityIndicator } from "react-native"; // Aseg�rate de importar ActivityIndicator
+import { ActivityIndicator } from "react-native"; // Asegúrate de importar ActivityIndicator
 import axios from "axios";
-import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { mapSupabaseBooking } from '@/common/store/bookingsSlice';
 const { width, height: screenHeight } = Dimensions.get("window");
 import { useRoute } from "@react-navigation/native";
@@ -72,6 +72,7 @@ import { requestIgnoreBatteryOptimization } from '@/common/services/batteryOptim
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { registerDriverGoHandlers } from '@/common/utils/driverGoBridge';
 import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
+import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useDriverNavBottomPad } from '@/components/DriverBottomNav';
 
 const tourImage = require("../../assets/images/icon.png");
@@ -514,20 +515,15 @@ const MapScreen = () => {
     dispatch(listenToSettingsChanges());
   }, [dispatch]);
 
-  // El FK de memberships.conductor referencia auth.users(id), o sea el auth_id del conductor.
-  // Probamos auth_id primero, con fallbacks por compatibilidad con datos legacy creados con users.id.
+  // memberships.conductor / bookings.driver_id = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
+  );
   // Marca el id para el cual ya completó (ok o error) el fetch inicial de membresías.
   // Sin esto, en el primer render con driverConductorId presente, membershipsLoading sigue
   // siendo `false` (estado inicial) en el closure del effect del popup, así que el modal
@@ -2134,6 +2130,10 @@ const MapScreen = () => {
   const fetchBalanceBookings = async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
+      if (!hasUserAuthHeader(headers)) {
+        console.warn('[HOY] sin JWT de usuario — se omite fetch de balance');
+        return;
+      }
       const url =
         `${SUPABASE_URL}/rest/v1/bookings` +
         `?status=eq.COMPLETE` +

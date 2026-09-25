@@ -10,8 +10,9 @@ import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { RootState } from '@/common/store';
-import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
+import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -110,16 +111,25 @@ const DriverActivityScreen = () => {
   const [showPicker, setShowPicker] = useState(false);
   const driverIdRef = useRef<string | null>(null);
 
-  // Resuelve el PK users.id del conductor autenticado (mismo patrón que
-  // DriverActiveReservationsScreen) — necesario para filtrar SOLO sus viajes.
+  // Resuelve users.id (= persona.id) — no auth uid.
   const resolveDriverId = useCallback(async (): Promise<string | null> => {
     if (driverIdRef.current) return driverIdRef.current;
-    const candidates = [user?.id, user?.auth_id, profile?.id, profile?.auth_id]
-      .map((value) => String(value || '').trim())
-      .filter((value, index, array) => isUuid(value) && array.indexOf(value) === index);
-    if (candidates.length === 0) return null;
 
     const headers = await getSupabaseAuthHeaders();
+    if (!hasUserAuthHeader(headers)) {
+      console.warn('📡 [DriverActivity] sin JWT — no se resuelve driver_id');
+      return null;
+    }
+
+    const preferred = preferredConductorId(user, profile);
+    if (preferred && isUuid(preferred) && profile?.id && preferred === String(profile.id)) {
+      driverIdRef.current = preferred;
+      return preferred;
+    }
+
+    const candidates = collectDriverIdCandidates(user, profile).filter(isUuid);
+    if (candidates.length === 0) return null;
+
     for (const candidate of candidates) {
       const url = `${SUPABASE_URL}/rest/v1/users?or=(id.eq.${candidate},auth_id.eq.${candidate})&select=id&limit=1`;
       const res = await fetch(url, { headers });

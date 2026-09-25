@@ -2,11 +2,19 @@ import { useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { RootState } from '@/common/store/store';
-import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import supabase, {
+  SUPABASE_URL,
+  getSafeSession,
+  getSupabaseAuthHeaders,
+  hasUserAuthHeader,
+} from '@/config/SupabaseConfig';
 import {
   startDriverLocationTracking,
   stopDriverLocationTracking,
 } from '@/common/services/driverLocationTask';
+import {
+  collectDriverIdCandidates,
+} from '@/common/utils/driverIds';
 
 const ACTIVE_STATUSES = ['ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED'];
 
@@ -34,9 +42,7 @@ function pickUserType(user: any, profile: any): string {
     .toLowerCase();
 }
 
-// bookings.driver_id referencia users.id (tabla pública), no auth_id.
-// La sesión restaurada en cold start solo trae el SupabaseUser, así que hay
-// que resolver el id público vía OR sobre id/auth_id como hace index.tsx:976.
+// bookings.driver_id referencia users.id (persona.id), no auth_id.
 async function resolveDriverPublicId(
   candidates: string[],
   headers: Record<string, string>,
@@ -51,6 +57,9 @@ async function resolveDriverPublicId(
       if (r.ok) {
         const rows = await r.json();
         if (rows?.[0]?.id) return rows[0].id;
+      } else if (r.status === 401 || r.status === 403) {
+        console.warn('[GlobalDriverTracking] users resolve unauthorized:', r.status);
+        return null;
       }
     } catch (e) {
       console.error('[GlobalDriverTracking] resolve users.id error:', e);
@@ -65,13 +74,7 @@ export function useGlobalDriverTracking() {
 
   const userType = pickUserType(user, profile);
   const isDriver = userType === 'driver';
-  const idCandidates: string[] = [
-    user?.id,
-    user?.auth_id,
-    profile?.id,
-    profile?.auth_id,
-    user?.user_metadata?.id,
-  ].filter(Boolean);
+  const idCandidates = collectDriverIdCandidates(user, profile);
   const candidatesKey = idCandidates.join('|');
 
   useEffect(() => {
@@ -83,18 +86,37 @@ export function useGlobalDriverTracking() {
 
     let cancelled = false;
     let channel: ReturnType<typeof supabase.channel> | null = null;
-    let publicDriverId: string | null = null;
+    // Solo confiar en profile.id (= users.id). Si aún no hay perfil, resolver vía API.
+    let publicDriverId: string | null = profile?.id ? String(profile.id) : null;
     let currentActiveBookingId: string | null = null;
+    let warnedNoSession = false;
 
     const reevaluate = async () => {
       if (cancelled) return;
       try {
+        const session = await getSafeSession();
+        if (!session?.access_token) {
+          if (!warnedNoSession) {
+            warnedNoSession = true;
+            console.warn('[GlobalDriverTracking] sin sesión JWT — se reintenta cuando haya login');
+          }
+          return;
+        }
+        warnedNoSession = false;
+
         const headers = await getSupabaseAuthHeaders();
+        if (!hasUserAuthHeader(headers)) {
+          if (!warnedNoSession) {
+            warnedNoSession = true;
+            console.warn('[GlobalDriverTracking] sin JWT de usuario — se reintenta cuando haya login');
+          }
+          return;
+        }
         if (!publicDriverId) {
           publicDriverId = await resolveDriverPublicId(idCandidates, headers);
           if (cancelled) return;
           if (!publicDriverId) {
-            console.error('[GlobalDriverTracking] could not resolve users.id from', idCandidates);
+            console.warn('[GlobalDriverTracking] could not resolve users.id from', idCandidates);
             return;
           }
           console.log('[GlobalDriverTracking] resolved publicDriverId =', publicDriverId);
@@ -117,12 +139,6 @@ export function useGlobalDriverTracking() {
           console.log('[GlobalDriverTracking] active booking found:', activeBookingId, rows[0].status);
           const ok = await startDriverLocationTracking(activeBookingId, publicDriverId);
           if (!ok) {
-            // No es un error: startDriverLocationTracking devuelve false cuando aún
-            // faltan permisos/consentimiento de ubicación en segundo plano (en cuyo
-            // caso ya se disparó la pantalla de divulgación) o cuando el usuario los
-            // negó. El único fallo real (startLocationUpdatesAsync lanza) ya se
-            // registra con console.error dentro de driverLocationTask. Aquí solo
-            // avisamos —si fuera error, este hook lo repetiría cada 15s (poll).
             console.warn('[GlobalDriverTracking] tracking no iniciado: permisos/consentimiento de ubicación en segundo plano pendientes');
           }
         } else {
@@ -162,18 +178,12 @@ export function useGlobalDriverTracking() {
       reevaluate();
     }, 15000);
 
-    // Watchdog anti-kill: detecta gaps prolongados sin puntos GPS y fuerza
-    // restart del foreground service. Muchas veces `hasStartedLocationUpdatesAsync`
-    // sigue reportando true tras un kill silencioso del OEM — el único signal
-    // fiable es la ausencia de inserts recientes.
     const watchdogInterval = setInterval(async () => {
       if (cancelled) return;
       if (!currentActiveBookingId || !publicDriverId) return;
       try {
         const raw = await AsyncStorage.getItem(LAST_INSERT_KEY);
         if (!raw) {
-          // Sin ningún punto insertado aún: puede ser normal en los primeros
-          // segundos tras aceptar. No forzamos restart.
           return;
         }
         const last = JSON.parse(raw) as { lat: number; lng: number; time: number };
@@ -186,9 +196,6 @@ export function useGlobalDriverTracking() {
           );
           await stopDriverLocationTracking();
           await startDriverLocationTracking(currentActiveBookingId, publicDriverId);
-          // Registrar el gap en BD para auditoría posterior. Best effort:
-          // si la tabla notification_events aún no existe (feature futura),
-          // el error se ignora y no rompe el flujo del watchdog.
           try {
             await supabase.from('notification_events' as any).insert({
               user_id: publicDriverId,

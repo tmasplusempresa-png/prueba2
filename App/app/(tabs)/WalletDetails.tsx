@@ -32,6 +32,7 @@ import { listenToSettingsChanges, selectSettings } from "@/common/reducers/setti
 import { supabase } from "@/config/SupabaseConfig";
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
 import { useDriverNavBottomPad, useIsDriverUser } from "@/components/DriverBottomNav";
+import { collectDriverIdCandidates, preferredConductorId } from "@/common/utils/driverIds";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -51,20 +52,15 @@ const WalletDetails = ({ navigation }: Props) => {
   const dispatch = useDispatch<AppDispatch>();
   const settings = useSelector(selectSettings);
 
-  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
-  // y caemos a users.id por compatibilidad con datos legacy.
+  // memberships.conductor = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, (user as any)?.auth_id, profile?.id, user?.id, (user as any)?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, (user as any)?.auth_id, user?.id, (user as any)?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, (user as any)?.auth_id, (user as any)?.uid],
+  );
   
 
   const glowAnimRef = useRef({

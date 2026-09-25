@@ -4,22 +4,24 @@ import { useSelector, useDispatch } from "react-redux";
 import { RootState, AppDispatch } from "@/common/store";
 import { fetchMemberships, renewMembership, createMembership, cancelMembership, selectMembershipLoading } from "@/common/reducers/membershipSlice";
 import { differenceInDays } from "date-fns";
+import { preferredConductorId } from "@/common/utils/driverIds";
 
 const SubscriptionCard = () => {
   const dispatch = useDispatch<AppDispatch>();
   const user = useSelector((state: RootState) => state.auth.user);
+  const profile = useSelector((state: RootState) => (state as any).auth.profile);
   const memberships = useSelector((state: RootState) => state.memberships.memberships);
   const isLoading = useSelector(selectMembershipLoading);
+  const conductorId = preferredConductorId(user, profile);
 
   // Filtrar membresía activa
   const activeMembership = memberships.find((membership) => membership.status === "ACTIVA");
 
   useEffect(() => {
-    if (user?.id) {
-      // Cargar membresías al montar el componente si el usuario está autenticado
-      dispatch(fetchMemberships(user.id));
+    if (conductorId) {
+      dispatch(fetchMemberships(conductorId));
     }
-  }, [dispatch, user?.id]);
+  }, [dispatch, conductorId]);
 
   const handleRenew = (uid: string) => {
     dispatch(renewMembership(uid))
@@ -42,8 +44,8 @@ const SubscriptionCard = () => {
   };
 
   const handleCreateMembership = (plan: string) => {
-    if (!user?.id) return;
-    dispatch(createMembership({ uid: user.id, costo: '90600' }))
+    if (!conductorId) return;
+    dispatch(createMembership({ uid: conductorId, costo: '90600' }))
       .then(() => {
         alert(`Membresía de ${plan} creada con éxito`);
       })

@@ -15,6 +15,7 @@ import { RootState } from '@/common/store';
 import { selectDriverOnline } from '@/components/DriverBottomNav';
 import { invokeDriverGoActivate, invokeDriverGoDeactivate } from '@/common/utils/driverGoBridge';
 import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
+import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
@@ -235,20 +236,15 @@ const DriverReservationsScreen = ({
     isDriver: activeTripIsDriver,
   } = useActiveTripBanner();
 
-  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
-  // y caemos a users.id por compatibilidad con datos legacy.
+  // memberships.conductor = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
+  );
   const activeMembership = memberships.find(
     (m: any) =>
       m.status === 'ACTIVA' &&
