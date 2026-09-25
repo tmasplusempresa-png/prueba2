@@ -23,6 +23,11 @@ import * as SecureStore from 'expo-secure-store';
 
 const REMEMBER_ME_STORAGE_KEY = 'tmasplus_remember_me';
 const TOGGLE_PAD = 4;
+const REGISTER_STEPS = [
+  { id: 1, label: 'Datos' },
+  { id: 2, label: 'Perfil' },
+  { id: 3, label: 'Cuenta' },
+] as const;
 
 type Props = NativeStackScreenProps<any>;
 
@@ -87,6 +92,7 @@ const LoginScreen = ({ navigation }: Props) => {
   });
 
   const [documentTypeModalVisible, setDocumentTypeModalVisible] = useState(false);
+  const [registerStep, setRegisterStep] = useState(1);
 
   // UI State
   const [ui, setUI] = useState({
@@ -158,8 +164,10 @@ const LoginScreen = ({ navigation }: Props) => {
   const passwordLiftAnim = useRef(new Animated.Value(0)).current;
   const tabIndicatorAnim = useRef(new Animated.Value(0)).current; // 0 = Ingresar, 1 = Registro
   const formOpacityAnim = useRef(new Animated.Value(1)).current;
+  const stepAnim = useRef(new Animated.Value(1)).current;
   const [toggleTrackW, setToggleTrackW] = useState(0);
   const switchingModeRef = useRef(false);
+  const switchingStepRef = useRef(false);
   const isLoginModeRef = useRef(true);
 
   useEffect(() => {
@@ -190,6 +198,7 @@ const LoginScreen = ({ navigation }: Props) => {
       }),
     ]).start(() => {
       setUI(prev => ({ ...prev, isLoginMode: nextLogin, error: "" }));
+      if (!nextLogin) setRegisterStep(1);
       Animated.timing(formOpacityAnim, {
         toValue: 1,
         duration: 180,
@@ -233,6 +242,87 @@ const LoginScreen = ({ navigation }: Props) => {
     });
   }, []);
 
+  const animateRegisterStep = useCallback((nextStep: number) => {
+    if (switchingStepRef.current || nextStep === registerStep) return;
+    switchingStepRef.current = true;
+    Animated.timing(stepAnim, {
+      toValue: 0,
+      duration: 120,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start(() => {
+      setRegisterStep(nextStep);
+      setUI(u => ({ ...u, error: "" }));
+      Animated.timing(stepAnim, {
+        toValue: 1,
+        duration: 200,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(() => {
+        switchingStepRef.current = false;
+      });
+    });
+  }, [registerStep, stepAnim]);
+
+  const goRegisterNext = useCallback(() => {
+    if (registerStep === 1) {
+      const firstName = sanitizeInput(form.firstName, 'text');
+      const lastName = sanitizeInput(form.lastName, 'text');
+      const email = sanitizeInput(form.email, 'email');
+      const mobile = sanitizeInput(form.mobile, 'phone');
+      if (!firstName || !lastName || !email || !mobile) {
+        showAlert('error', 'Error', 'Completa nombre, apellido, correo y celular');
+        return;
+      }
+      if (!validation.emailFormatValid) {
+        showAlert('error', 'Error', 'El correo no tiene un formato válido');
+        return;
+      }
+      if (emailValidation.isChecking || phoneValidation.isChecking) {
+        showAlert('info', 'Un momento', 'Estamos comprobando tus datos, espera un segundo');
+        return;
+      }
+      if (validation.emailExists) {
+        showAlert('error', 'Error', 'Este correo ya está registrado. Intenta iniciar sesión.');
+        return;
+      }
+      if (!validation.phoneFormatValid) {
+        showAlert('error', 'Error', 'El teléfono no tiene un formato válido');
+        return;
+      }
+      if (validation.phoneExists) {
+        showAlert('error', 'Error', 'Este teléfono ya está registrado.');
+        return;
+      }
+      animateRegisterStep(2);
+      return;
+    }
+    if (registerStep === 2) {
+      const doc = (form.documentNumber || '').replace(/[^0-9A-Za-z-]/g, '').trim();
+      if (!form.usertype) {
+        showAlert('error', 'Error', 'Selecciona si eres Cliente o Conductor');
+        return;
+      }
+      if (!form.documentType) {
+        showAlert('error', 'Error', 'Selecciona el tipo de documento');
+        return;
+      }
+      if (!doc) {
+        showAlert('error', 'Error', 'Ingresa el número de documento');
+        return;
+      }
+      animateRegisterStep(3);
+    }
+  }, [
+    registerStep, form, validation, emailValidation.isChecking, phoneValidation.isChecking,
+    sanitizeInput, showAlert, animateRegisterStep,
+  ]);
+
+  const goRegisterBack = useCallback(() => {
+    if (registerStep <= 1) return;
+    animateRegisterStep(registerStep - 1);
+  }, [registerStep, animateRegisterStep]);
+
   const clearRegistrationForm = useCallback(() => {
     setForm({
       email: "",
@@ -255,6 +345,7 @@ const LoginScreen = ({ navigation }: Props) => {
       acceptPrivacyPolicy: false,
     }));
     setUI(prev => ({ ...prev, error: "" }));
+    setRegisterStep(1);
   }, []);
 
   const allRequiredAccepted =
@@ -431,6 +522,7 @@ const LoginScreen = ({ navigation }: Props) => {
         acceptDataTreatment: false,
         acceptPrivacyPolicy: false,
       }));
+      setRegisterStep(1);
       setUI(u => ({ ...u, loading: false, error: '' }));
     } catch (e: any) {
       let errorMessage = e.message || 'Error al registrarse';
@@ -708,8 +800,8 @@ const LoginScreen = ({ navigation }: Props) => {
                 <View style={styles.authBoxTint} pointerEvents="none" />
                 <View style={styles.authBoxContent}>
                 {/* Logo */}
-                <View style={styles.logoContainer}>
-                  <View style={styles.logoImageWrap}>
+                <View style={[styles.logoContainer, !ui.isLoginMode && styles.logoContainerCompact]}>
+                  <View style={[styles.logoImageWrap, !ui.isLoginMode && styles.logoImageWrapCompact]}>
                     <Image
                       source={require("@/assets/images/logo-Preview.png")}
                       style={styles.logoImage}
@@ -832,268 +924,349 @@ const LoginScreen = ({ navigation }: Props) => {
                     </TouchableOpacity>
                   </View>
                 ) : (
-                  // SIGNUP FORM
+                  // SIGNUP FORM — 3 etapas
                   <View>
-                    {/* First Name */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <Feather name="user" size={20} color={ui.firstNameFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                        {ui.firstNameFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.firstNameFocused && styles.inputFocused]}
-                          placeholder="Nombre"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          value={form.firstName}
-                          onChangeText={handleFirstNameChange}
-                          onFocus={() => setUI(u => ({ ...u, firstNameFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, firstNameFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="words"
-                        />
-                        {ui.firstNameFocused && <View style={styles.scanLine} />}
-                      </View>
-                    </View>
-
-                    {/* Last Name */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <Feather name="user" size={20} color={ui.lastNameFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                        {ui.lastNameFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.lastNameFocused && styles.inputFocused]}
-                          placeholder="Apellido"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          value={form.lastName}
-                          onChangeText={handleLastNameChange}
-                          onFocus={() => setUI(u => ({ ...u, lastNameFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, lastNameFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="words"
-                        />
-                        {ui.lastNameFocused && <View style={styles.scanLine} />}
-                      </View>
-                    </View>
-
-                    {/* Email */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <MaterialCommunityIcons name="email" size={20} color={ui.emailFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                        {ui.emailFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.emailFocused && styles.inputFocused]}
-                          placeholder="Email"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          keyboardType="email-address"
-                          value={form.email}
-                          onChangeText={handleEmailChange}
-                          onFocus={() => setUI(u => ({ ...u, emailFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, emailFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="none"
-                        />
-                        {ui.emailFocused && <View style={styles.scanLine} />}
-                      </View>
-                    </View>
-                    {emailValidation.isChecking ? (
-                      <Text style={styles.statusText}>Comprobando correo...</Text>
-                    ) : !validation.emailFormatValid && form.email ? (
-                      <Text style={styles.errorSmall}>Formato de correo inválido</Text>
-                    ) : validation.emailExists ? (
-                      <Text style={styles.errorSmall}>Este correo ya está registrado</Text>
-                    ) : null}
-
-                    {/* Phone */}
-                    <View style={styles.phoneContainer}>
-                      <View style={[styles.inputWrapper, styles.phoneCombinedWrapper]}>
-                        <TouchableOpacity style={styles.phoneCodeInlineButton} onPress={() => setCountry(c => ({ ...c, showModal: true }))}>
-                          <Text style={styles.countryFlag}>{country.selectedCountry.flag}</Text>
-                          <Text style={styles.countryCode}>{country.selectedCountry.code}</Text>
-                          <MaterialCommunityIcons name="chevron-down" size={14} color={THEME.textMuted} />
-                        </TouchableOpacity>
-                        <TextInput
-                          style={[styles.input, styles.phoneCombinedInput]}
-                          placeholder="3005551234"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          value={form.mobile}
-                          onChangeText={handlePhoneChange}
-                          onFocus={() => setUI(u => ({ ...u, phoneFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, phoneFocused: false }))}
-                          keyboardType="phone-pad"
-                          maxLength={10}
-                          editable={!ui.loading}
-                        />
-                      </View>
-                    </View>
-                    {phoneValidation.isChecking ? (
-                      <Text style={styles.statusText}>Comprobando teléfono...</Text>
-                    ) : !validation.phoneFormatValid && form.mobile ? (
-                      <Text style={styles.errorSmall}>Formato de teléfono inválido</Text>
-                    ) : validation.phoneExists ? (
-                      <Text style={styles.errorSmall}>Este teléfono ya está registrado</Text>
-                    ) : null}
-
-                    {/* User Type */}
-                    <TouchableOpacity style={[styles.inputGroup, styles.inputWrapper, styles.userTypeButton]} onPress={() => setUserTypeState(u => ({ ...u, showModal: true }))}>
-                      <AntDesign name="idcard" size={20} color={form.usertype ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                      <Text style={[styles.input, { color: form.usertype ? THEME.textMain : THEME.textMuted }]}>
-                        {form.usertype ? (form.usertype === 'driver' ? 'Conductor' : 'Cliente') : 'Soy...'}
+                    <View style={styles.stepHeader}>
+                      <Text style={styles.stepTitle}>
+                        {registerStep === 1 ? 'Tus datos' : registerStep === 2 ? 'Tu perfil' : 'Tu cuenta'}
                       </Text>
-                    </TouchableOpacity>
-
-                    {/* Document Type */}
-                    <TouchableOpacity
-                      style={[styles.inputGroup, styles.inputWrapper, styles.userTypeButton]}
-                      onPress={() => setDocumentTypeModalVisible(true)}
-                    >
-                      <MaterialCommunityIcons name="file-document-outline" size={20} color={form.documentType ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                      <Text style={[styles.input, { color: form.documentType ? THEME.textMain : THEME.textMuted }]}>
-                        {form.documentType
-                          ? (DOCUMENT_TYPE_OPTIONS.find(o => o.value === form.documentType)?.label || form.documentType)
-                          : 'Tipo de documento'}
-                      </Text>
-                    </TouchableOpacity>
-
-                    {/* Document Number */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <MaterialCommunityIcons
-                          name="card-account-details-outline"
-                          size={20}
-                          color={ui.documentNumberFocused ? THEME.primaryCyan : THEME.textMuted}
-                          style={styles.inputIcon}
-                        />
-                        {ui.documentNumberFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.documentNumberFocused && styles.inputFocused]}
-                          placeholder="Número de documento"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          value={form.documentNumber}
-                          onChangeText={(t) => updateField('documentNumber', t.replace(/[^0-9A-Za-z-]/g, ''))}
-                          onFocus={() => setUI(u => ({ ...u, documentNumberFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, documentNumberFocused: false }))}
-                          editable={!ui.loading}
-                          keyboardType={form.documentType === 'PA' ? 'default' : 'number-pad'}
-                          maxLength={20}
-                          autoCapitalize="characters"
-                        />
-                        {ui.documentNumberFocused && <View style={styles.scanLine} />}
-                      </View>
+                      <Text style={styles.stepSubtitle}>Etapa {registerStep} de 3</Text>
                     </View>
 
-                    {/* Referral Code (opcional) */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <Feather
-                          name="gift"
-                          size={20}
-                          color={ui.referralCodeFocused ? THEME.primaryCyan : THEME.textMuted}
-                          style={styles.inputIcon}
-                        />
-                        {ui.referralCodeFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.referralCodeFocused && styles.inputFocused]}
-                          placeholder="Código de referido (opcional)"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          value={form.referralCode}
-                          onChangeText={(t) => updateField('referralCode', t.trim())}
-                          onFocus={() => setUI(u => ({ ...u, referralCodeFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, referralCodeFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="characters"
-                          maxLength={32}
-                        />
-                        {ui.referralCodeFocused && <View style={styles.scanLine} />}
-                      </View>
+                    <View style={styles.stepProgress}>
+                      {REGISTER_STEPS.map((s, idx) => {
+                        const active = registerStep === s.id;
+                        const done = registerStep > s.id;
+                        return (
+                          <View key={s.id} style={styles.stepProgressItem}>
+                            <View style={[styles.stepDot, (active || done) && styles.stepDotOn]}>
+                              {done ? (
+                                <AntDesign name="check" size={10} color="#001018" />
+                              ) : (
+                                <Text style={[styles.stepDotTxt, active && styles.stepDotTxtOn]}>{s.id}</Text>
+                              )}
+                            </View>
+                            <Text style={[styles.stepLabel, (active || done) && styles.stepLabelOn]}>{s.label}</Text>
+                            {idx < REGISTER_STEPS.length - 1 && (
+                              <View style={[styles.stepLine, done && styles.stepLineOn]} />
+                            )}
+                          </View>
+                        );
+                      })}
                     </View>
 
-                    {/* Password */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <AntDesign name="lock" size={20} color={ui.passwordFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                        {ui.passwordFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.passwordFocused && styles.inputFocused]}
-                          placeholder="Contraseña"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          secureTextEntry={!ui.passwordVisible}
-                          value={form.password}
-                          onChangeText={(t) => updateField('password', t)}
-                          onFocus={() => setUI(u => ({ ...u, passwordFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, passwordFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="none"
-                        />
-                        <TouchableOpacity onPress={() => setUI(u => ({ ...u, passwordVisible: !u.passwordVisible }))} style={styles.eyeIcon} disabled={ui.loading}>
-                          <Feather name={ui.passwordVisible ? "eye" : "eye-off"} size={18} color="#fff" />
-                        </TouchableOpacity>
-                        {ui.passwordFocused && <View style={styles.scanLine} />}
-                      </View>
-                    </View>
+                    <Animated.View style={{ opacity: stepAnim }}>
+                      {registerStep === 1 && (
+                        <View>
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <Feather name="user" size={20} color={ui.firstNameFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                              {ui.firstNameFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.firstNameFocused && styles.inputFocused]}
+                                placeholder="Nombre"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                value={form.firstName}
+                                onChangeText={handleFirstNameChange}
+                                onFocus={() => setUI(u => ({ ...u, firstNameFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, firstNameFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="words"
+                              />
+                              {ui.firstNameFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
 
-                    {/* Confirm Password */}
-                    <View style={styles.inputGroup}>
-                      <View style={styles.inputWrapper}>
-                        <AntDesign name="lock" size={20} color={ui.confirmPasswordFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
-                        {ui.confirmPasswordFocused && <Text style={styles.plusIcon}>+</Text>}
-                        <TextInput
-                          style={[styles.input, ui.confirmPasswordFocused && styles.inputFocused]}
-                          placeholder="Confirmar Contraseña"
-                          placeholderTextColor="rgba(255, 255, 255, 0.5)"
-                          secureTextEntry={!ui.confirmPasswordVisible}
-                          value={form.confirmPassword}
-                          onChangeText={(t) => updateField('confirmPassword', t)}
-                          onFocus={() => setUI(u => ({ ...u, confirmPasswordFocused: true }))}
-                          onBlur={() => setUI(u => ({ ...u, confirmPasswordFocused: false }))}
-                          editable={!ui.loading}
-                          autoCapitalize="none"
-                        />
-                        <TouchableOpacity onPress={() => setUI(u => ({ ...u, confirmPasswordVisible: !u.confirmPasswordVisible }))} style={styles.eyeIcon} disabled={ui.loading}>
-                          <Feather name={ui.confirmPasswordVisible ? "eye" : "eye-off"} size={18} color="#fff" />
-                        </TouchableOpacity>
-                        {ui.confirmPasswordFocused && <View style={styles.scanLine} />}
-                      </View>
-                    </View>
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <Feather name="user" size={20} color={ui.lastNameFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                              {ui.lastNameFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.lastNameFocused && styles.inputFocused]}
+                                placeholder="Apellido"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                value={form.lastName}
+                                onChangeText={handleLastNameChange}
+                                onFocus={() => setUI(u => ({ ...u, lastNameFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, lastNameFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="words"
+                              />
+                              {ui.lastNameFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
 
-                    {/* Required Agreements */}
-                    <View style={styles.agreementsCard}>
-                      <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptTerms: !v.acceptTerms }))} disabled={ui.loading}>
-                        <View style={[styles.checkbox, validation.acceptTerms && styles.checkboxActive]}>
-                          {validation.acceptTerms && <AntDesign name="check" size={12} color="#fff" />}
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <MaterialCommunityIcons name="email" size={20} color={ui.emailFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                              {ui.emailFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.emailFocused && styles.inputFocused]}
+                                placeholder="Email"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                keyboardType="email-address"
+                                value={form.email}
+                                onChangeText={handleEmailChange}
+                                onFocus={() => setUI(u => ({ ...u, emailFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, emailFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="none"
+                              />
+                              {ui.emailFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
+                          {emailValidation.isChecking ? (
+                            <Text style={styles.statusText}>Comprobando correo...</Text>
+                          ) : !validation.emailFormatValid && form.email ? (
+                            <Text style={styles.errorSmall}>Formato de correo inválido</Text>
+                          ) : validation.emailExists ? (
+                            <Text style={styles.errorSmall}>Este correo ya está registrado</Text>
+                          ) : null}
+
+                          <View style={styles.phoneContainer}>
+                            <View style={[styles.inputWrapper, styles.phoneCombinedWrapper, styles.glassField]}>
+                              <TouchableOpacity style={styles.phoneCodeInlineButton} onPress={() => setCountry(c => ({ ...c, showModal: true }))}>
+                                <Text style={styles.countryFlag}>{country.selectedCountry.flag}</Text>
+                                <Text style={styles.countryCode}>{country.selectedCountry.code}</Text>
+                                <MaterialCommunityIcons name="chevron-down" size={14} color={THEME.textMuted} />
+                              </TouchableOpacity>
+                              <TextInput
+                                style={[styles.input, styles.phoneCombinedInput]}
+                                placeholder="3005551234"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                value={form.mobile}
+                                onChangeText={handlePhoneChange}
+                                onFocus={() => setUI(u => ({ ...u, phoneFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, phoneFocused: false }))}
+                                keyboardType="phone-pad"
+                                maxLength={10}
+                                editable={!ui.loading}
+                              />
+                            </View>
+                          </View>
+                          {phoneValidation.isChecking ? (
+                            <Text style={styles.statusText}>Comprobando teléfono...</Text>
+                          ) : !validation.phoneFormatValid && form.mobile ? (
+                            <Text style={styles.errorSmall}>Formato de teléfono inválido</Text>
+                          ) : validation.phoneExists ? (
+                            <Text style={styles.errorSmall}>Este teléfono ya está registrado</Text>
+                          ) : null}
+
+                          <TouchableOpacity style={styles.primaryBtn} onPress={goRegisterNext} activeOpacity={0.88}>
+                            <LinearGradient
+                              colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
+                              start={{ x: 0, y: 0 }}
+                              end={{ x: 1, y: 1 }}
+                              style={styles.primaryBtnGradient}
+                            >
+                              <Text style={styles.primaryBtnText}>SIGUIENTE</Text>
+                            </LinearGradient>
+                          </TouchableOpacity>
                         </View>
-                        <Text style={styles.checkboxLabel}>Acepto Términos y Condiciones</Text>
-                      </TouchableOpacity>
+                      )}
 
-                      <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptDataTreatment: !v.acceptDataTreatment }))} disabled={ui.loading}>
-                        <View style={[styles.checkbox, validation.acceptDataTreatment && styles.checkboxActive]}>
-                          {validation.acceptDataTreatment && <AntDesign name="check" size={12} color="#fff" />}
+                      {registerStep === 2 && (
+                        <View>
+                          <Text style={styles.fieldHint}>Soy...</Text>
+                          <View style={styles.roleRow}>
+                            {USER_TYPE_OPTIONS.map((opt) => {
+                              const selected = form.usertype === opt.value;
+                              return (
+                                <TouchableOpacity
+                                  key={opt.value}
+                                  style={[styles.roleCard, selected && styles.roleCardOn]}
+                                  onPress={() => updateField('usertype', opt.value)}
+                                  activeOpacity={0.88}
+                                >
+                                  <View style={[styles.roleIconWrap, selected && styles.roleIconWrapOn]}>
+                                    <AntDesign name={opt.icon as any} size={20} color={selected ? '#001018' : THEME.primaryCyan} />
+                                  </View>
+                                  <Text style={[styles.roleCardTxt, selected && styles.roleCardTxtOn]}>{opt.label}</Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+
+                          <TouchableOpacity
+                            style={[styles.inputGroup, styles.inputWrapper, styles.userTypeButton, styles.glassField]}
+                            onPress={() => setDocumentTypeModalVisible(true)}
+                          >
+                            <MaterialCommunityIcons name="file-document-outline" size={20} color={form.documentType ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                            <Text style={[styles.input, styles.inputInGlass, { color: form.documentType ? THEME.textMain : THEME.textMuted }]}>
+                              {form.documentType
+                                ? (DOCUMENT_TYPE_OPTIONS.find(o => o.value === form.documentType)?.label || form.documentType)
+                                : 'Tipo de documento'}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <MaterialCommunityIcons
+                                name="card-account-details-outline"
+                                size={20}
+                                color={ui.documentNumberFocused ? THEME.primaryCyan : THEME.textMuted}
+                                style={styles.inputIcon}
+                              />
+                              {ui.documentNumberFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.documentNumberFocused && styles.inputFocused]}
+                                placeholder="Número de documento"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                value={form.documentNumber}
+                                onChangeText={(t) => updateField('documentNumber', t.replace(/[^0-9A-Za-z-]/g, ''))}
+                                onFocus={() => setUI(u => ({ ...u, documentNumberFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, documentNumberFocused: false }))}
+                                editable={!ui.loading}
+                                keyboardType={form.documentType === 'PA' ? 'default' : 'number-pad'}
+                                maxLength={20}
+                                autoCapitalize="characters"
+                              />
+                              {ui.documentNumberFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
+
+                          <View style={styles.stepNavRow}>
+                            <TouchableOpacity style={styles.secondaryBtn} onPress={goRegisterBack} activeOpacity={0.85}>
+                              <Text style={styles.secondaryBtnText}>ATRÁS</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.primaryBtn, styles.primaryBtnFlex]} onPress={goRegisterNext} activeOpacity={0.88}>
+                              <LinearGradient
+                                colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.primaryBtnGradient}
+                              >
+                                <Text style={styles.primaryBtnText}>SIGUIENTE</Text>
+                              </LinearGradient>
+                            </TouchableOpacity>
+                          </View>
                         </View>
-                        <Text style={styles.checkboxLabel}>Acepto Tratamiento de Datos</Text>
-                      </TouchableOpacity>
+                      )}
 
-                      <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptPrivacyPolicy: !v.acceptPrivacyPolicy }))} disabled={ui.loading}>
-                        <View style={[styles.checkbox, validation.acceptPrivacyPolicy && styles.checkboxActive]}>
-                          {validation.acceptPrivacyPolicy && <AntDesign name="check" size={12} color="#fff" />}
+                      {registerStep === 3 && (
+                        <View>
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <Feather
+                                name="gift"
+                                size={20}
+                                color={ui.referralCodeFocused ? THEME.primaryCyan : THEME.textMuted}
+                                style={styles.inputIcon}
+                              />
+                              {ui.referralCodeFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.referralCodeFocused && styles.inputFocused]}
+                                placeholder="Código de referido (opcional)"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                value={form.referralCode}
+                                onChangeText={(t) => updateField('referralCode', t.trim())}
+                                onFocus={() => setUI(u => ({ ...u, referralCodeFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, referralCodeFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="characters"
+                                maxLength={32}
+                              />
+                              {ui.referralCodeFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
+
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <AntDesign name="lock" size={20} color={ui.passwordFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                              {ui.passwordFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.passwordFocused && styles.inputFocused]}
+                                placeholder="Contraseña"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                secureTextEntry={!ui.passwordVisible}
+                                value={form.password}
+                                onChangeText={(t) => updateField('password', t)}
+                                onFocus={() => setUI(u => ({ ...u, passwordFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, passwordFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="none"
+                              />
+                              <TouchableOpacity onPress={() => setUI(u => ({ ...u, passwordVisible: !u.passwordVisible }))} style={styles.eyeIcon} disabled={ui.loading}>
+                                <Feather name={ui.passwordVisible ? "eye" : "eye-off"} size={18} color="#fff" />
+                              </TouchableOpacity>
+                              {ui.passwordFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
+
+                          <View style={styles.inputGroup}>
+                            <View style={[styles.inputWrapper, styles.glassField]}>
+                              <AntDesign name="lock" size={20} color={ui.confirmPasswordFocused ? THEME.primaryCyan : THEME.textMuted} style={styles.inputIcon} />
+                              {ui.confirmPasswordFocused && <Text style={styles.plusIcon}>+</Text>}
+                              <TextInput
+                                style={[styles.input, styles.inputInGlass, ui.confirmPasswordFocused && styles.inputFocused]}
+                                placeholder="Confirmar Contraseña"
+                                placeholderTextColor="rgba(255, 255, 255, 0.5)"
+                                secureTextEntry={!ui.confirmPasswordVisible}
+                                value={form.confirmPassword}
+                                onChangeText={(t) => updateField('confirmPassword', t)}
+                                onFocus={() => setUI(u => ({ ...u, confirmPasswordFocused: true }))}
+                                onBlur={() => setUI(u => ({ ...u, confirmPasswordFocused: false }))}
+                                editable={!ui.loading}
+                                autoCapitalize="none"
+                              />
+                              <TouchableOpacity onPress={() => setUI(u => ({ ...u, confirmPasswordVisible: !u.confirmPasswordVisible }))} style={styles.eyeIcon} disabled={ui.loading}>
+                                <Feather name={ui.confirmPasswordVisible ? "eye" : "eye-off"} size={18} color="#fff" />
+                              </TouchableOpacity>
+                              {ui.confirmPasswordFocused && <View style={styles.scanLine} />}
+                            </View>
+                          </View>
+
+                          <View style={styles.agreementsCard}>
+                            <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptTerms: !v.acceptTerms }))} disabled={ui.loading}>
+                              <View style={[styles.checkbox, validation.acceptTerms && styles.checkboxActive]}>
+                                {validation.acceptTerms && <AntDesign name="check" size={12} color="#fff" />}
+                              </View>
+                              <Text style={styles.checkboxLabel}>Acepto Términos y Condiciones</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptDataTreatment: !v.acceptDataTreatment }))} disabled={ui.loading}>
+                              <View style={[styles.checkbox, validation.acceptDataTreatment && styles.checkboxActive]}>
+                                {validation.acceptDataTreatment && <AntDesign name="check" size={12} color="#fff" />}
+                              </View>
+                              <Text style={styles.checkboxLabel}>Acepto Tratamiento de Datos</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity style={styles.agreementsCheckboxRow} onPress={() => setValidation(v => ({ ...v, acceptPrivacyPolicy: !v.acceptPrivacyPolicy }))} disabled={ui.loading}>
+                              <View style={[styles.checkbox, validation.acceptPrivacyPolicy && styles.checkboxActive]}>
+                                {validation.acceptPrivacyPolicy && <AntDesign name="check" size={12} color="#fff" />}
+                              </View>
+                              <Text style={styles.checkboxLabel}>Acepto Política de Privacidad</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity style={styles.learnMoreBtn} onPress={handleReviewLink} disabled={ui.loading}>
+                              <Feather name="external-link" size={14} color={THEME.primaryCyan} />
+                              <Text style={styles.learnMoreBtnText}>Leer más</Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <View style={styles.stepNavRow}>
+                            <TouchableOpacity style={styles.secondaryBtn} onPress={goRegisterBack} disabled={ui.loading} activeOpacity={0.85}>
+                              <Text style={styles.secondaryBtnText}>ATRÁS</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.primaryBtn, styles.primaryBtnFlex, (ui.loading || !allRequiredAccepted) && styles.primaryBtnDisabled]}
+                              onPress={handleSignUp}
+                              disabled={ui.loading || !allRequiredAccepted}
+                              activeOpacity={0.88}
+                            >
+                              <LinearGradient
+                                colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.primaryBtnGradient}
+                              >
+                                {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>CREAR CUENTA</Text>}
+                              </LinearGradient>
+                            </TouchableOpacity>
+                          </View>
                         </View>
-                        <Text style={styles.checkboxLabel}>Acepto Política de Privacidad</Text>
-                      </TouchableOpacity>
-
-                      <TouchableOpacity style={styles.learnMoreBtn} onPress={handleReviewLink} disabled={ui.loading}>
-                        <Feather name="external-link" size={14} color={THEME.primaryCyan} />
-                        <Text style={styles.learnMoreBtnText}>Leer más</Text>
-                      </TouchableOpacity>
-                    </View>
-
-                    {/* Signup Button */}
-                    <TouchableOpacity style={[styles.primaryBtn, (ui.loading || !allRequiredAccepted) && styles.primaryBtnDisabled]} onPress={handleSignUp} disabled={ui.loading || !allRequiredAccepted} activeOpacity={0.88}>
-                      <LinearGradient
-                        colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.primaryBtnGradient}
-                      >
-                        {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>CREAR CUENTA</Text>}
-                      </LinearGradient>
-                    </TouchableOpacity>
+                      )}
+                    </Animated.View>
                   </View>
                 )}
                 </Animated.View>
@@ -1232,6 +1405,7 @@ const styles = StyleSheet.create({
     zIndex: 1,
   },
   logoContainer: { alignItems: 'center', marginBottom: 22 },
+  logoContainerCompact: { marginBottom: 12 },
   logoImageWrap: {
     width: 104,
     height: 104,
@@ -1241,9 +1415,128 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(21, 229, 233, 0.25)',
     backgroundColor: '#FFFFFF',
   },
+  logoImageWrapCompact: {
+    width: 72,
+    height: 72,
+    borderRadius: 20,
+  },
   logoImage: { width: '100%', height: '100%' },
   logoTitle: { fontSize: 32, fontWeight: '800', color: THEME.textMain, letterSpacing: -0.5 },
   logoSubtitle: { fontSize: 11, color: THEME.primaryCyan, fontWeight: '600', letterSpacing: 1.8, marginTop: 10, textTransform: 'uppercase' },
+  stepHeader: { marginBottom: 12, alignItems: 'center' },
+  stepTitle: { color: THEME.textMain, fontSize: 18, fontWeight: '700', letterSpacing: 0.2 },
+  stepSubtitle: { color: THEME.textMuted, fontSize: 12, fontWeight: '500', marginTop: 4 },
+  stepProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
+    paddingHorizontal: 6,
+  },
+  stepProgressItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  stepDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.28)',
+    backgroundColor: 'rgba(0, 8, 14, 0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepDotOn: {
+    backgroundColor: THEME.primaryCyan,
+    borderColor: THEME.primaryCyan,
+  },
+  stepDotTxt: { color: THEME.textMuted, fontSize: 11, fontWeight: '700' },
+  stepDotTxtOn: { color: '#001018' },
+  stepLabel: { color: THEME.textMuted, fontSize: 11, fontWeight: '600', marginLeft: 6 },
+  stepLabelOn: { color: THEME.primaryCyan },
+  stepLine: {
+    width: 28,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: 'rgba(21, 229, 233, 0.15)',
+    marginHorizontal: 8,
+  },
+  stepLineOn: { backgroundColor: 'rgba(21, 229, 233, 0.55)' },
+  fieldHint: {
+    color: THEME.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+    marginLeft: 2,
+  },
+  roleRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  roleCard: {
+    flex: 1,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.18)',
+    backgroundColor: 'rgba(0, 8, 14, 0.32)',
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    gap: 8,
+  },
+  roleCardOn: {
+    borderColor: 'rgba(21, 229, 233, 0.55)',
+    backgroundColor: 'rgba(21, 229, 233, 0.12)',
+  },
+  roleIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(21, 229, 233, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.22)',
+  },
+  roleIconWrapOn: {
+    backgroundColor: THEME.primaryCyan,
+    borderColor: THEME.primaryCyan,
+  },
+  roleCardTxt: { color: THEME.textMuted, fontSize: 13, fontWeight: '700' },
+  roleCardTxtOn: { color: THEME.primaryCyan },
+  glassField: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.16)',
+    backgroundColor: 'rgba(0, 8, 14, 0.28)',
+    overflow: 'hidden',
+  },
+  inputInGlass: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+  },
+  stepNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 8,
+  },
+  secondaryBtn: {
+    flex: 0.72,
+    marginTop: 18,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.35)',
+    backgroundColor: 'rgba(0, 8, 14, 0.28)',
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  secondaryBtnText: {
+    color: THEME.primaryCyan,
+    fontWeight: '700',
+    fontSize: 12,
+    letterSpacing: 1.4,
+  },
+  primaryBtnFlex: { flex: 1.28 },
   toggleContainer: {
     flexDirection: 'row',
     borderRadius: 14,
@@ -1352,6 +1645,7 @@ const styles = StyleSheet.create({
     marginTop: 18,
     borderRadius: 14,
     overflow: 'hidden',
+    flexGrow: 1,
   },
   primaryBtnGradient: {
     paddingVertical: 15,
@@ -1361,7 +1655,7 @@ const styles = StyleSheet.create({
   primaryBtnDisabled: { opacity: 0.5 },
   primaryBtnText: { color: '#000', fontWeight: '700', fontSize: 13, letterSpacing: 1.8 },
   phoneContainer: { width: '100%', marginBottom: 14 },
-  phoneCombinedWrapper: { backgroundColor: 'rgba(0, 8, 14, 0.40)', borderWidth: 1, borderColor: 'rgba(21, 229, 233, 0.16)', borderRadius: 14, height: 56, justifyContent: 'center' },
+  phoneCombinedWrapper: { height: 56, justifyContent: 'center' },
   phoneCodeInlineButton: { position: 'absolute', left: 0, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12, zIndex: 3, minWidth: 100 },
   countryFlag: { fontSize: 22, marginRight: 7 },
   countryCode: { color: THEME.textMain, fontSize: 15, fontWeight: '600', letterSpacing: 0.5, marginRight: 2 },
