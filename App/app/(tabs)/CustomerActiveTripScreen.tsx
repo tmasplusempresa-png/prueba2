@@ -29,7 +29,7 @@ import {
   isActiveTripStatus,
   notifyTripStateChange,
 } from '@/common/services/ActiveTripNotificationService';
-import { submitTripRating } from '@/common/utils/userRating';
+import { submitTripRating, fetchMyRatingForTrip } from '@/common/utils/userRating';
 import { preferredConductorId } from '@/common/utils/driverIds';
 import { sendPushNotification } from '@/common/actions/NotificationService';
 import { haversineKm, formatDistanceAndEta, DistanceEtaState } from '@/common/services/DriverTrackingService';
@@ -113,6 +113,33 @@ const formatTripDuration = (totalSeconds: number | null | undefined): string => 
   return `${s}s`;
 };
 
+/**
+ * Segundos reales del viaje al cierre.
+ * `total_trip_time` no existe en la vista bookings; addActuals persiste minutos en `duration`
+ * y timestamps en trip_start_time / trip_end_time.
+ */
+const resolveBookingTripSeconds = (booking: any): number => {
+  const rawTotal = Number(booking?.total_trip_time);
+  if (Number.isFinite(rawTotal) && rawTotal > 0) return Math.round(rawTotal);
+
+  const startMs = booking?.trip_start_time
+    ? new Date(booking.trip_start_time).getTime()
+    : NaN;
+  const endMs = booking?.trip_end_time
+    ? new Date(booking.trip_end_time).getTime()
+    : NaN;
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+    return Math.round((endMs - startMs) / 1000);
+  }
+
+  const dur = Number(booking?.duration);
+  if (Number.isFinite(dur) && dur > 0) {
+    // Al cierre addActuals guarda minutos; valores grandes (>300) se tratan como segundos.
+    return dur > 300 ? Math.round(dur) : Math.round(dur * 60);
+  }
+  return 0;
+};
+
 const CustomerActiveTripScreen = () => {
   const nav = useNavigation<any>();
   const route = useRoute();
@@ -163,6 +190,10 @@ const CustomerActiveTripScreen = () => {
 
   // ⭐ Calificación del conductor
   const [driverRating, setDriverRating] = useState<number>(0);
+  // Calificación propia en `calificacion` (sobrevive al polling de bookings).
+  const [myGivenRating, setMyGivenRating] = useState<number>(0);
+  const [myGivenReview, setMyGivenReview] = useState<string>('');
+  const [ratingError, setRatingError] = useState<string | null>(null);
   const [driverReview, setDriverReview] = useState<string>('');
   const [submittingRating, setSubmittingRating] = useState(false);
   const unreadChatCount = useChatUnreadCount(
@@ -351,29 +382,29 @@ const CustomerActiveTripScreen = () => {
   // ⭐ Enviar calificación del conductor (tabla calificacion)
   const handleSubmitDriverRating = useCallback(async () => {
     if (!booking?.id) return;
-    if (driverRating < 1) {
-      Alert.alert(
-        'Calificación requerida',
-        'Por favor selecciona de 1 a 5 estrellas antes de enviar.',
-      );
+    const stars = Math.round(driverRating);
+    if (stars < 1) {
+      setRatingError('Selecciona de 1 a 5 estrellas antes de enviar.');
       return;
     }
     setSubmittingRating(true);
+    setRatingError(null);
     try {
       const headers = await getSupabaseAuthHeaders(true);
       if (!hasUserAuthHeader(headers)) {
-        Alert.alert('Sesión', 'Inicia sesión de nuevo para calificar.');
+        setRatingError('Inicia sesión de nuevo para calificar.');
         return;
       }
 
+      // Cliente: persona.id del perfil (no auth uid). Igual que ReservationDetailScreen.
       const raterId =
         preferredConductorId(user, profile) ||
         profile?.id ||
-        booking.customer ||
-        booking.customer_id;
+        booking.customer_id ||
+        booking.customer;
       const ratedId = booking.driver || booking.driver_id;
       if (!raterId || !ratedId) {
-        Alert.alert('Error', 'No se pudo identificar cliente/conductor para calificar.');
+        setRatingError('No se pudo identificar cliente/conductor para calificar.');
         return;
       }
 
@@ -381,20 +412,24 @@ const CustomerActiveTripScreen = () => {
         reservaId: String(booking.id),
         ratedPersonaId: String(ratedId),
         raterPersonaId: String(raterId),
-        puntaje: driverRating,
+        puntaje: stars,
         comentario: driverReview?.trim() || null,
         ratedRole: 'driver',
       });
       if (!result.ok) throw new Error(result.error || 'Error al guardar');
 
-      setBooking((prev: any) =>
-        prev
-          ? { ...prev, driver_rating: driverRating, driver_review: driverReview?.trim() || null }
-          : prev,
-      );
+      // Estado local independiente de bookings (el poll no trae driver_rating).
+      setMyGivenRating(stars);
+      setMyGivenReview(driverReview?.trim() || '');
+      setDriverRating(stars);
+      Alert.alert('¡Gracias!', 'Tu calificación se guardó correctamente.');
     } catch (e: any) {
       console.error('❌ [RATING] Error al enviar calificación:', e);
-      Alert.alert('Error', 'No se pudo enviar tu calificación. Inténtalo de nuevo.');
+      const msg = e?.message
+        ? `No se pudo enviar tu calificación: ${String(e.message).slice(0, 180)}`
+        : 'No se pudo enviar tu calificación. Inténtalo de nuevo.';
+      setRatingError(msg);
+      Alert.alert('Error', msg);
     } finally {
       setSubmittingRating(false);
     }
@@ -753,8 +788,8 @@ const CustomerActiveTripScreen = () => {
   }, [bookingId, fetchBooking]);
 
   // 🧾 Abrir el resumen de fin de viaje una sola vez al completarse. El
-  // conductor ya persistió distancia/tiempo/valor reales vía addActualsToBooking,
-  // así que el polling ya trae `distance`, `total_trip_time` y `price` frescos.
+  // conductor ya persistió distancia/tiempo/valor reales vía addActualsToBooking
+  // (trip_cost, distance, duration, trip_end_time).
   useEffect(() => {
     if (booking?.status === 'COMPLETE' && !tripSummaryShownRef.current) {
       tripSummaryShownRef.current = true;
@@ -765,15 +800,34 @@ const CustomerActiveTripScreen = () => {
     }
   }, [booking?.status, openAlertModal]);
 
-  // ⭐ Hidratar estado local con calificación ya guardada (si existe)
+  // ⭐ Hidratar calificación desde `calificacion` (no depender de bookings.driver_rating)
   useEffect(() => {
-    if (booking?.driver_rating && driverRating === 0) {
-      setDriverRating(Number(booking.driver_rating));
-    }
-    if (booking?.driver_review && !driverReview) {
-      setDriverReview(String(booking.driver_review));
-    }
-  }, [booking?.driver_rating, booking?.driver_review]);
+    let cancelled = false;
+    (async () => {
+      const reservaId = booking?.id || bookingId;
+      const raterId =
+        preferredConductorId(user, profile) ||
+        profile?.id ||
+        booking?.customer_id ||
+        booking?.customer;
+      if (!reservaId || !raterId) return;
+      try {
+        const mine = await fetchMyRatingForTrip(String(reservaId), String(raterId));
+        if (cancelled) return;
+        if (mine && mine.puntaje >= 1) {
+          setMyGivenRating(mine.puntaje);
+          setMyGivenReview(mine.comentario || '');
+          setDriverRating(mine.puntaje);
+          if (mine.comentario) setDriverReview(mine.comentario);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [booking?.id, bookingId, booking?.customer, booking?.customer_id, user, profile]);
 
   // Contador OTP del cliente: solo con status ARRIVED + driver_arrived_time
   useEffect(() => {
@@ -1129,12 +1183,12 @@ const CustomerActiveTripScreen = () => {
                 </Text>
               </View>
 
-              {!!booking.otp && !booking.otp_verified && (
+              {!!booking.otp && !booking.otp_verified && booking.status !== 'COMPLETE' && booking.status !== 'PAID' && (
                 <Text style={s.otpInlineHint}>
                   Presenta este código al conductor para verificar tu identidad e iniciar el viaje.
                 </Text>
               )}
-              {!!booking.otp && booking.otp_verified && (
+              {!!booking.otp && booking.otp_verified && booking.status !== 'COMPLETE' && booking.status !== 'PAID' && (
                 <Text style={[s.otpInlineHint, { color: '#00E676' }]}>
                   Código verificado. El viaje está iniciando.
                 </Text>
@@ -1171,12 +1225,17 @@ const CustomerActiveTripScreen = () => {
                   starSize={42}
                   color="#FFD54F"
                   emptyColor="rgba(255,255,255,0.25)"
-                  rating={driverRating}
-                  onChange={(r: number) => { if (!booking.driver_rating) setDriverRating(r); }}
+                  step="full"
+                  rating={myGivenRating >= 1 ? myGivenRating : driverRating}
+                  onChange={(r: number) => {
+                    if (myGivenRating >= 1) return;
+                    setDriverRating(Math.round(r));
+                    setRatingError(null);
+                  }}
                 />
               </View>
 
-              {!booking.driver_rating ? (
+              {myGivenRating < 1 ? (
                 <>
                   <TextInput
                     style={s.ratingInput}
@@ -1189,6 +1248,12 @@ const CustomerActiveTripScreen = () => {
                     maxLength={300}
                     editable={!submittingRating}
                   />
+
+                  {ratingError ? (
+                    <Text style={{ color: '#FF8A80', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
+                      {ratingError}
+                    </Text>
+                  ) : null}
 
                   <TouchableOpacity
                     style={[
@@ -1220,6 +1285,7 @@ const CustomerActiveTripScreen = () => {
                   <Ionicons name="checkmark-circle" size={20} color="#00E676" />
                   <Text style={s.ratingThanksText}>
                     ¡Gracias por tu calificación!
+                    {myGivenReview ? ` (${myGivenRating}/5)` : ` ${myGivenRating}/5`}
                   </Text>
                 </View>
               )}
@@ -1731,7 +1797,7 @@ const CustomerActiveTripScreen = () => {
               <View style={s.tripSummaryDivider} />
               <View style={s.tripSummaryItem}>
                 <Ionicons name="time" size={20} color="#0079FF" />
-                <Text style={s.tripSummaryValue}>{formatTripDuration(booking?.total_trip_time)}</Text>
+                <Text style={s.tripSummaryValue}>{formatTripDuration(resolveBookingTripSeconds(booking))}</Text>
                 <Text style={s.tripSummaryItemLabel}>Tiempo</Text>
               </View>
             </View>

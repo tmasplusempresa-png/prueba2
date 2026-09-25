@@ -57,10 +57,12 @@ export function getBookingFareRange(booking: any): {
   };
 
   if (isComplete) {
+    // Cierre: trip_cost / driver_share son la liquidación del conductor.
+    // price/estimate a veces quedan con el máximo del rango cotizado.
     const final =
-      num(booking?.price) ||
       num(booking?.trip_cost) ||
       num(booking?.driver_share) ||
+      num(booking?.price) ||
       num(booking?.estimate);
     return { min: final, max: final, isComplete: true };
   }
