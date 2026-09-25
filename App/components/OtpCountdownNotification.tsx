@@ -39,6 +39,10 @@ const OtpCountdownNotification: React.FC<OtpCountdownNotificationProps> = ({
           setTimeRemaining(null);
           return;
         }
+        if (String(data.status || '').toUpperCase() !== 'ARRIVED') {
+          setTimeRemaining(null);
+          return;
+        }
 
         const startTime = new Date(data.driver_arrived_time).getTime();
         if (!Number.isFinite(startTime)) {

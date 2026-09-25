@@ -941,6 +941,7 @@ const DriverReservationsScreen = ({
 
       // Solo columnas reales de public.bookings (aplicacioncore).
       // No enviar: driver_token, customer_token, driver_status, customer_status.
+      // NO setear driver_arrived_time aquí — eso es solo al "Confirmar llegada".
       const updateBody = {
         status: 'ACCEPTED',
         driver: driverId,
@@ -953,7 +954,6 @@ const DriverReservationsScreen = ({
         vehicle_model: car.model || car.vehicle_model || null,
         vehicle_color: car.color || car.vehicle_color || null,
         car_model: car.model || car.vehicle_model || null,
-        driver_arrived_time: new Date().toISOString(),
       };
 
       const updateUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}`; // Sin filtro de status en URL

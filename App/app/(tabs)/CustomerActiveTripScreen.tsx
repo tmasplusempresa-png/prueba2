@@ -775,11 +775,11 @@ const CustomerActiveTripScreen = () => {
     }
   }, [booking?.driver_rating, booking?.driver_review]);
 
-  // Contador OTP del cliente: 3 min desde driver_arrived_time (columna real)
+  // Contador OTP del cliente: solo con status ARRIVED + driver_arrived_time
   useEffect(() => {
-    const arrivedAt = booking?.driver_arrived_time;
     const status = String(booking?.status || '').toUpperCase();
-    if (!arrivedAt || booking?.otp_verified || (status !== 'ARRIVED' && status !== 'ACCEPTED')) {
+    const arrivedAt = booking?.driver_arrived_time;
+    if (status !== 'ARRIVED' || !arrivedAt || booking?.otp_verified) {
       setCountdown(null);
       return;
     }
@@ -830,17 +830,15 @@ const CustomerActiveTripScreen = () => {
     );
   }
 
-  // Determinar si estamos en fase de espera de 3 minutos (conductor llegó, esperando código)
-  const driverHasArrived =
-    String(booking.status || '').toUpperCase() === 'ARRIVED' ||
-    Boolean(booking.driver_arrived_time);
+  // Solo status ARRIVED = conductor confirmó llegada (no ACCEPTED + driver_arrived_time).
+  const tripStatus = String(booking.status || '').toUpperCase();
+  const driverHasArrived = tripStatus === 'ARRIVED';
   const isWaitingForCode = driverHasArrived && !booking.otp_verified;
-  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| arrived:', booking.driver_arrived_time, '| verified:', booking.otp_verified);
+  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| status:', tripStatus, '| arrived_at:', booking.driver_arrived_time, '| verified:', booking.otp_verified);
 
   const statusText = () => {
     if (booking.status === 'PENDING' || booking.status === 'NEW') return 'Buscando conductor...';
-    if (booking.status === 'ACCEPTED' && !booking.driver_arrived_time) return 'Viaje aceptado';
-    if (booking.status === 'ACCEPTED' && booking.driver_arrived_time) return 'Conductor ha llegado';
+    if (booking.status === 'ACCEPTED') return 'Viaje aceptado';
     if (booking.status === 'ARRIVED') return 'Conductor ha llegado';
     if (booking.status === 'IN_PROGRESS' || booking.status === 'STARTED' || booking.status === 'TRIP_STARTED') return 'Viaje en progreso';
     if (booking.status === 'COMPLETE') return '¡Viaje completado!';
@@ -1279,7 +1277,7 @@ const CustomerActiveTripScreen = () => {
         )}
 
         {/* Contador de OTP - Mostrar cuando hay timer activo y tiempo restante */}
-        {countdown !== null && countdown > 0 && booking.driver_arrived_time && !booking.otp_verified && (
+        {countdown !== null && countdown > 0 && tripStatus === 'ARRIVED' && !booking.otp_verified && (
           <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
             <View style={[s.countdownCard, s.countdownCardCompact]}>
               <View style={s.countdownContentCompact}>
@@ -1465,7 +1463,7 @@ const CustomerActiveTripScreen = () => {
         )}
 
         {/* OTP Countdown - solo mientras espera el código */}
-        {booking.driver_arrived_time && !booking.otp_verified && String(booking.status || '').toUpperCase() === 'ARRIVED' && (
+        {tripStatus === 'ARRIVED' && !booking.otp_verified && (
           <Animatable.View animation="fadeInUp" duration={450} delay={180} useNativeDriver>
             <OtpCountdownNotification 
               bookingId={bookingId}
@@ -1478,7 +1476,7 @@ const CustomerActiveTripScreen = () => {
         {/* Cancelar viaje — al final del scroll, solo antes de llegada del conductor */}
         {(() => {
           const st = booking.status;
-          const arrived = st === 'ARRIVED' || !!booking.driver_arrived_time;
+          const arrived = st === 'ARRIVED';
           const canCancel = st !== 'COMPLETE'
             && st !== 'CANCELLED'
             && st !== 'ACCEPTED'
