@@ -23,7 +23,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { RootState } from "@/common/store";
 import { Database } from "@/config/database.types";
-import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 
 const BG_IMAGE = require("../../assets/images/bg.png");
@@ -782,55 +782,50 @@ const CarsEditScreen = ({ navigation }: any) => {
       throw new Error("No se pudo resolver el usuario autenticado.");
     }
 
-    const headers = {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-    };
-
-    const uuidCandidates = candidateIds.filter((c) => isUuid(c));
-    const allPromises: Promise<{ driverId?: string; error?: Error }>[] = [];
-
-    for (const candidateId of uuidCandidates) {
-      allPromises.push(
-        fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`, {
-          method: "GET",
-          headers,
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (Array.isArray(data) && data.length > 0 && data[0].id) {
-              return { driverId: data[0].id };
-            }
-            return {};
-          })
-          .catch((err) => ({ error: err }))
-      );
-
-      allPromises.push(
-        fetch(`${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`, {
-          method: "GET",
-          headers,
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (Array.isArray(data) && data.length > 0 && data[0].id) {
-              return { driverId: data[0].id };
-            }
-            return {};
-          })
-          .catch((err) => ({ error: err }))
-      );
+    // RLS en users/persona exige JWT de usuario (no anon key).
+    let headers = await getSupabaseAuthHeaders(true);
+    if (!hasUserAuthHeader(headers)) {
+      throw new Error("Sesion no valida. Cierre sesion e inicie de nuevo para guardar el vehiculo.");
     }
 
-    const results = await Promise.all(allPromises);
-    for (const result of results) {
-      if (result.driverId) {
-        return result.driverId;
+    const uuidCandidates = candidateIds.filter((c) => isUuid(c));
+    console.log("[CarsEdit] resolveDriverId candidates:", uuidCandidates);
+
+    for (const candidateId of uuidCandidates) {
+      try {
+        const byIdUrl =
+          `${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`;
+        const byIdRes = await fetch(byIdUrl, { method: "GET", headers });
+        if (byIdRes.ok) {
+          const data = await byIdRes.json();
+          if (Array.isArray(data) && data[0]?.id) {
+            resolvedDriverIdRef.current = String(data[0].id);
+            console.log("[CarsEdit] driverId via id:", resolvedDriverIdRef.current);
+            return resolvedDriverIdRef.current;
+          }
+        } else {
+          console.warn("[CarsEdit] users by id HTTP", byIdRes.status, await byIdRes.text().catch(() => ""));
+        }
+
+        const byAuthUrl =
+          `${SUPABASE_URL}/rest/v1/users?auth_id=eq.${encodeURIComponent(candidateId)}&select=id&limit=1`;
+        const byAuthRes = await fetch(byAuthUrl, { method: "GET", headers });
+        if (byAuthRes.ok) {
+          const data = await byAuthRes.json();
+          if (Array.isArray(data) && data[0]?.id) {
+            resolvedDriverIdRef.current = String(data[0].id);
+            console.log("[CarsEdit] driverId via auth_id:", resolvedDriverIdRef.current);
+            return resolvedDriverIdRef.current;
+          }
+        } else {
+          console.warn("[CarsEdit] users by auth_id HTTP", byAuthRes.status, await byAuthRes.text().catch(() => ""));
+        }
+      } catch (e: any) {
+        console.warn("[CarsEdit] resolveDriverId fetch error:", e?.message || e);
       }
     }
 
-    throw new Error("No se encontrA³ el perfil de conductor.");
+    throw new Error("No se encontro el perfil de conductor.");
   };
 
   const handleAddCar = async () => {
@@ -892,7 +887,7 @@ const CarsEditScreen = ({ navigation }: any) => {
       }
 
       debugStep = "insert_cars";
-      setLog("[3/5] Insertando vehA­culo...");
+      setLog("[3/5] Insertando vehiculo...");
 
       // REST directo â€” el cliente Supabase JS cuelga.
       // IMPORTANTE: usar JWT del usuario, no el anon key. La tabla `cars` tiene RLS
@@ -1069,8 +1064,8 @@ const CarsEditScreen = ({ navigation }: any) => {
       ]);
     } catch (error) {
       const debugMessage = formatDebugError(error);
-      setLog(`[ERROR] Guardado vehÃ­culo: ${debugMessage}`);
-      console.warn(`Error al crear el veh­culo en etapa [${debugStep}]:`, debugMessage);
+      setLog(`[ERROR] Guardado vehiculo: ${debugMessage}`);
+      console.warn(`Error al crear el vehiculo en etapa [${debugStep}]:`, debugMessage);
       const message = `Fallo en etapa: ${debugStep}. ${debugMessage}`;
       showAlert('error', 'Error al guardar vehiculo', message);
     } finally {

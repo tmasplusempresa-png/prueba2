@@ -82,28 +82,77 @@ const getJwtProjectRef = (jwt: string): string | null => {
   }
 };
 
-const getJwtExp = (jwt: string): number | null => {
+const getJwtClaims = (
+  jwt: string,
+): { exp: number | null; iat: number | null } => {
   try {
     const payload = JSON.parse(atob(jwt.split('.')[1]));
-    return typeof payload?.exp === 'number' ? payload.exp : null;
+    return {
+      exp: typeof payload?.exp === 'number' ? payload.exp : null,
+      iat: typeof payload?.iat === 'number' ? payload.iat : null,
+    };
   } catch {
-    return null;
+    return { exp: null, iat: null };
   }
 };
 
+const getJwtExp = (jwt: string): number | null => getJwtClaims(jwt).exp;
+
 /**
- * GoTrue a veces deja `session.expires_at` desfasado (vimos expira_en≈-20962s
- * con JWT aún válido). La fuente de verdad es el claim `exp` del access_token.
- * Sin esto el auto-refresh cree que el token ya venció y refresca en bucle.
+ * Alinea expires_at al JWT. Si el reloj del dispositivo está adelantado
+ * (jwt.exp aparece en el pasado tras un refresh), usa lifetime iat→exp
+ * desde "ahora" para que autoRefresh no entre en bucle ni demote a anon.
+ *
+ * IMPORTANTE: eso NO alarga la vida real del JWT en el servidor.
+ * Usamos `_tokenAge.obtainedAtMs` + lifetime para refrescar a tiempo.
  */
 const normalizeSessionExpires = <T extends { access_token?: string; expires_at?: number }>(
   session: T | null,
 ): T | null => {
   if (!session?.access_token) return session;
-  const jwtExp = getJwtExp(session.access_token);
+  const { exp: jwtExp, iat: jwtIat } = getJwtClaims(session.access_token);
   if (!jwtExp) return session;
-  if (session.expires_at === jwtExp) return session;
-  return { ...session, expires_at: jwtExp };
+
+  const now = Math.floor(Date.now() / 1000);
+  let nextExp = jwtExp;
+
+  if (jwtExp < now - 30) {
+    const lifetime =
+      typeof jwtIat === 'number' && jwtExp > jwtIat
+        ? Math.max(300, jwtExp - jwtIat)
+        : 3600;
+    nextExp = now + lifetime;
+  }
+
+  if (session.expires_at === nextExp) return session;
+  return { ...session, expires_at: nextExp };
+};
+
+/** Edad real del access_token (objeto: evita TDZ/Fast Refresh con lets sueltos). */
+const _tokenAge = {
+  obtainedAtMs: 0,
+  lifeMs: 55 * 60 * 1000,
+  lastAccessToken: null as string | null,
+};
+let _refreshInFlight: Promise<Session | null> | null = null;
+
+const noteAccessToken = (session: Session | null) => {
+  const token = session?.access_token || null;
+  if (!token || token === _tokenAge.lastAccessToken) return;
+  _tokenAge.lastAccessToken = token;
+  const { exp, iat } = getJwtClaims(token);
+  if (typeof exp === 'number' && typeof iat === 'number' && exp > iat) {
+    _tokenAge.lifeMs = Math.max(5 * 60 * 1000, (exp - iat) * 1000);
+  } else {
+    _tokenAge.lifeMs = 55 * 60 * 1000;
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  // jwt.exp en el pasado (clock skew o token muerto): forzar refresh por edad ya.
+  if (typeof exp === 'number' && exp < nowSec - 30) {
+    _tokenAge.obtainedAtMs = Date.now() - _tokenAge.lifeMs;
+  } else {
+    _tokenAge.obtainedAtMs = Date.now();
+  }
 };
 
 const CURRENT_PROJECT_REF = getProjectRefFromUrl(SupabaseConfig.url || '');
@@ -113,36 +162,39 @@ const CURRENT_PROJECT_REF = getProjectRefFromUrl(SupabaseConfig.url || '');
 // concurrente → rotación de refresh_token → SIGNED_OUT espurio).
 let _memorySession: Session | null = null;
 const SESSION_CACHE_SKEW_SEC = 45;
-let _loggedExpiresMismatch = false;
+let _loggedClockSkew = false;
 
 const setMemorySession = (session: Session | null) => {
+  const rawExp = session?.access_token ? getJwtExp(session.access_token) : null;
   const normalized = normalizeSessionExpires(session);
   if (
-    !_loggedExpiresMismatch &&
-    session?.access_token &&
-    typeof session.expires_at === 'number' &&
+    !_loggedClockSkew &&
+    typeof rawExp === 'number' &&
     normalized &&
-    normalized.expires_at !== session.expires_at
+    typeof normalized.expires_at === 'number' &&
+    rawExp !== normalized.expires_at
   ) {
-    _loggedExpiresMismatch = true;
+    _loggedClockSkew = true;
     const now = Math.floor(Date.now() / 1000);
     console.warn(
-      '[auth] expires_at desfasado vs JWT.exp — se corrige',
-      `expires_at=${session.expires_at - now}s`,
-      `jwt.exp=${(normalized.expires_at as number) - now}s`,
+      '[auth] reloj del dispositivo parece desfasado vs JWT — se corrige expires_at',
+      `jwt.exp=${rawExp - now}s`,
+      `expires_at_corregido=${normalized.expires_at - now}s`,
+      '(ajusta fecha/hora automática del emulador)',
     );
   }
   _memorySession = normalized;
+  noteAccessToken(normalized);
 };
 
 /** Sesión en memoria si el access_token aún tiene margen; no llama a getSession. */
 export const getMemorySession = (): Session | null => {
   const s = _memorySession;
   if (!s?.access_token) return null;
-  const exp = getJwtExp(s.access_token) ?? s.expires_at;
-  if (typeof exp === 'number') {
+  // Usar expires_at ya normalizado (puede ser "ahora+lifetime" ante clock skew).
+  if (typeof s.expires_at === 'number') {
     const now = Math.floor(Date.now() / 1000);
-    if (exp - now <= SESSION_CACHE_SKEW_SEC) return null;
+    if (s.expires_at - now <= SESSION_CACHE_SKEW_SEC) return null;
   }
   return s;
 };
@@ -185,12 +237,16 @@ const sessionStorageAdapter = {
         }
       }
 
-      // Preferir JWT.exp para decidir caducidad real (expires_at a veces miente).
-      const jwtExp = accessToken ? getJwtExp(accessToken) : null;
+      // Preferir expires_at normalizado (compensa reloj adelantado del emulador).
+      const normalized = normalizeSessionExpires(parsed);
       const expiresAt: number | undefined =
-        typeof jwtExp === 'number' ? jwtExp : parsed?.expires_at;
+        typeof normalized?.expires_at === 'number'
+          ? normalized.expires_at
+          : parsed?.expires_at;
       if (typeof expiresAt === 'number') {
         const nowSec = Math.floor(Date.now() / 1000);
+        // Solo descartar si el JWT "aparente" + lifetime corregido lleva >14d
+        // (sesión realmente muerta). No usar jwt.exp crudo con clock skew.
         if (nowSec - expiresAt > REFRESH_GRACE_SECONDS) {
           console.warn('[SupabaseStorage] getItem→null: sesión caducada >14d');
           await AsyncStorage.removeItem(key);
@@ -198,12 +254,12 @@ const sessionStorageAdapter = {
         }
       }
 
-      // Devolver sesión con expires_at alineado al JWT para que autoRefresh no
-      // entre en bucle pensando que el token ya venció.
-      if (typeof jwtExp === 'number' && parsed.expires_at !== jwtExp) {
-        const fixed = { ...parsed, expires_at: jwtExp };
-        const fixedStr = JSON.stringify(fixed);
-        // Write-back sin await: no bloquear el getItem del SDK.
+      if (
+        normalized &&
+        typeof normalized.expires_at === 'number' &&
+        parsed.expires_at !== normalized.expires_at
+      ) {
+        const fixedStr = JSON.stringify(normalized);
         AsyncStorage.setItem(key, fixedStr).catch(() => {});
         return fixedStr;
       }
@@ -345,28 +401,74 @@ export const getSafeSession = async (): Promise<Session | null> => {
 };
 
 /**
+ * Refresca la sesión (mutex). Necesario cuando expires_at local está
+ * "parcheado" por clock skew pero el JWT real ya venció en el servidor.
+ */
+export const refreshAuthSession = async (): Promise<Session | null> => {
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = (async () => {
+    try {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.warn('[auth] refreshSession failed:', error.message);
+        return null;
+      }
+      const normalized = normalizeSessionExpires(data.session);
+      setMemorySession(normalized);
+      // Tras refresh exitoso, marcar edad fresca aunque jwt.exp luzca 'pasado' (clock skew).
+      if (normalized?.access_token) {
+        _tokenAge.obtainedAtMs = Date.now();
+        _tokenAge.lastAccessToken = normalized.access_token;
+      }
+      return normalized;
+    } catch (e: any) {
+      console.warn('[auth] refreshSession exception:', e?.message || e);
+      return null;
+    } finally {
+      _refreshInFlight = null;
+    }
+  })();
+  return _refreshInFlight;
+};
+
+const tokenNeedsRefreshByAge = (): boolean => {
+  if (!_tokenAge.lastAccessToken || !_tokenAge.obtainedAtMs) return false; // sin token anotado: no forzar
+  // Renovar ~90s antes del fin de vida real del JWT
+  return Date.now() - _tokenAge.obtainedAtMs >= _tokenAge.lifeMs - 90_000;
+};
+
+/**
  * Build auth headers for direct Supabase REST API calls.
- * Valida el JWT por claim `exp` (como antes del pull de reconexión), no por
- * session.expires_at que a veces viene desfasado.
+ * Si hay access_token de sesión, se envía siempre (el servidor valida).
+ * Refresca por edad real del token (no solo por expires_at parcheado).
  */
 export const getSupabaseAuthHeaders = async (includeContentType = false) => {
   let token = SUPABASE_ANON_KEY;
   try {
-    const cached = getMemorySession();
-    const jwt = cached?.access_token;
-    if (jwt && jwt.length > 40) {
-      const exp = getJwtExp(jwt);
-      if (!exp || exp * 1000 > Date.now()) {
-        token = jwt;
+    if (tokenNeedsRefreshByAge()) {
+      const refreshed = await refreshAuthSession();
+      if (refreshed?.access_token) {
+        token = refreshed.access_token;
       }
-    } else {
-      const { data: { session } } = await supabase.auth.getSession();
-      const normalized = normalizeSessionExpires(session);
-      if (normalized?.access_token) {
-        setMemorySession(normalized);
-        const exp = getJwtExp(normalized.access_token);
-        if (!exp || exp * 1000 > Date.now()) {
-          token = normalized.access_token;
+    }
+
+    if (token === SUPABASE_ANON_KEY) {
+      const cached = getMemorySession();
+      if (cached?.access_token && cached.access_token.length > 40) {
+        token = cached.access_token;
+      } else {
+        const refreshedMiss = await refreshAuthSession();
+        if (refreshedMiss?.access_token) {
+          token = refreshedMiss.access_token;
+        } else {
+          const { data: { session } } = await supabase.auth.getSession();
+          const normalized = normalizeSessionExpires(session);
+          if (normalized?.access_token) {
+            setMemorySession(normalized);
+            token = normalized.access_token;
+          } else if (_memorySession?.access_token) {
+            token = _memorySession.access_token;
+          }
         }
       }
     }

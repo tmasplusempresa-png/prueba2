@@ -42,7 +42,7 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
     const fetchLatest = async () => {
       const { data, error: fetchError } = await supabase
         .from('booking_tracking' as any)
-        .select('lat, lng, accuracy, created_at')
+        .select('lat, lng, created_at')
         .eq('booking_id', bookingId)
         .order('created_at', { ascending: false })
         .limit(1);
@@ -57,7 +57,6 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
         setDriverPosition({
           lat: Number(row.lat),
           lng: Number(row.lng),
-          accuracy: row.accuracy ?? undefined,
           createdAt: row.created_at,
         });
       }
@@ -93,8 +92,8 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
             setDriverPosition({
               lat: Number(row.lat),
               lng: Number(row.lng),
-              accuracy: row.accuracy ?? undefined,
-              createdAt: row.created_at,
+              accuracy: row.precision_m ?? undefined,
+              createdAt: row.registrado_en || row.created_at,
             });
             setIsLoading(false);
           }

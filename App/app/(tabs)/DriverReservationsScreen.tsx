@@ -21,6 +21,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/confi
 import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
+import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { formatBookingFareRange, getBookingFareRange } from '@/constants/fare';
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
@@ -213,6 +214,14 @@ const getDistanceKm = (
     Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return earthRadiusKm * c;
+};
+
+const stripRecorridoTag = (obs: string) =>
+  String(obs || '').replace(/^\[recorrido:[^\]]+\]\s*/i, '').trim();
+
+const formatTripKmSuffix = (distance: unknown) => {
+  const tripKm = parseFloat(String(distance ?? 0));
+  return Number.isFinite(tripKm) && tripKm > 0 ? ` · ${tripKm.toFixed(1)} km` : '';
 };
 
 const DriverReservationsScreen = ({
@@ -419,11 +428,29 @@ const DriverReservationsScreen = ({
       // Fallback: features.carType (formato legacy del móvil).
       // Este orden permite que la corrección hecha en web se refleje al conductor
       // sin backfill de BD; si en el futuro se elimina features.carType, seguirá OK.
-      const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=service_type,features,is_active&limit=1`;
-      const res = await fetch(url, { headers });
-      if (res.ok) {
-        const data = await res.json();
-        const row = Array.isArray(data) ? data[0] : null;
+      const select = 'service_type,features,is_active';
+      const activeUrl =
+        `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}` +
+        `&is_active=eq.true&select=${select}&limit=1`;
+      let res = await fetch(activeUrl, { headers });
+      let data = res.ok ? await res.json() : [];
+      let row = Array.isArray(data) ? data[0] : null;
+
+      // Al crear vehículo se guarda is_active=false hasta activarlo en Mis Vehículos.
+      // Si no hay activo, usar el más reciente para no dejar el feed vacío sin categoría.
+      if (!row) {
+        const anyUrl =
+          `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}` +
+          `&select=${select}&order=created_at.desc&limit=1`;
+        res = await fetch(anyUrl, { headers });
+        data = res.ok ? await res.json() : [];
+        row = Array.isArray(data) ? data[0] : null;
+        if (row) {
+          console.warn('[carType] Sin vehículo is_active=true; usando el más reciente.');
+        }
+      }
+
+      if (row) {
         const fromServiceType = row?.service_type;
         const fromFeatures = row?.features?.carType;
         const raw = (fromServiceType && String(fromServiceType).trim())
@@ -450,8 +477,8 @@ const DriverReservationsScreen = ({
   const fetchReservations = useCallback(async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
-      // Filtro explícito: SOLO reservas programadas disponibles
-      const url = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.reservation&status=eq.PENDING&order=booking_date.asc`;
+      // Programadas: en aplicacioncore booking_type = 'scheduled' (legacy: 'reservation')
+      const url = `${SUPABASE_URL}/rest/v1/bookings?booking_type=in.(scheduled,reservation)&status=eq.PENDING&order=booking_date.asc`;
       console.log('[RESERVAS] Trayendo reservas con filtro:', url);
       const res = await fetch(url, { headers });
       console.log(`📡 [RESERVAS] Response status: ${res.status}`);
@@ -489,11 +516,12 @@ const DriverReservationsScreen = ({
         if (!isNew) continue;
         const pickup = it.pickup_address || 'punto desconocido';
         const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
+        const distTxt = formatTripKmSuffix(it.distance);
         // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
         if (!isFirstScan) {
           notifyNewBooking(
             '📅 Nueva reserva programada',
-            `Recogida: ${pickup}${when}`,
+            `Recogida: ${pickup}${when}${distTxt}`,
             { bookingId: it.id, bookingType: 'reservation' },
           ).catch(() => {});
         }
@@ -501,7 +529,7 @@ const DriverReservationsScreen = ({
           bookingId: id,
           bookingType: 'reservation',
           title: 'Nueva reserva programada',
-          body: `Recogida: ${pickup}${when}`,
+          body: `Recogida: ${pickup}${when}${distTxt}`,
           pickup: it.pickup_address,
           drop: it.drop_address,
           reference: it.reference,
@@ -579,9 +607,15 @@ const DriverReservationsScreen = ({
       setSearchingImmediate(true);
       const headers = await getSupabaseAuthHeaders();
       
-      // Traer inmediatos recientes y filtrar en cliente para evitar perder filas
-      // cuando driver/driver_id vienen null, vacíos o con formatos distintos.
-      const urlImmediates = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.immediate&limit=1000&select=*&order=created_at.desc`;
+      // Solo disponibles (PENDING/NEW) — si pedimos todos, los COMPLETE llenan el limit
+      // y un PENDING reciente puede no entrar o quedar oculto al filtrar.
+      const urlImmediates =
+        `${SUPABASE_URL}/rest/v1/bookings` +
+        `?booking_type=eq.immediate` +
+        `&status=in.(PENDING,NEW)` +
+        `&order=created_at.desc` +
+        `&limit=100` +
+        `&select=*`;
       
       console.log('🟢 [INMEDIATOS] Query:', urlImmediates);
       
@@ -589,11 +623,19 @@ const DriverReservationsScreen = ({
       console.log(`📡 [INMEDIATOS] Response status: ${res.status}`);
       
       const allData = res.ok ? await res.json() : [];
+      if (!res.ok) {
+        console.warn('❌ [INMEDIATOS] body:', await res.text().catch(() => ''));
+      }
       console.log(`📊 [INMEDIATOS] RAW data count: ${Array.isArray(allData) ? allData.length : 'NOT ARRAY'}`);
       
-      // Log EXACTAMENTE qué status tienen los primeros 15 items
       if (Array.isArray(allData) && allData.length > 0) {
-        console.log('🔍 [INMEDIATOS] Primeros 15 items:', allData.slice(0, 15).map((x: any) => ({ ref: x.reference, status: x.status, id: x.id })));
+        console.log('🔍 [INMEDIATOS] items:', allData.slice(0, 15).map((x: any) => ({
+          ref: x.reference,
+          status: x.status,
+          car_type: x.car_type,
+          driver: x.driver || x.driver_id || null,
+          pickup: x.pickup_address?.slice?.(0, 40),
+        })));
       }
       
       if (!Array.isArray(allData)) {
@@ -612,21 +654,38 @@ const DriverReservationsScreen = ({
         return;
       }
 
+      let droppedAssigned = 0;
+      let droppedCarType = 0;
+      let droppedDistance = 0;
+      let droppedNoCoords = 0;
+
       const filtered = allData.filter((item: any) => {
         const status = String(item?.status || '').toUpperCase();
         const isAvailableStatus = status === 'NEW' || status === 'PENDING';
         if (!isAvailableStatus) return false;
 
         const hasAssignedDriver = Boolean(String(item?.driver || '').trim()) || Boolean(String(item?.driver_id || '').trim());
-        if (hasAssignedDriver) return false;
+        if (hasAssignedDriver) {
+          droppedAssigned += 1;
+          return false;
+        }
 
         const bookingCarType = normalizeCarType(item?.car_type || item?.carType);
-        if (bookingCarType !== driverCarType) return false;
+        if (bookingCarType !== driverCarType) {
+          droppedCarType += 1;
+          return false;
+        }
 
-        // Filtro estricto: si no podemos verificar la distancia, NO mostramos.
-        // Los inmediatos solo deben aparecer si el pickup está a <= 3km.
         const pickupCoords = extractLatLng(item);
-        if (!pickupCoords || !driverCoords) return false;
+        // Sin GPS del conductor aún: no descartar por distancia (re-filtra al llegar coords).
+        if (!driverCoords) {
+          if (!pickupCoords) droppedNoCoords += 1;
+          return true;
+        }
+        if (!pickupCoords) {
+          droppedNoCoords += 1;
+          return false;
+        }
 
         const distanceKm = getDistanceKm(
           driverCoords.lat,
@@ -636,13 +695,22 @@ const DriverReservationsScreen = ({
         );
 
         item.distance_to_pickup_km = distanceKm;
-        return distanceKm <= rangeKm;
+        if (distanceKm > rangeKm) {
+          droppedDistance += 1;
+          return false;
+        }
+        return true;
       });
       
-      const newCount = filtered.filter((item: any) => item.status === 'NEW').length;
-      const pendingCount = filtered.filter((item: any) => item.status === 'PENDING').length;
+      const newCount = filtered.filter((item: any) => String(item.status).toUpperCase() === 'NEW').length;
+      const pendingCount = filtered.filter((item: any) => String(item.status).toUpperCase() === 'PENDING').length;
       
-      console.log(`✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}, rangeKm: ${rangeKm}, driverCoords: ${driverCoords ? `${driverCoords.lat},${driverCoords.lng}` : 'N/A'}`);
+      console.log(
+        `✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}` +
+        `, rangeKm: ${rangeKm}, driverCarType: ${driverCarType}` +
+        `, driverCoords: ${driverCoords ? `${driverCoords.lat},${driverCoords.lng}` : 'N/A'}` +
+        `, dropped={assigned:${droppedAssigned}, carType:${droppedCarType}, noCoords:${droppedNoCoords}, distance:${droppedDistance}}`,
+      );
 
       // Notificar / registrar inmediatos (primera carga también llena el modal de campanita)
       const currentIds = new Set<string>(filtered.map((it: any) => String(it.id)));
@@ -653,9 +721,8 @@ const DriverReservationsScreen = ({
         const isNew = isFirstScan || !previous!.has(id);
         if (!isNew) continue;
         const pickup = it.pickup_address || 'punto desconocido';
-        const distTxt = typeof it.distance_to_pickup_km === 'number'
-          ? ` · ${it.distance_to_pickup_km.toFixed(1)} km`
-          : '';
+        // Km del viaje (estimate), no distancia conductor→recogida
+        const distTxt = formatTripKmSuffix(it.distance);
         if (!isFirstScan) {
           notifyNewBooking(
             '⚡ Nuevo servicio inmediato',
@@ -759,7 +826,7 @@ const DriverReservationsScreen = ({
       showAlert(
         'warning',
         'Categoría no coincide',
-        `Este ${isImmmediate ? 'servicio' : 'reserva'} es para la categoría "${reservation.car_type}". Tu vehículo activo es de la categoría "${activeCarType}".`,
+        `Este ${isImmmediate ? 'servicio' : 'reserva'} es para la categoría "${toCanonicalCarType(reservation.car_type) || reservation.car_type}". Tu vehículo activo es de la categoría "${activeCarTypeLabel || activeCarType}".`,
       );
       return;
     }
@@ -788,8 +855,9 @@ const DriverReservationsScreen = ({
       return;
     }
 
-    const observationText = reservation.observations && String(reservation.observations).trim()
-      ? `\n\nObservación del cliente: ${String(reservation.observations).trim()}`
+    const cleanObs = stripRecorridoTag(String(reservation.observations || ''));
+    const observationText = cleanObs
+      ? `\n\nObservación del cliente: ${cleanObs}`
       : '';
 
     showAlert('confirm',
@@ -871,14 +939,14 @@ const DriverReservationsScreen = ({
         user?.vehicleNumber ||
         null;
 
-      // Update booking to ACCEPTED with driver info
+      // Solo columnas reales de public.bookings (aplicacioncore).
+      // No enviar: driver_token, customer_token, driver_status, customer_status.
       const updateBody = {
         status: 'ACCEPTED',
         driver: driverId,
         driver_id: driverId,
         driver_name: driverName,
         driver_contact: user?.mobile || '',
-        driver_token: user?.pushToken || user?.push_token || '',
         plate_number: resolvedPlate,
         vehicle_number: resolvedPlate,
         vehicle_make: car.make || car.vehicle_make || null,
@@ -1124,11 +1192,16 @@ const DriverReservationsScreen = ({
     onPendingDetailConsumed?.();
   }, [pendingDetailBooking, openServiceDetail, onPendingDetailConsumed]);
 
+  const activeCarTypeLabel = useMemo(
+    () => (activeCarType ? toCanonicalCarType(activeCarType) || activeCarType : null),
+    [activeCarType],
+  );
+
   const renderItem = ({ item, index }: { item: any; index: number }) => {
     try {
     const fare = getBookingFareRange(item);
     const photo = resolveCustomerPhoto(item);
-    const tripLabel = item.trip_type || 'Ida';
+    const tripLabel = resolveTripTypeLabel(item);
     const distKm = parseFloat(String(item.distance || 0));
     const durationMin = Number(item.duration || 0);
     const isTaken = !!item.__taken;
@@ -1226,11 +1299,11 @@ const DriverReservationsScreen = ({
         color="rgba(0,229,255,0.3)"
       />
       <Text style={s.emptyTitle}>
-        {activeCarType ? 'No hay reservas disponibles' : 'Activa un vehículo'}
+        {activeCarTypeLabel ? 'No hay reservas disponibles' : 'Activa un vehículo'}
       </Text>
       <Text style={s.emptySub}>
-        {activeCarType
-          ? `Solo se muestran reservas de tu categoría activa (${activeCarType}).`
+        {activeCarTypeLabel
+          ? `Solo se muestran reservas de tu categoría activa (${activeCarTypeLabel}).`
           : 'Debes activar un vehículo en "Mis Vehículos" para ver reservas de tu categoría.'}
       </Text>
     </View>
@@ -1477,7 +1550,7 @@ const DriverReservationsScreen = ({
                 <Text style={s.emptyTitle}>
                   {!driverOnline
                     ? 'Inicia GO para buscar'
-                    : !activeCarType
+                    : !activeCarTypeLabel
                       ? 'Activa un vehículo'
                       : locationDenied
                         ? 'Activa la ubicación'
@@ -1486,11 +1559,11 @@ const DriverReservationsScreen = ({
                 <Text style={s.emptySub}>
                   {!driverOnline
                     ? 'Conductor desconectado, activa GO para buscar servicios inmediatos.'
-                    : !activeCarType
+                    : !activeCarTypeLabel
                       ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
                       : locationDenied
                         ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
-                        : `Solo servicios nuevos a menos de ${rangeKm} km y de tu categoría (${activeCarType}).`}
+                        : `Solo servicios nuevos a menos de ${rangeKm} km y de tu categoría (${activeCarTypeLabel}).`}
                 </Text>
               </View>
             )
@@ -1560,9 +1633,9 @@ const DriverReservationsScreen = ({
                       <Text style={s.modalBadgeCodeTxt}>{detailItem.reference}</Text>
                     </View>
                   )}
-                  {!!detailItem.trip_type && (
+                  {!!resolveTripTypeLabel(detailItem) && (
                     <View style={s.modalBadgeTrip}>
-                      <Text style={s.modalBadgeTripTxt}>{detailItem.trip_type}</Text>
+                      <Text style={s.modalBadgeTripTxt}>{resolveTripTypeLabel(detailItem)}</Text>
                     </View>
                   )}
                 </View>
@@ -1676,13 +1749,13 @@ const DriverReservationsScreen = ({
                   </View>
                 ) : null}
 
-                {detailItem.observations && String(detailItem.observations).trim() ? (
+                {stripRecorridoTag(String(detailItem.observations || '')) ? (
                   <View style={s.obsBlock}>
                     <View style={s.obsHeader}>
                       <Ionicons name="chatbubble-ellipses-outline" size={13} color="#00E5FF" />
                       <Text style={s.obsLabel}>Observación del cliente</Text>
                     </View>
-                    <Text style={s.obsText}>{String(detailItem.observations).trim()}</Text>
+                    <Text style={s.obsText}>{stripRecorridoTag(String(detailItem.observations || ''))}</Text>
                   </View>
                 ) : null}
 

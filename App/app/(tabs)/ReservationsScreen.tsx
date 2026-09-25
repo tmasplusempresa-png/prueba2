@@ -18,9 +18,10 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
-import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader, refreshAuthSession } from '@/config/SupabaseConfig';
 import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 import { formatBookingFareRange } from '@/constants/fare';
+import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 const PAGE_SIZE = 50;
@@ -135,8 +136,12 @@ const ReservationCard = React.memo(({ item, onPress }: { item: Reservation; onPr
           <Text style={styles.resMetaTxt}>{formatTime(item.booking_date)}</Text>
         </View>
         <View style={styles.resMeta}>
-          <Ionicons name={item.trip_type === 'Ida' ? 'arrow-forward' : 'repeat'} size={13} color="#00E5FF" />
-          <Text style={styles.resMetaTxt}>{item.trip_type}</Text>
+          <Ionicons
+            name={resolveTripTypeLabel(item) === 'Ida' ? 'arrow-forward' : 'repeat'}
+            size={13}
+            color="#00E5FF"
+          />
+          <Text style={styles.resMetaTxt}>{resolveTripTypeLabel(item)}</Text>
         </View>
       </View>
 
@@ -208,6 +213,7 @@ const ReservationsScreen = () => {
 
   // tracks which tabs have completed at least one successful load (avoids tabStates in effect deps)
   const initializedRef = useRef<Partial<Record<TabKey, boolean>>>({});
+  const fetchInFlightRef = useRef<Partial<Record<TabKey, boolean>>>({});
 
   // ── fetch one page for a tab ────────────────────────────────────────────
   const fetchPage = useCallback(async (
@@ -217,14 +223,35 @@ const ReservationsScreen = () => {
     append: boolean,
   ) => {
     if (!userId) return;
+    if (fetchInFlightRef.current[tab]) return;
+    fetchInFlightRef.current[tab] = true;
 
     setTabStates(prev => ({
       ...prev,
       [tab]: { ...prev[tab], loading: true },
     }));
 
+    const finishError = (keepRetryable: boolean) => {
+      // keepRetryable=false → marca initialized para cortar loops (401 / onEndReached)
+      if (!keepRetryable) initializedRef.current[tab] = true;
+      setTabStates(prev => ({
+        ...prev,
+        [tab]: {
+          ...prev[tab],
+          loading: false,
+          initialized: keepRetryable ? prev[tab].initialized : true,
+          hasMore: keepRetryable ? prev[tab].hasMore : false,
+        },
+      }));
+    };
+
     try {
-      const headers = await getSupabaseAuthHeaders();
+      let headers = await getSupabaseAuthHeaders();
+      if (!hasUserAuthHeader(headers)) {
+        console.warn('[Reservas] sin JWT — se omite fetch (evita 401 anon)');
+        finishError(false);
+        return;
+      }
       const statuses = TAB_STATUSES[tab].join(',');
       const dateFrom = getDateFrom(df);
 
@@ -246,18 +273,23 @@ const ReservationsScreen = () => {
       if (dateFrom) url += `&booking_date=gte.${encodeURIComponent(dateFrom)}`;
 
       console.log('[Reservas] userId:', userId, '| tab:', tab, '| df:', df);
-      console.log('[Reservas] url:', url);
 
-      const res = await fetch(url, { headers });
+      let res = await fetch(url, { headers });
+      // JWT expired → refresh una vez y reintentar
+      if (res.status === 401) {
+        console.warn('[Reservas] 401 — intentando refreshSession');
+        const refreshed = await refreshAuthSession();
+        if (refreshed?.access_token) {
+          headers = await getSupabaseAuthHeaders();
+          res = await fetch(url, { headers });
+        }
+      }
+
       console.log('[Reservas] status:', res.status, '| ok:', res.ok);
       if (!res.ok) {
         const errBody = await res.text();
         console.warn('Reservations fetch error:', res.status, errBody);
-        // No marcamos `initialized: true` para permitir reintentos (focus / refresh).
-        setTabStates(prev => ({
-          ...prev,
-          [tab]: { ...prev[tab], loading: false },
-        }));
+        finishError(false);
         return;
       }
 
@@ -276,11 +308,9 @@ const ReservationsScreen = () => {
       }));
     } catch (e) {
       console.error('fetchPage error:', e);
-      // No marcamos `initialized: true` para permitir reintentos.
-      setTabStates(prev => ({
-        ...prev,
-        [tab]: { ...prev[tab], loading: false },
-      }));
+      finishError(false);
+    } finally {
+      fetchInFlightRef.current[tab] = false;
     }
   }, [userId]);
 

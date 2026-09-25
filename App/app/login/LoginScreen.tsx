@@ -2,8 +2,11 @@ import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View, Text, TextInput, StyleSheet, TouchableOpacity, ImageBackground, Image,
   Animated, ScrollView, KeyboardAvoidingView, Keyboard, Modal, FlatList,
-  BackHandler, Platform, TouchableWithoutFeedback, Vibration, ActivityIndicator, Linking
+  BackHandler, Platform, TouchableWithoutFeedback, Vibration, ActivityIndicator, Linking,
+  Easing, LayoutChangeEvent,
 } from "react-native";
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useFocusEffect } from "@react-navigation/native";
@@ -19,6 +22,7 @@ import * as ExpoLinking from 'expo-linking';
 import * as SecureStore from 'expo-secure-store';
 
 const REMEMBER_ME_STORAGE_KEY = 'tmasplus_remember_me';
+const TOGGLE_PAD = 4;
 
 type Props = NativeStackScreenProps<any>;
 
@@ -152,6 +156,50 @@ const LoginScreen = ({ navigation }: Props) => {
   const opacityAnim = useRef(new Animated.Value(0)).current;
   const keyboardOffsetAnim = useRef(new Animated.Value(0)).current;
   const passwordLiftAnim = useRef(new Animated.Value(0)).current;
+  const tabIndicatorAnim = useRef(new Animated.Value(0)).current; // 0 = Ingresar, 1 = Registro
+  const formOpacityAnim = useRef(new Animated.Value(1)).current;
+  const [toggleTrackW, setToggleTrackW] = useState(0);
+  const switchingModeRef = useRef(false);
+  const isLoginModeRef = useRef(true);
+
+  useEffect(() => {
+    isLoginModeRef.current = ui.isLoginMode;
+  }, [ui.isLoginMode]);
+
+  const onToggleTrackLayout = useCallback((e: LayoutChangeEvent) => {
+    setToggleTrackW(e.nativeEvent.layout.width);
+  }, []);
+
+  const switchAuthMode = useCallback((nextLogin: boolean) => {
+    if (switchingModeRef.current || isLoginModeRef.current === nextLogin) return;
+    switchingModeRef.current = true;
+
+    // Pill suave + fade corto del form (sin slide lateral)
+    Animated.parallel([
+      Animated.timing(tabIndicatorAnim, {
+        toValue: nextLogin ? 0 : 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(formOpacityAnim, {
+        toValue: 0,
+        duration: 120,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setUI(prev => ({ ...prev, isLoginMode: nextLogin, error: "" }));
+      Animated.timing(formOpacityAnim, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(() => {
+        switchingModeRef.current = false;
+      });
+    });
+  }, [formOpacityAnim, tabIndicatorAnim]);
 
   // ============ UTIL FUNCTIONS ============
   const updateField = useCallback((key: keyof typeof form, value: string) => {
@@ -327,7 +375,7 @@ const LoginScreen = ({ navigation }: Props) => {
 
       const goToLogin = () => {
         setAlert(a => ({ ...a, visible: false }));
-        setUI(u => ({ ...u, isLoginMode: true }));
+        switchAuthMode(true);
       };
 
       if (result?.alreadyExists) {
@@ -405,7 +453,7 @@ const LoginScreen = ({ navigation }: Props) => {
     } finally {
       setUI(u => ({ ...u, loading: false }));
     }
-  }, [form, country.countryCode, allRequiredAccepted, validation.emailExists, validation.phoneExists, sanitizeInput, signupUser, showAlert, clearRegistrationForm, updateField]);
+  }, [form, country.countryCode, allRequiredAccepted, validation.emailExists, validation.phoneExists, sanitizeInput, signupUser, showAlert, clearRegistrationForm, updateField, switchAuthMode]);
 
   // ============ HANDLERS - INPUT CHANGES ============
   const handleEmailChange = useCallback((text: string) => {
@@ -605,12 +653,25 @@ const LoginScreen = ({ navigation }: Props) => {
   );
 
   // ============ RENDER ============
+  const toggleInnerW = Math.max(toggleTrackW - TOGGLE_PAD * 2, 0);
+  const tabPillW = toggleInnerW > 0 ? toggleInnerW / 2 : 0;
+  const tabPillTranslateX = tabIndicatorAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, tabPillW],
+  });
+
   return (
     <ImageBackground 
       source={require("@/assets/images/login.jpg")} 
       resizeMode="cover" 
       style={styles.background}
     >
+      <LinearGradient
+        colors={['rgba(1,6,10,0.20)', 'rgba(1,6,10,0.35)', 'rgba(1,6,10,0.55)']}
+        locations={[0, 0.45, 1]}
+        style={StyleSheet.absoluteFillObject}
+        pointerEvents="none"
+      />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flexFill}>
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <ScrollView
@@ -637,6 +698,15 @@ const LoginScreen = ({ navigation }: Props) => {
               ]}
             >
               <View style={styles.authBox}>
+                {Platform.OS === 'ios' ? (
+                  <BlurView
+                    intensity={18}
+                    tint="dark"
+                    style={StyleSheet.absoluteFillObject}
+                  />
+                ) : null}
+                <View style={styles.authBoxTint} pointerEvents="none" />
+                <View style={styles.authBoxContent}>
                 {/* Logo */}
                 <View style={styles.logoContainer}>
                   <View style={styles.logoImageWrap}>
@@ -649,17 +719,31 @@ const LoginScreen = ({ navigation }: Props) => {
                   <Text style={styles.logoSubtitle}>Movilidad Inteligente</Text>
                 </View>
 
-                {/* Toggle */}
-                <View style={styles.toggleContainer}>
+                {/* Toggle — indicador deslizante simple */}
+                <View style={styles.toggleContainer} onLayout={onToggleTrackLayout}>
+                  {tabPillW > 0 && (
+                    <Animated.View
+                      pointerEvents="none"
+                      style={[
+                        styles.toggleIndicator,
+                        {
+                          width: tabPillW,
+                          transform: [{ translateX: tabPillTranslateX }],
+                        },
+                      ]}
+                    />
+                  )}
                   <TouchableOpacity
-                    style={[styles.toggleBtn, ui.isLoginMode && styles.toggleBtnActive]}
-                    onPress={() => setUI(u => ({ ...u, isLoginMode: true, error: "" }))}
+                    style={styles.toggleBtn}
+                    onPress={() => switchAuthMode(true)}
+                    activeOpacity={0.85}
                   >
                     <Text style={[styles.toggleBtnText, ui.isLoginMode && styles.toggleBtnTextActive]}>Ingresar</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.toggleBtn, !ui.isLoginMode && styles.toggleBtnActive]}
-                    onPress={() => setUI(u => ({ ...u, isLoginMode: false, error: "" }))}
+                    style={styles.toggleBtn}
+                    onPress={() => switchAuthMode(false)}
+                    activeOpacity={0.85}
                   >
                     <Text style={[styles.toggleBtnText, !ui.isLoginMode && styles.toggleBtnTextActive]}>Registro</Text>
                   </TouchableOpacity>
@@ -668,6 +752,7 @@ const LoginScreen = ({ navigation }: Props) => {
                 {/* Error */}
                 {ui.error ? <Text style={styles.errorText}>{ui.error}</Text> : null}
 
+                <Animated.View style={{ opacity: formOpacityAnim }}>
                 {/* LOGIN FORM */}
                 {ui.isLoginMode ? (
                   <View>
@@ -717,27 +802,32 @@ const LoginScreen = ({ navigation }: Props) => {
                     </View>
 
                     {/* Login Button */}
-                    <TouchableOpacity style={[styles.primaryBtn, ui.loading && styles.primaryBtnDisabled]} onPress={handleLogin} disabled={ui.loading}>
-                      {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>INICIAR SESIÓN</Text>}
+                    <TouchableOpacity style={[styles.primaryBtn, ui.loading && styles.primaryBtnDisabled]} onPress={handleLogin} disabled={ui.loading} activeOpacity={0.88}>
+                      <LinearGradient
+                        colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.primaryBtnGradient}
+                      >
+                        {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>INICIAR SESIÓN</Text>}
+                      </LinearGradient>
                     </TouchableOpacity>
 
-                    {/* Remember Me */}
-                    <View style={styles.rememberMeContainer}>
+                    {/* Remember Me + Forgot */}
+                    <View style={styles.loginFooterRow}>
                       <TouchableOpacity style={styles.checkboxRow} onPress={() => setValidation(v => ({ ...v, rememberMe: !v.rememberMe }))} disabled={ui.loading}>
                         <View style={[styles.checkbox, validation.rememberMe && styles.checkboxActive]}>
                           {validation.rememberMe && <AntDesign name="check" size={12} color="#fff" />}
                         </View>
                         <Text style={styles.checkboxLabel}>Recordarme</Text>
                       </TouchableOpacity>
+                      <TouchableOpacity onPress={handlePasswordReset} disabled={ui.loading}>
+                        <Text style={styles.forgotLink}>¿Olvidaste tu clave?</Text>
+                      </TouchableOpacity>
                     </View>
 
-                    {/* Forgot Password */}
-                    <TouchableOpacity onPress={handlePasswordReset} disabled={ui.loading} style={styles.forgotPasswordContainer}>
-                      <Text style={styles.forgotLink}>¿Olvidaste tu clave?</Text>
-                    </TouchableOpacity>
-
                     {/* Sign Up Link */}
-                    <TouchableOpacity onPress={() => setUI(u => ({ ...u, isLoginMode: false }))}>
+                    <TouchableOpacity onPress={() => switchAuthMode(false)} style={styles.signUpLinkWrap}>
                       <Text style={styles.signUpLinkText}>¿No tienes cuenta? <Text style={styles.signUpLinkHighlight}>Regístrate</Text></Text>
                     </TouchableOpacity>
                   </View>
@@ -994,11 +1084,20 @@ const LoginScreen = ({ navigation }: Props) => {
                     </View>
 
                     {/* Signup Button */}
-                    <TouchableOpacity style={[styles.primaryBtn, (ui.loading || !allRequiredAccepted) && styles.primaryBtnDisabled]} onPress={handleSignUp} disabled={ui.loading || !allRequiredAccepted}>
-                      {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>CREAR CUENTA</Text>}
+                    <TouchableOpacity style={[styles.primaryBtn, (ui.loading || !allRequiredAccepted) && styles.primaryBtnDisabled]} onPress={handleSignUp} disabled={ui.loading || !allRequiredAccepted} activeOpacity={0.88}>
+                      <LinearGradient
+                        colors={['#3cf0f3', THEME.primaryCyan, '#0fc4c8']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.primaryBtnGradient}
+                      >
+                        {ui.loading ? <ActivityIndicator color="#000" /> : <Text style={styles.primaryBtnText}>CREAR CUENTA</Text>}
+                      </LinearGradient>
                     </TouchableOpacity>
                   </View>
                 )}
+                </Animated.View>
+                </View>
               </View>
             </Animated.View>
           </ScrollView>
@@ -1111,47 +1210,111 @@ const styles = StyleSheet.create({
   background: { flex: 1, backgroundColor: THEME.darkBg },
   flexFill: { flex: 1 },
   scrollContent: { flexGrow: 1, paddingBottom: 120 },
-  container: { flex: 1, justifyContent: 'flex-start', alignItems: 'center', paddingHorizontal: 20, paddingTop: 80 },
+  container: { flex: 1, justifyContent: 'flex-start', alignItems: 'center', paddingHorizontal: 20, paddingTop: 72 },
   authBox: {
-    width: '100%', maxWidth: 420, backgroundColor: THEME.glassBg, borderColor: THEME.glassBorder,
-    borderWidth: 1.5, borderRadius: 28, padding: 40, marginTop: 20, shadowColor: '#000',
-    shadowOffset: { width: 0, height: 30 }, shadowOpacity: 0.6, shadowRadius: 60, elevation: 10
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 28,
+    overflow: 'hidden',
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.20)',
+    backgroundColor: 'rgba(4, 39, 58, 0.32)',
   },
-  logoContainer: { alignItems: 'center', marginBottom: 30 },
+  authBoxTint: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(1, 10, 16, 0.18)',
+  },
+  authBoxContent: {
+    paddingHorizontal: 28,
+    paddingTop: 28,
+    paddingBottom: 32,
+    zIndex: 1,
+  },
+  logoContainer: { alignItems: 'center', marginBottom: 22 },
   logoImageWrap: {
-    width: 120,
-    height: 120,
-    borderRadius: 36,
+    width: 104,
+    height: 104,
+    borderRadius: 28,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(21, 229, 233, 0.35)',
-    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderColor: 'rgba(21, 229, 233, 0.25)',
+    backgroundColor: '#FFFFFF',
   },
   logoImage: { width: '100%', height: '100%' },
   logoTitle: { fontSize: 32, fontWeight: '800', color: THEME.textMain, letterSpacing: -0.5 },
-  logoSubtitle: { fontSize: 11, color: THEME.primaryCyan, fontWeight: '500', letterSpacing: 1.5, marginTop: 5, textTransform: 'uppercase' },
-  toggleContainer: { flexDirection: 'row', backgroundColor: 'rgba(0, 0, 0, 0.4)', borderRadius: 14, padding: 6, marginBottom: 30, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.05)' },
-  toggleBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 10 },
-  toggleBtnActive: { backgroundColor: 'rgba(21, 229, 233, 0.15)', shadowColor: THEME.primaryCyan, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 5 },
+  logoSubtitle: { fontSize: 11, color: THEME.primaryCyan, fontWeight: '600', letterSpacing: 1.8, marginTop: 10, textTransform: 'uppercase' },
+  toggleContainer: {
+    flexDirection: 'row',
+    borderRadius: 14,
+    padding: TOGGLE_PAD,
+    marginBottom: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.18)',
+    backgroundColor: 'rgba(0, 8, 14, 0.35)',
+    position: 'relative',
+  },
+  toggleIndicator: {
+    position: 'absolute',
+    top: TOGGLE_PAD,
+    left: TOGGLE_PAD,
+    bottom: TOGGLE_PAD,
+    borderRadius: 10,
+    backgroundColor: 'rgba(21, 229, 233, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.40)',
+  },
+  toggleBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    zIndex: 1,
+  },
   toggleBtnText: { color: THEME.textMuted, fontWeight: '600', fontSize: 14 },
-  toggleBtnTextActive: { color: THEME.textMain },
+  toggleBtnTextActive: { color: THEME.primaryCyan, fontWeight: '700' },
   errorText: { color: THEME.errorColor, fontSize: 13, marginBottom: 15, textAlign: 'center', fontWeight: '500' },
-  inputGroup: { marginBottom: 20 },
+  inputGroup: { marginBottom: 14 },
   inputWrapper: { position: 'relative', flexDirection: 'row', alignItems: 'center' },
   inputIcon: { position: 'absolute', left: 16, zIndex: 2 },
   plusIcon: { position: 'absolute', left: 10, top: 4, fontSize: 18, fontWeight: '900', color: THEME.primaryCyan, zIndex: 3 },
-  input: { flex: 1, paddingVertical: 16, paddingHorizontal: 16, paddingLeft: 50, paddingRight: 40, backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1.5, borderColor: 'rgba(255, 255, 255, 0.15)', borderRadius: 14, color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
-  inputFocused: { borderColor: THEME.primaryCyan, backgroundColor: 'rgba(0, 0, 0, 0.6)' },
+  input: {
+    flex: 1,
+    paddingVertical: 15,
+    paddingHorizontal: 16,
+    paddingLeft: 50,
+    paddingRight: 40,
+    backgroundColor: 'rgba(0, 8, 14, 0.40)',
+    borderWidth: 1,
+    borderColor: 'rgba(21, 229, 233, 0.16)',
+    borderRadius: 14,
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  inputFocused: {
+    borderColor: 'rgba(21, 229, 233, 0.65)',
+    backgroundColor: 'rgba(4, 39, 58, 0.40)',
+  },
   eyeIcon: { position: 'absolute', right: 14, zIndex: 2, padding: 8 },
   scanLine: { position: 'absolute', bottom: 0, left: '5%', right: '5%', height: 2, backgroundColor: THEME.primaryCyan, borderRadius: 1 },
+  loginFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    paddingHorizontal: 2,
+  },
   rememberMeContainer: { alignItems: 'center', marginTop: 14, marginBottom: 8 },
-  checkboxRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
+  checkboxRow: { flexDirection: 'row', alignItems: 'center' },
   agreementsCard: {
     marginTop: 10,
     borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(21, 229, 233, 0.2)',
-    backgroundColor: 'rgba(4, 39, 58, 0.22)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(21, 229, 233, 0.22)',
+    backgroundColor: 'rgba(4, 39, 58, 0.18)',
     paddingVertical: 10,
     paddingHorizontal: 12,
     alignItems: 'center',
@@ -1182,13 +1345,23 @@ const styles = StyleSheet.create({
   learnMoreBtnText: { color: THEME.primaryCyan, fontSize: 12, fontWeight: '700', letterSpacing: 0.4 },
   forgotPasswordContainer: { alignItems: 'center', marginTop: 12 },
   forgotLink: { color: THEME.primaryCyan, fontSize: 12, fontWeight: '600' },
-  signUpLinkText: { color: 'rgba(255, 255, 255, 0.7)', fontSize: 13, fontWeight: '500', textAlign: 'center', marginTop: 16 },
+  signUpLinkWrap: { marginTop: 18, alignItems: 'center' },
+  signUpLinkText: { color: 'rgba(255, 255, 255, 0.7)', fontSize: 13, fontWeight: '500', textAlign: 'center' },
   signUpLinkHighlight: { color: THEME.primaryCyan, fontWeight: '700' },
-  primaryBtn: { paddingVertical: 15, backgroundColor: THEME.primaryCyan, borderRadius: 14, alignItems: 'center', marginTop: 18, shadowColor: THEME.primaryCyan, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8, elevation: 5 },
+  primaryBtn: {
+    marginTop: 18,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  primaryBtnGradient: {
+    paddingVertical: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   primaryBtnDisabled: { opacity: 0.5 },
   primaryBtnText: { color: '#000', fontWeight: '700', fontSize: 13, letterSpacing: 1.8 },
-  phoneContainer: { width: '100%', marginBottom: 20 },
-  phoneCombinedWrapper: { backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1.5, borderColor: 'rgba(255, 255, 255, 0.15)', borderRadius: 14, height: 56, justifyContent: 'center' },
+  phoneContainer: { width: '100%', marginBottom: 14 },
+  phoneCombinedWrapper: { backgroundColor: 'rgba(0, 8, 14, 0.40)', borderWidth: 1, borderColor: 'rgba(21, 229, 233, 0.16)', borderRadius: 14, height: 56, justifyContent: 'center' },
   phoneCodeInlineButton: { position: 'absolute', left: 0, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12, zIndex: 3, minWidth: 100 },
   countryFlag: { fontSize: 22, marginRight: 7 },
   countryCode: { color: THEME.textMain, fontSize: 15, fontWeight: '600', letterSpacing: 0.5, marginRight: 2 },

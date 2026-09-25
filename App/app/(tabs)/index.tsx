@@ -1430,6 +1430,31 @@ const MapScreen = () => {
   const setDriverOnlineStatus = async (newStatus: boolean) => {
     if (goToggleLockRef.current) return;
     if (newStatus === driverOnline) return;
+
+    // Al activar GO: ubicación «Siempre» + notificaciones son obligatorias
+    if (newStatus) {
+      const { ensureDriverGoPermissions, openAppSettings } = await import(
+        '@/common/utils/driverGoPermissions'
+      );
+      const perm = await ensureDriverGoPermissions();
+      if (!perm.ok) {
+        const buttons: AlertButton[] = perm.openSettings
+          ? [
+              { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+              {
+                text: 'Abrir ajustes',
+                onPress: () => {
+                  setAlertVisible(false);
+                  openAppSettings();
+                },
+              },
+            ]
+          : [{ text: 'Entendido', onPress: () => setAlertVisible(false) }];
+        showAlert('warning', perm.title, perm.message, buttons);
+        return;
+      }
+    }
+
     goToggleLockRef.current = true;
 
     setDriverOnline(newStatus);

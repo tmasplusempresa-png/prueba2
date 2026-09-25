@@ -72,8 +72,8 @@ export const subscribeToDriverTracking = (
           const location: DriverLocation = {
             lat: record.lat,
             lng: record.lng,
-            timestamp: new Date(record.created_at).getTime(),
-            accuracy: record.accuracy
+            timestamp: new Date(record.registrado_en || record.created_at).getTime(),
+            accuracy: record.precision_m ?? undefined,
           };
           
           console.log('[DriverTracking] Supabase realtime update:', location);

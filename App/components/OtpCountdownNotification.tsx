@@ -31,19 +31,22 @@ const OtpCountdownNotification: React.FC<OtpCountdownNotificationProps> = ({
       try {
         const { data, error } = await (supabase as any)
           .from('bookings')
-          .select('otp_timer_started_at')
+          .select('driver_arrived_time, otp_verified, status')
           .eq('id', bookingId)
           .single();
 
-        if (error || !data?.otp_timer_started_at) {
+        if (error || !data?.driver_arrived_time || data.otp_verified) {
           setTimeRemaining(null);
           return;
         }
 
-        const startTime = new Date(data.otp_timer_started_at).getTime();
-        const now = new Date().getTime();
-        const elapsed = (now - startTime) / 1000;
-        const remaining = Math.min(180, Math.max(0, 180 - elapsed)); // 3 minutos
+        const startTime = new Date(data.driver_arrived_time).getTime();
+        if (!Number.isFinite(startTime)) {
+          setTimeRemaining(null);
+          return;
+        }
+        const elapsed = (Date.now() - startTime) / 1000;
+        const remaining = Math.min(180, Math.max(0, 180 - elapsed));
 
         setTimeRemaining(Math.ceil(remaining));
         setIsExpired(remaining <= 0);

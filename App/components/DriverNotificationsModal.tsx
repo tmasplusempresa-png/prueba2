@@ -193,7 +193,31 @@ const DriverNotificationsModal: React.FC<Props> = ({
         </View>
 
         <Text {...FIXED_TEXT_PROPS} style={styles.title} numberOfLines={1}>{item.title}</Text>
-        <Text {...FIXED_TEXT_PROPS} style={styles.body} numberOfLines={2}>{item.body}</Text>
+        <Text {...FIXED_TEXT_PROPS} style={styles.body} numberOfLines={2}>
+          {(() => {
+            const pickup =
+              item.pickup ||
+              booking?.pickup_address ||
+              'punto desconocido';
+            const tripKm = parseFloat(String(booking?.distance ?? 0));
+            const kmTxt =
+              Number.isFinite(tripKm) && tripKm > 0 ? ` · ${tripKm.toFixed(1)} km` : '';
+            if (item.bookingType === 'reservation') {
+              // Conservar fecha del body si venía; si no, solo pickup + km
+              const withoutOldKm = String(item.body || '')
+                .replace(/\s·\s*\d+(\.\d+)?\s*km/i, '')
+                .trim();
+              if (withoutOldKm && !kmTxt) return withoutOldKm;
+              if (withoutOldKm && kmTxt) {
+                return withoutOldKm.includes(kmTxt.trim())
+                  ? withoutOldKm
+                  : `${withoutOldKm}${kmTxt}`;
+              }
+            }
+            if (kmTxt) return `Recogida: ${pickup}${kmTxt}`;
+            return item.body;
+          })()}
+        </Text>
         {!!item.reference && (
           <Text {...FIXED_TEXT_PROPS} style={styles.ref}>Ref: {item.reference}</Text>
         )}

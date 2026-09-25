@@ -14,7 +14,12 @@ import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useIsFocused } from "@react-navigation/native";
 import { useDispatch, useSelector } from "react-redux";
-import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from "@/config/SupabaseConfig";
+import supabase, {
+  SUPABASE_URL,
+  getSupabaseAuthHeaders,
+  hasUserAuthHeader,
+  refreshAuthSession,
+} from "@/config/SupabaseConfig";
 import { RootState } from "@/common/store";
 import { settings } from "@/scripts/settings";
 import { logout } from "@/common/reducers/authReducer";
@@ -27,7 +32,7 @@ import { useActiveTripBanner } from '@/hooks/useActiveTripBanner';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
-import { fetchAndSyncUserRating } from '@/common/utils/userRating';
+import { fetchAndSyncUserRating, countCompletedTrips } from '@/common/utils/userRating';
 
 const emptyProfile = {
   firstName: null as string | null,
@@ -112,114 +117,154 @@ const ProfileScreen = ({ navigation }: Props) => {
     if (!isFocused) return;
 
     let cancelled = false;
-    const controller = new AbortController();
+    let seq = 0;
 
     const fetchProfileData = async () => {
-      const authId = user?.id || user?.auth_id;
+      const mySeq = ++seq;
+      const authId = user?.auth_id || user?.id || profile?.auth_id || profile?.id;
+      console.log('[Profile] fetch start', {
+        authId: authId ? String(authId).slice(0, 8) : null,
+        focused: isFocused,
+      });
       if (!authId) {
         if (!cancelled) setDbProfile({ ...emptyProfile });
         return;
       }
 
       try {
-        const url = `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=id,first_name,last_name,mobile,document_type,document_number,user_type,referred_by_code,referral_id,rating,profile_image&limit=1`;
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          signal: controller.signal,
-        });
+        // Preferir SDK (refresca JWT) para la fila users/persona
+        let rowId = '';
+        let p: any = null;
+        let role: 'customer' | 'driver' = 'customer';
 
-        if (cancelled) return;
-        const data = await response.json();
+        const { data: sdkRows, error: sdkErr } = await supabase
+          .from('users' as any)
+          .select(
+            'id,first_name,last_name,mobile,document_type,document_number,user_type,profile_image,auth_id',
+          )
+          .or(`auth_id.eq.${authId},id.eq.${authId}`)
+          .limit(1);
 
-        if (Array.isArray(data) && data.length > 0) {
-          const p = data[0];
-          const rowId = String(p.id || '');
-          const roleRaw = String(p.user_type || '').toLowerCase();
-          const role = roleRaw === 'driver' ? 'driver' : 'customer';
-
-          let rating: number | null =
-            p.rating !== null && p.rating !== undefined ? Number(p.rating) : null;
-          let ratingCount = 0;
-          let completedTrips = 0;
-
-          // Recalcular desde bookings (users.rating suele quedar en 0)
-          if (rowId) {
-            try {
-              const synced = await fetchAndSyncUserRating(rowId, role, { syncToProfile: true });
-              ratingCount = synced.count;
-              rating = synced.count > 0 ? synced.average : null;
-            } catch (e) {
-              console.warn('[Profile] sync rating failed:', e);
-              if (rating === 0) rating = null;
-            }
-
-            // Viajes COMPLETE/PAID (reservas + inmediatos)
-            try {
-              const authHeaders = await getSupabaseAuthHeaders();
-              const idFilter =
-                role === 'driver'
-                  ? `or=(driver_id.eq.${encodeURIComponent(rowId)},driver.eq.${encodeURIComponent(rowId)})`
-                  : `or=(customer_id.eq.${encodeURIComponent(rowId)},customer.eq.${encodeURIComponent(rowId)})`;
-              const countUrl =
-                `${SUPABASE_URL}/rest/v1/bookings?${idFilter}` +
-                `&status=in.(COMPLETE,PAID)&select=id`;
-              const countRes = await fetch(countUrl, {
-                method: 'GET',
-                headers: {
-                  ...authHeaders,
-                  Prefer: 'count=exact',
-                  Range: '0-0',
-                },
-                signal: controller.signal,
-              });
-              if (countRes.ok) {
-                const range = countRes.headers.get('content-range') || '';
-                const totalPart = range.split('/')[1];
-                const n = Number(totalPart);
-                completedTrips = Number.isFinite(n) && n >= 0 ? n : 0;
-              }
-            } catch (e) {
-              console.warn('[Profile] completed trips count failed:', e);
-            }
-          }
-
-          if (!cancelled) {
-            setDbProfile({
-              firstName: p.first_name || null,
-              lastName: p.last_name || null,
-              mobile: p.mobile || null,
-              documentType: p.document_type || null,
-              documentNumber: p.document_number || null,
-              userType: p.user_type || null,
-              referredByCode: p.referred_by_code || null,
-              referralId: p.referral_id || null,
-              rating,
-              ratingCount,
-              userRowId: rowId || null,
-              profileImage: p.profile_image || null,
-              completedTrips,
-            });
-          }
+        if (sdkErr) {
+          console.warn('[Profile] users SDK error:', sdkErr.message);
         }
+        p = Array.isArray(sdkRows) ? sdkRows[0] : null;
+
+        // Fallback REST + refresh si hace falta
+        if (!p?.id) {
+          let authHeaders = await getSupabaseAuthHeaders();
+          if (!hasUserAuthHeader(authHeaders)) {
+            await refreshAuthSession();
+            authHeaders = await getSupabaseAuthHeaders();
+          }
+          if (!hasUserAuthHeader(authHeaders)) {
+            console.warn('[Profile] sin JWT — se omite carga de perfil');
+            return;
+          }
+          const url =
+            `${SUPABASE_URL}/rest/v1/users` +
+            `?or=(auth_id.eq.${encodeURIComponent(String(authId))},id.eq.${encodeURIComponent(String(authId))})` +
+            `&select=id,first_name,last_name,mobile,document_type,document_number,user_type,profile_image,auth_id&limit=1`;
+          let response = await fetch(url, { method: 'GET', headers: authHeaders });
+          if (response.status === 401) {
+            await refreshAuthSession();
+            authHeaders = await getSupabaseAuthHeaders();
+            response = await fetch(url, { method: 'GET', headers: authHeaders });
+          }
+          if (!response.ok) {
+            console.warn('[Profile] users HTTP', response.status, await response.text().catch(() => ''));
+            return;
+          }
+          const data = await response.json();
+          p = Array.isArray(data) ? data[0] : null;
+        }
+
+        if (!p?.id) {
+          console.warn('[Profile] users: sin fila para', String(authId).slice(0, 8));
+          return;
+        }
+
+        rowId = String(p.id);
+        const roleRaw = String(p.user_type || '').toLowerCase();
+        role = roleRaw === 'driver' ? 'driver' : 'customer';
+        console.log('[Profile] persona', { rowId: rowId.slice(0, 8), role });
+
+        // Diagnóstico RLS: persona_actual_id debe coincidir con rowId
+        try {
+          const { data: pid, error: pidErr } = await supabase.rpc('persona_actual_id');
+          console.log('[Profile] persona_actual_id()', pid, pidErr?.message || '');
+        } catch (e: any) {
+          console.warn('[Profile] rpc persona_actual_id failed:', e?.message || e);
+        }
+
+        let rating: number | null = null;
+        let ratingCount = 0;
+        let completedTrips = 0;
+
+        try {
+          const synced = await fetchAndSyncUserRating(rowId, role, { syncToProfile: true });
+          ratingCount = synced.count;
+          rating = synced.count > 0 ? synced.average : null;
+          console.log('[Profile] rating', { rating, ratingCount });
+        } catch (e) {
+          console.warn('[Profile] sync rating failed:', e);
+        }
+
+        try {
+          completedTrips = await countCompletedTrips(rowId, role);
+          console.log('[Profile] trips', { completedTrips });
+          if (completedTrips > 0) {
+            const perfilTable = role === 'driver' ? 'perfil_conductor' : 'perfil_cliente';
+            const headers = await getSupabaseAuthHeaders(true);
+            fetch(
+              `${SUPABASE_URL}/rest/v1/${perfilTable}?id_persona=eq.${encodeURIComponent(rowId)}`,
+              {
+                method: 'PATCH',
+                headers: { ...headers, Prefer: 'return=minimal' },
+                body: JSON.stringify({ total_viajes: completedTrips }),
+              },
+            ).catch(() => null);
+          }
+        } catch (e) {
+          console.warn('[Profile] trips count failed:', e);
+        }
+
+        if (cancelled || mySeq !== seq) {
+          console.log('[Profile] skip setState (stale)');
+          return;
+        }
+
+        setDbProfile({
+          firstName: p.first_name || null,
+          lastName: p.last_name || null,
+          mobile: p.mobile || null,
+          documentType: p.document_type || null,
+          documentNumber: p.document_number || null,
+          userType: p.user_type || null,
+          referredByCode: null,
+          referralId: null,
+          rating,
+          ratingCount,
+          userRowId: rowId || null,
+          profileImage: p.profile_image || null,
+          completedTrips,
+        });
+        console.log('[Profile] done', { rating, completedTrips });
       } catch (e: any) {
+        console.warn('[Profile] fetch error:', e?.message || e);
         if (!cancelled && e?.name !== 'AbortError') {
-          setDbProfile({ ...emptyProfile });
+          // no borrar datos ya visibles
         }
       }
     };
 
     const fetchOwnReferral = async () => {
-      const authId = user?.id || user?.auth_id;
+      const authId = user?.auth_id || user?.id || profile?.auth_id || profile?.id;
       if (!authId) {
         if (!cancelled) setOwnReferral(null);
         return;
       }
-      const code = await getDriverOwnReferralCode(authId, controller.signal);
+      const code = await getDriverOwnReferralCode(String(authId));
       if (!cancelled) setOwnReferral(code);
     };
 
@@ -228,9 +273,9 @@ const ProfileScreen = ({ navigation }: Props) => {
 
     return () => {
       cancelled = true;
-      controller.abort();
+      seq += 1;
     };
-  }, [user?.id, user?.auth_id, isFocused]);
+  }, [user?.id, user?.auth_id, profile?.id, profile?.auth_id, isFocused]);
 
   const displayFirstName =
     dbProfile.firstName ||
@@ -589,8 +634,8 @@ const ProfileScreen = ({ navigation }: Props) => {
               </View>
               <View style={styles.glassStars}>
                 {[1, 2, 3, 4, 5].map((n) => {
-                  const r = dbProfile.ratingCount > 0 ? (dbProfile.rating ?? 0) : 0;
-                  const filled = dbProfile.ratingCount > 0 && n <= Math.round(r);
+                  const r = dbProfile.rating != null ? dbProfile.rating : 0;
+                  const filled = dbProfile.rating != null && n <= Math.round(r);
                   return (
                     <Ionicons
                       key={n}
@@ -602,7 +647,7 @@ const ProfileScreen = ({ navigation }: Props) => {
                 })}
               </View>
               <Text style={styles.glassNum}>
-                {dbProfile.ratingCount > 0 && dbProfile.rating != null
+                {dbProfile.rating != null
                   ? dbProfile.rating.toFixed(1)
                   : "—"}
               </Text>
@@ -657,7 +702,11 @@ const ProfileScreen = ({ navigation }: Props) => {
               ) : (
                 <>
                   <Text style={styles.glassValue}>…</Text>
-                  <Text style={styles.glassCaption}>Generando tu código</Text>
+                  <Text style={styles.glassCaption}>
+                    {user?.id || user?.auth_id
+                      ? 'Generando tu código…'
+                      : 'Inicia sesión para ver tu código'}
+                  </Text>
                 </>
               )}
             </LiquidGlass>

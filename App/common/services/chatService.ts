@@ -6,8 +6,9 @@
 // colgarse (deadlock del lock de auth). Las pantallas hacen polling con
 // fetchMessages() y envían con sendMessage().
 //
-// Unread: sin columna "read" en DB; se guarda lastReadAt en AsyncStorage por
-// booking+rol. countUnreadMessages cuenta mensajes del otro rol posteriores.
+// Esquema aplicacioncore: tabla `mensaje_chat`
+//   id_reserva, id_remitente, rol_remitente (cliente|conductor), mensaje,
+//   remitente_nombre, creado_en
 // ============================================================================
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
@@ -32,8 +33,26 @@ export interface SendMessageInput {
   message: string;
 }
 
+const CHAT_TABLE = 'mensaje_chat';
+
 const lastReadKey = (bookingId: string, role: ChatRole) =>
   `chat_last_read_${bookingId}_${role}`;
+
+const toDbRole = (role: ChatRole): 'cliente' | 'conductor' =>
+  role === 'driver' ? 'conductor' : 'cliente';
+
+const fromDbRole = (rol: string | null | undefined): ChatRole =>
+  String(rol || '').toLowerCase() === 'conductor' ? 'driver' : 'customer';
+
+const mapRow = (row: any): ChatMessage => ({
+  id: String(row.id),
+  booking_id: String(row.id_reserva ?? row.booking_id ?? ''),
+  sender_id: row.id_remitente ?? row.sender_id ?? null,
+  sender_role: fromDbRole(row.rol_remitente ?? row.sender_role),
+  sender_name: row.remitente_nombre ?? row.sender_name ?? null,
+  message: String(row.mensaje ?? row.message ?? ''),
+  created_at: String(row.creado_en ?? row.created_at ?? ''),
+});
 
 /**
  * Obtiene los mensajes de una reserva ordenados cronológicamente.
@@ -44,10 +63,10 @@ export const fetchMessages = async (bookingId: string): Promise<ChatMessage[]> =
   try {
     const headers = await getSupabaseAuthHeaders();
     const url =
-      `${SUPABASE_URL}/rest/v1/chat_messages` +
-      `?booking_id=eq.${encodeURIComponent(bookingId)}` +
-      `&select=id,booking_id,sender_id,sender_role,sender_name,message,created_at` +
-      `&order=created_at.asc`;
+      `${SUPABASE_URL}/rest/v1/${CHAT_TABLE}` +
+      `?id_reserva=eq.${encodeURIComponent(bookingId)}` +
+      `&select=id,id_reserva,id_remitente,rol_remitente,remitente_nombre,mensaje,creado_en` +
+      `&order=creado_en.asc`;
 
     const res = await fetch(url, {
       method: 'GET',
@@ -55,17 +74,19 @@ export const fetchMessages = async (bookingId: string): Promise<ChatMessage[]> =
     });
     if (!res.ok) {
       const text = await res.text();
-      console.error('chatService.fetchMessages error:', res.status, text);
+      // 404/PGRST205: tabla aún no expuesta — no spamear LogBox rojo
+      if (res.status === 404 || text.includes('PGRST205')) {
+        console.warn('chatService.fetchMessages: tabla no disponible', res.status);
+      } else {
+        console.warn('chatService.fetchMessages error:', res.status, text);
+      }
       return [];
     }
     const data = await res.json();
     if (!Array.isArray(data)) return [];
-    return data.map((row: any) => ({
-      ...row,
-      message: String(row?.message ?? ''),
-    })) as ChatMessage[];
+    return data.map(mapRow);
   } catch (error) {
-    console.error('chatService.fetchMessages exception:', error);
+    console.warn('chatService.fetchMessages exception:', error);
     return [];
   }
 };
@@ -81,13 +102,13 @@ export const sendMessage = async (
 
   try {
     const headers = await getSupabaseAuthHeaders(true);
-    const url = `${SUPABASE_URL}/rest/v1/chat_messages`;
+    const url = `${SUPABASE_URL}/rest/v1/${CHAT_TABLE}`;
     const payload = {
-      booking_id: bookingId,
-      sender_id: senderId || null,
-      sender_role: senderRole,
-      sender_name: senderName || null,
-      message: message.trim(),
+      id_reserva: bookingId,
+      id_remitente: senderId || null,
+      rol_remitente: toDbRole(senderRole),
+      remitente_nombre: senderName || null,
+      mensaje: message.trim(),
     };
 
     const res = await fetch(url, {
@@ -98,14 +119,15 @@ export const sendMessage = async (
 
     if (!res.ok) {
       const text = await res.text();
-      console.error('chatService.sendMessage error:', res.status, text);
+      console.warn('chatService.sendMessage error:', res.status, text);
       return null;
     }
 
     const data = await res.json();
-    return Array.isArray(data) ? (data[0] as ChatMessage) : (data as ChatMessage);
+    const row = Array.isArray(data) ? data[0] : data;
+    return row ? mapRow(row) : null;
   } catch (error) {
-    console.error('chatService.sendMessage exception:', error);
+    console.warn('chatService.sendMessage exception:', error);
     return null;
   }
 };

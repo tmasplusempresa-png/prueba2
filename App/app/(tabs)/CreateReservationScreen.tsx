@@ -18,6 +18,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RootState } from '@/common/store';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { encodeTripTypeObservation } from '@/common/store/bookingsSlice';
 import { FareCalculator } from '@/common/actions/FareCalculator';
 import { isNearAirport } from '@/common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
@@ -402,47 +403,95 @@ const CreateReservationScreen = () => {
 
   /* Ya no hace falta re-sincronizar autocomplete: TextInput controlado por estado */
 
-  /* ── Cargar vehículos y tarifas desde car_types ── */
+  /* ── Cargar vehículos y tarifas desde categoria_vehiculo (aplicacioncore)
+       con fallback a vista car_types si existe. ── */
   useEffect(() => {
     (async () => {
       try {
-        const { data, error } = await supabase
-          .from('car_types')
-          .select('name,description,image,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,rate_per_hour_inter,valor_hora,min_fare,min_fare_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_type,umbral_intermunicipal_km')
-          .eq('is_active', true)
-          .order('created_at', { ascending: true });
-        if (error || !data?.length) return;
+        // 1) Tabla nativa
+        let rows: any[] | null = null;
+        const cat = await supabase
+          .from('categoria_vehiculo' as any)
+          .select(
+            'id,nombre,descripcion,imagen_url,tarifa_base,tarifa_base_inter,valor_km,valor_km_inter,valor_hora,valor_hora_inter,tarifa_minima,tarifa_minima_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_tipo,umbral_intermunicipal_km',
+          )
+          .eq('activo', true)
+          .order('id', { ascending: true });
+
+        if (!cat.error && cat.data?.length) {
+          rows = (cat.data as any[]).map((c) => ({
+            id: c.id,
+            name: c.nombre,
+            description: c.descripcion,
+            image: c.imagen_url,
+            base_price: c.tarifa_base,
+            base_price_inter: c.tarifa_base_inter,
+            price_per_km: c.valor_km,
+            price_per_km_inter: c.valor_km_inter,
+            // valor_hora es $/hora. FareCalculator usa rate_per_hour como $/min
+            // (legacy car_types) o valor_hora/60. No mapear valor_hora→rate_per_hour.
+            rate_per_hour: 0,
+            rate_per_hour_inter: 0,
+            valor_hora: c.valor_hora,
+            min_fare: c.tarifa_minima,
+            min_fare_inter: c.tarifa_minima_inter,
+            delta_aeropuerto: c.delta_aeropuerto,
+            delta_aeropuerto_prog: c.delta_aeropuerto_prog,
+            convenience_fee: c.convenience_fee,
+            convenience_fee_type: c.convenience_fee_tipo || 'flat',
+            umbral_intermunicipal_km: c.umbral_intermunicipal_km,
+          }));
+        } else {
+          // 2) Vista compat
+          const { data, error } = await supabase
+            .from('car_types')
+            .select(
+              // Solo columnas reales de la vista car_types (ver information_schema).
+              'name,description,image,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,min_fare,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,umbral_intermunicipal_km,capacity',
+            )
+            .eq('is_active', true)
+            .order('created_at', { ascending: true });
+          if (error || !data?.length) {
+            console.warn('[CreateReservation] sin categorias:', cat.error?.message || error?.message);
+            return;
+          }
+          rows = data as any[];
+        }
+
+        if (!rows?.length) return;
 
         const rates: Record<string, any> = {};
         const types: VehicleType[] = [];
 
-        data.forEach((car: any) => {
-          rates[car.name] = {
-            base_fare:                   parseFloat(car.base_price) || 0,
-            base_fare_inter:             parseFloat(car.base_price_inter) || 0,
-            rate_per_unit_distance:      parseFloat(car.price_per_km) || 0,
-            rate_per_unit_distance_inter:parseFloat(car.price_per_km_inter) || 0,
-            rate_per_hour:               parseFloat(car.rate_per_hour) || 0,
-            rate_per_hour_inter:         parseFloat(car.rate_per_hour_inter) || 0,
-            valor_hora:                  parseFloat(car.valor_hora) || 0,
-            min_fare:                    parseFloat(car.min_fare) || 0,
-            min_fare_inter:              parseFloat(car.min_fare_inter) || 0,
-            delta_aeropuerto:            parseFloat(car.delta_aeropuerto) || 0,
-            delta_aeropuerto_prog:       parseFloat(car.delta_aeropuerto_prog) || 0,
-            convenience_fees:            parseFloat(car.convenience_fee) || 0,
-            convenience_fee_type:        car.convenience_fee_type || 'flat',
-            umbral_intermunicipal_km:    parseFloat(car.umbral_intermunicipal_km) || 29,
+        rows.forEach((car: any) => {
+          const name = String(car.name || '').trim();
+          if (!name) return;
+          rates[name] = {
+            id: car.id != null ? Number(car.id) : null,
+            base_fare: parseFloat(car.base_price) || 0,
+            base_fare_inter: parseFloat(car.base_price_inter) || 0,
+            rate_per_unit_distance: parseFloat(car.price_per_km) || 0,
+            rate_per_unit_distance_inter: parseFloat(car.price_per_km_inter) || 0,
+            rate_per_hour: parseFloat(car.rate_per_hour) || 0,
+            rate_per_hour_inter: parseFloat(car.rate_per_hour_inter) || 0,
+            valor_hora: parseFloat(car.valor_hora) || 0,
+            min_fare: parseFloat(car.min_fare) || 0,
+            min_fare_inter: parseFloat(car.min_fare_inter) || 0,
+            delta_aeropuerto: parseFloat(car.delta_aeropuerto) || 0,
+            delta_aeropuerto_prog: parseFloat(car.delta_aeropuerto_prog) || 0,
+            convenience_fees: parseFloat(car.convenience_fee) || 0,
+            convenience_fee_type: car.convenience_fee_type || 'flat',
+            umbral_intermunicipal_km: parseFloat(car.umbral_intermunicipal_km) || 29,
           };
           types.push({
-            key: car.name,
-            label: car.name,
-            icon: VEHICLE_ICON_MAP[car.name] ?? 'car',
+            key: name,
+            label: name,
+            icon: VEHICLE_ICON_MAP[name] ?? 'car',
             description: String(car.description ?? '').trim(),
             imageUri: String(car.image ?? '').trim(),
           });
         });
 
-        // Orden estable: conocidos primero; categorías nuevas al final (created_at).
         const known = VEHICLE_DISPLAY_ORDER
           .map((name) => types.find((t) => t.key === name))
           .filter((t): t is VehicleType => !!t);
@@ -452,7 +501,7 @@ const CreateReservationScreen = () => {
 
         setVehicleRates(rates);
         setVehicleTypes([...known, ...unknown]);
-        setCarType(prev => (prev && rates[prev] ? prev : known[0]?.key ?? unknown[0]?.key ?? ''));
+        setCarType((prev) => (prev && rates[prev] ? prev : known[0]?.key ?? unknown[0]?.key ?? ''));
       } catch (e) {
         console.warn('[CreateReservation] Error cargando tarifas:', e);
       }
@@ -1383,41 +1432,45 @@ const CreateReservationScreen = () => {
 
       const bookingDateToUse = serviceType === 'reservation' && scheduledDate ? scheduledDate : new Date();
 
+      // Solo columnas que existen en la vista public.bookings (aplicacioncore).
+      // No hay trip_type: se guarda en observations + waypoints.
+      // No enviar: customer_status, customer_token, *_location JSON.
+      const tripLabel = tripType === 'Ida y Vuelta' ? 'Ida y Vuelta' : 'Ida';
+      const categoryId = vehicleRates?.[carType]?.id;
       const body = {
-        booking_type: serviceType,
+        booking_type: serviceType === 'reservation' ? 'scheduled' : 'immediate',
         status: 'PENDING',
-        customer_status: 'SEARCHING',
         reference: generateReference(),
         booking_date: bookingDateToUse.toISOString(),
         customer: userId,
         customer_id: userId,
-        customer_name: customerName,
-        customer_email: user?.email || '',
-        customer_contact: user?.mobile || '',
-        customer_token: user?.pushToken || user?.push_token || '',
+        customer_name: customerName || null,
+        customer_email: user?.email || null,
+        customer_contact: user?.mobile || profile?.mobile || null,
         pickup_address: origin?.title || 'Origen',
         pickup_lat: origin?.latitude,
         pickup_lng: origin?.longitude,
-        pickup_location: JSON.stringify({ lat: origin?.latitude, lng: origin?.longitude, address: origin?.title }),
         drop_address: destination?.title || 'Destino',
         drop_lat: destination?.latitude,
         drop_lng: destination?.longitude,
-        destination_location: JSON.stringify({ lat: destination?.latitude, lng: destination?.longitude, address: destination?.title }),
-        drop_location: JSON.stringify({ lat: destination?.latitude, lng: destination?.longitude, address: destination?.title }),
         distance: parseFloat(distance.toFixed(2)),
         duration: Math.round(duration),
-        trip_type: tripType,
         car_type: carType,
+        ...(Number.isFinite(categoryId) && categoryId > 0 ? { car_type_id: categoryId } : {}),
         estimate: clientPrice || 0,
         price: clientPrice || 0,
         trip_cost: driverPrice || 0,
         driver_share: driverPrice || 0,
-        // Piso de cobro (car_types.min_fare de la categoría elegida) para el
-        // trigger `calculate_total_cost`. Ver [[22-plan-fix-bug-min-fare]].
         min_fare_snapshot: vehicleRates?.[carType]?.min_fare || 0,
-        payment_mode: paymentMode,
+        payment_mode:
+          paymentMode === 'cash'
+            ? 'cash'
+            : paymentMode === 'nequi' || paymentMode === 'daviplata'
+              ? 'transfer'
+              : 'cash',
         prepaid: false,
-        observations: observations || null,
+        observations: encodeTripTypeObservation(tripLabel, observations),
+        waypoints: [{ trip_type: tripLabel }],
       };
       const resp = await fetch(`${SUPABASE_URL}/rest/v1/bookings`, {
         method: 'POST',

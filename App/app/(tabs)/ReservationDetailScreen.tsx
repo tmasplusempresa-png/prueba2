@@ -13,7 +13,9 @@ import StarRating from 'react-native-star-rating-widget';
 import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { formatBookingFareRange } from '@/constants/fare';
-import { fetchAndSyncUserRating } from '@/common/utils/userRating';
+import { fetchMyRatingForTrip, submitTripRating } from '@/common/utils/userRating';
+import { preferredConductorId } from '@/common/utils/driverIds';
+import { resolveCarTypeLabel, resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
 import {
@@ -151,13 +153,20 @@ const ReservationDetailScreen = () => {
   const [comment, setComment] = useState('');
   const [submittingRating, setSubmittingRating] = useState(false);
   const [ratingError, setRatingError] = useState<string | null>(null);
+  // Calificación propia desde tabla `calificacion` (ya no bookings.driver_rating)
+  const [myGivenRating, setMyGivenRating] = useState(0);
+  const [myGivenReview, setMyGivenReview] = useState('');
 
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
 
+  const myPersonaId = preferredConductorId(user, profile) || profile?.id || null;
   const userId = user?.auth_id || user?.id || profile?.id;
   const isDriverOnTrip = !!(
     reservation &&
-    (reservation.driver === userId || reservation.driver_id === userId)
+    (reservation.driver === userId ||
+      reservation.driver_id === userId ||
+      (myPersonaId &&
+        (reservation.driver === myPersonaId || reservation.driver_id === myPersonaId)))
   );
 
   const accountType = String(
@@ -176,14 +185,6 @@ const ReservationDetailScreen = () => {
   const driverId = reservation?.driver || reservation?.driver_id || null;
   const customerId = reservation?.customer_id || reservation?.customer || null;
 
-  // Cliente califica conductor → driver_rating / review
-  // Conductor califica cliente → customer_rating / customer_review
-  const myGivenRating = isDriverAccount
-    ? Number(reservation?.customer_rating) || 0
-    : Number(reservation?.driver_rating) || 0;
-  const myGivenReview = isDriverAccount
-    ? (reservation?.customer_review || '')
-    : (reservation?.review || reservation?.driver_review || '');
   const hasRated = myGivenRating >= 1;
   // Cliente puede calificar al completar (aunque falte driver_id en BD).
   // Conductor necesita customerId para sincronizar promedio del cliente.
@@ -199,7 +200,7 @@ const ReservationDetailScreen = () => {
       'Conductor';
     return {
       name,
-      category: reservation?.car_type || 'N/A',
+      category: resolveCarTypeLabel(reservation) || 'N/A',
       plate: driverInfo?.plate || reservation?.plate_number || reservation?.vehicle_number || 'N/A',
       make: driverInfo?.make || reservation?.vehicle_make || 'N/A',
       model: driverInfo?.model || reservation?.vehicle_model || reservation?.car_model || 'N/A',
@@ -207,6 +208,12 @@ const ReservationDetailScreen = () => {
       photo: driverInfo?.photo || reservation?.driver_image || null,
     };
   }, [driverInfo, reservation]);
+
+  const tripTypeLabel = useMemo(() => resolveTripTypeLabel(reservation), [reservation]);
+  const [categoryFromId, setCategoryFromId] = useState<string | null>(null);
+  const categoryLabel = useMemo(() => {
+    return resolveCarTypeLabel(reservation) || categoryFromId || '';
+  }, [reservation, categoryFromId]);
 
   const refreshBooking = useCallback(async () => {
     const id = paramReservation?.id;
@@ -227,8 +234,71 @@ const ReservationDetailScreen = () => {
 
   useEffect(() => {
     setReservation(paramReservation);
+    setCategoryFromId(null);
     refreshBooking();
   }, [paramReservation, refreshBooking]);
+
+  // Si car_type viene vacío pero hay car_type_id, resolver nombre desde categoria_vehiculo
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (resolveCarTypeLabel(reservation)) {
+        setCategoryFromId(null);
+        return;
+      }
+      const catId = reservation?.car_type_id ?? reservation?.id_categoria;
+      if (catId == null || catId === '') return;
+      try {
+        const headers = await getSupabaseAuthHeaders();
+        const url =
+          `${SUPABASE_URL}/rest/v1/categoria_vehiculo` +
+          `?id=eq.${encodeURIComponent(String(catId))}&select=nombre&limit=1`;
+        const res = await fetch(url, { headers });
+        if (!res.ok) return;
+        const rows = await res.json();
+        const nombre = Array.isArray(rows) ? rows[0]?.nombre : null;
+        if (!cancelled && nombre) setCategoryFromId(String(nombre));
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reservation?.car_type, reservation?.car_type_id, reservation?.id_categoria]);
+
+  // Cargar calificación propia desde `calificacion` (no columnas legacy en bookings)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const reservaId = reservation?.id;
+      const raterId = myPersonaId || profile?.id;
+      if (!reservaId || !raterId) {
+        setMyGivenRating(0);
+        setMyGivenReview('');
+        return;
+      }
+      try {
+        const mine = await fetchMyRatingForTrip(String(reservaId), String(raterId));
+        if (cancelled) return;
+        if (mine && mine.puntaje >= 1) {
+          setMyGivenRating(mine.puntaje);
+          setMyGivenReview(mine.comentario || '');
+        } else {
+          setMyGivenRating(0);
+          setMyGivenReview('');
+        }
+      } catch {
+        if (!cancelled) {
+          setMyGivenRating(0);
+          setMyGivenReview('');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reservation?.id, myPersonaId, profile?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -383,22 +453,63 @@ const ReservationDetailScreen = () => {
         let color: string | null =
           reservation.vehicle_color || reservation.car_color || null;
 
+        const pickCarFields = (car: any) => {
+          if (!car) return;
+          plate =
+            plate ||
+            car.plate ||
+            car.placa ||
+            car.vehicle_number ||
+            null;
+          make =
+            make ||
+            car.make ||
+            car.marca ||
+            car.vehicle_make ||
+            null;
+          model =
+            model ||
+            car.model ||
+            car.modelo ||
+            car.vehicle_model ||
+            null;
+          color =
+            color ||
+            car.color ||
+            car.vehicle_color ||
+            null;
+        };
+
+        // 1) Si la reserva tiene car_id, preferirlo
+        const carId = reservation?.car_id || reservation?.vehicle_id || null;
+        if ((!plate || !make || !model || !color) && carId) {
+          const byIdUrl =
+            `${SUPABASE_URL}/rest/v1/cars?id=eq.${encodeURIComponent(String(carId))}` +
+            `&select=*&limit=1`;
+          const byIdRes = await fetch(byIdUrl, { headers });
+          if (byIdRes.ok) {
+            const rows = await byIdRes.json();
+            pickCarFields(Array.isArray(rows) ? rows[0] : null);
+          }
+        }
+
+        // 2) Fallback: vehículo activo / más reciente del conductor
         if (!plate || !make || !model || !color) {
           const carUrl =
             `${SUPABASE_URL}/rest/v1/cars` +
             `?driver_id=eq.${encodeURIComponent(driverId)}` +
-            `&select=plate,make,model,color,vehicle_number,vehicle_make,vehicle_model,vehicle_color` +
-            `&order=is_active.desc,created_at.desc&limit=1`;
+            `&select=*` +
+            `&order=is_active.desc.nullslast,created_at.desc&limit=1`;
           const carRes = await fetch(carUrl, { headers });
           if (carRes.ok) {
             const cars = await carRes.json();
-            const car = Array.isArray(cars) ? cars[0] : null;
-            if (car) {
-              plate = plate || car.plate || car.vehicle_number || null;
-              make = make || car.make || car.vehicle_make || null;
-              model = model || car.model || car.vehicle_model || null;
-              color = color || car.color || car.vehicle_color || null;
-            }
+            pickCarFields(Array.isArray(cars) ? cars[0] : null);
+          } else {
+            console.warn(
+              '[ReservationDetail] cars fetch failed:',
+              carRes.status,
+              await carRes.text().catch(() => ''),
+            );
           }
         }
 
@@ -460,11 +571,11 @@ Te confirmo, estos son los datos de tu servicio:
 *Origen:* ${reservation.pickup_address}
 *Destino:* ${reservation.drop_address}
 *Cliente:* ${reservation.customer_name}
-*Categoría:* ${reservation.car_type || 'N/A'}
+*Categoría:* ${categoryLabel || 'N/A'}
 *Valor estimado:* ${formatBookingFareRange(reservation)}
 *Distancia estimada:* ${reservation.distance?.toFixed?.(2) ?? reservation.distance} km
 *Tiempo Estimado:* ${reservation.duration} min
-*Recorrido:* ${reservation.trip_type}
+*Recorrido:* ${tripTypeLabel}
 `;
   };
 
@@ -489,45 +600,36 @@ Te confirmo, estos son los datos de tu servicio:
       setRatingError('Selecciona de 1 a 5 estrellas.');
       return;
     }
+    const raterId = myPersonaId || profile?.id;
+    const ratedId = isDriverAccount ? customerId : driverId;
+    if (!reservation?.id || !raterId) {
+      setRatingError('No se pudo identificar tu perfil.');
+      return;
+    }
+    if (!ratedId) {
+      setRatingError(
+        isDriverAccount
+          ? 'No hay cliente para calificar.'
+          : 'No hay conductor para calificar.',
+      );
+      return;
+    }
+
     setSubmittingRating(true);
     setRatingError(null);
     try {
-      const headers = await getSupabaseAuthHeaders(true);
-      const body = isDriverAccount
-        ? {
-            customer_rating: Math.round(stars),
-            customer_review: comment.trim() || null,
-          }
-        : {
-            driver_rating: Math.round(stars),
-            review: comment.trim() || null,
-          };
+      const result = await submitTripRating({
+        reservaId: String(reservation.id),
+        ratedPersonaId: String(ratedId),
+        raterPersonaId: String(raterId),
+        puntaje: Math.round(stars),
+        comentario: comment.trim() || null,
+        ratedRole: isDriverAccount ? 'customer' : 'driver',
+      });
+      if (!result.ok) throw new Error(result.error || 'Error al guardar');
 
-      const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}`,
-        {
-          method: 'PATCH',
-          headers: { ...headers, Prefer: 'return=representation' },
-          body: JSON.stringify(body),
-        },
-      );
-      if (!res.ok) throw new Error(await res.text());
-
-      const ratedUserId = isDriverAccount ? customerId : driverId;
-      if (ratedUserId) {
-        await fetchAndSyncUserRating(
-          ratedUserId,
-          isDriverAccount ? 'customer' : 'driver',
-          { syncToProfile: true },
-        );
-      }
-
-      const rows = await res.json();
-      if (Array.isArray(rows) && rows[0]) {
-        setReservation(rows[0]);
-      } else {
-        setReservation((prev: any) => ({ ...prev, ...body }));
-      }
+      setMyGivenRating(Math.round(stars));
+      setMyGivenReview(comment.trim());
       setRatingModalVisible(false);
     } catch (e: any) {
       console.error('[ReservationDetail] submit rating:', e);
@@ -764,11 +866,11 @@ Te confirmo, estos son los datos de tu servicio:
               {!isDriverAccount ? (
                 <MetaItem label="Cliente" value={reservation.customer_name || 'N/A'} />
               ) : null}
-              <MetaItem label="Categoría" value={reservation.car_type || 'N/A'} />
+              <MetaItem label="Categoría" value={categoryLabel || 'N/A'} />
               <MetaItem label="Valor" value={formatBookingFareRange(reservation)} />
               <MetaItem label="Distancia" value={distanceLabel} />
               <MetaItem label="Tiempo" value={durationLabel} />
-              <MetaItem label="Recorrido" value={reservation.trip_type || 'N/A'} />
+              <MetaItem label="Recorrido" value={tripTypeLabel} />
             </View>
 
             <View style={s.paymentRow}>

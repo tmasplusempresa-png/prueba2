@@ -494,7 +494,11 @@ const DocumentsScreen = ({ navigation }: Props) => {
           useNativeDriver: true,
         }).start(() => setSuccessModalVisible(false));
       }, 2000);
-      showAlert('success', 'Perfil actualizado', `Se actualizaron: ${fieldsToUpdate.join(', ')}`);
+      showAlert(
+        'success',
+        'Perfil actualizado',
+        'Tus datos se guardaron correctamente.',
+      );
     } catch (err: any) {
       setLoading(false);
       console.error('[DocumentsScreen] handleUpdate error:', err?.message);
@@ -618,17 +622,20 @@ const DocumentsScreen = ({ navigation }: Props) => {
         >
           <Animated.View style={[styles.profileRing, { transform: [{ scale: imageScaleAnim }] }]}>
             <Image source={displayImage} style={styles.profileImage} />
+            {!imageUriVehicle && (
+              <View style={styles.cameraIcon}>
+                <Ionicons name="camera" size={14} color="#071822" />
+              </View>
+            )}
           </Animated.View>
-          <View style={styles.cameraIcon}>
-          <Ionicons name="camera" size={14} color="#071822" />
-          </View>
-          {imageUriVehicle && (
+          {imageUriVehicle ? (
             <View style={styles.imageChangedBadge}>
               <Ionicons name="checkmark-circle" size={14} color="#00E5FF" />
               <Text style={styles.imageChangedText}>Nueva foto seleccionada</Text>
             </View>
+          ) : (
+            <Text style={styles.avatarHint}>Toca para cambiar tu foto</Text>
           )}
-          <Text style={styles.avatarHint}>Toca para cambiar tu foto</Text>
         </TouchableOpacity>
 
         {/* User Info Card */}
@@ -945,6 +952,7 @@ const createStyles = (isDarkMode: boolean) =>
       borderRadius: 48,
       padding: 2.5,
       backgroundColor: "#00E5FF",
+      position: "relative",
     },
     profileImage: {
       width: 91,
@@ -954,8 +962,8 @@ const createStyles = (isDarkMode: boolean) =>
     },
     cameraIcon: {
       position: "absolute",
-      bottom: 22,
-      right: "36%",
+      bottom: 2,
+      right: 2,
       width: 28,
       height: 28,
       borderRadius: 14,
@@ -964,6 +972,7 @@ const createStyles = (isDarkMode: boolean) =>
       justifyContent: "center",
       borderWidth: 2,
       borderColor: "#051A26",
+      zIndex: 2,
     },
     imageChangedBadge: {
       flexDirection: "row",
@@ -972,7 +981,7 @@ const createStyles = (isDarkMode: boolean) =>
       paddingHorizontal: 10,
       paddingVertical: 4,
       borderRadius: 10,
-      marginTop: 8,
+      marginTop: 10,
       borderWidth: 1,
       borderColor: "rgba(0, 229, 255, 0.25)",
     },

@@ -114,12 +114,30 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
     console.warn('[driverLocationTask] error guardando respaldo local:', e);
   }
 
-  // RLS está desactivado en booking_tracking — anon key es suficiente.
+  // Insert con JWT del usuario (anon no tiene GRANT en booking_tracking).
+  // Columnas reales: booking_id, driver_id, lat, lng, speed, heading — sin accuracy.
+  let accessToken = SUPABASE_ANON_KEY;
+  try {
+    const session = await getSafeSession();
+    if (session?.access_token) accessToken = session.access_token;
+  } catch (e) {
+    console.warn('[driverLocationTask] sin sesión para insert:', e);
+  }
+
+  const speed =
+    typeof latest.coords.speed === 'number' && latest.coords.speed >= 0
+      ? latest.coords.speed
+      : null;
+  const heading =
+    typeof latest.coords.heading === 'number' && latest.coords.heading >= 0
+      ? latest.coords.heading
+      : null;
+
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Authorization': `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal',
     },
@@ -128,7 +146,8 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
       driver_id: driverId,
       lat,
       lng,
-      accuracy: accuracy ?? null,
+      ...(speed != null ? { speed } : {}),
+      ...(heading != null ? { heading } : {}),
     }),
   });
 

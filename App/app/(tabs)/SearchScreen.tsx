@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+﻿import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -226,7 +226,7 @@ export default function FavoritesScreen({ navigation }: Props) {
     if (!selectedAddress || !supabaseUserId) return;
     // Validar límite de 5 al marcar como favorito
     if (isFavorite && !selectedAddress.isFavorite && favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
     try {
@@ -243,7 +243,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       if (!resp.ok) {
         const err = await resp.text();
         if (err.includes('máximo 5')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           showAlert('error', 'Error', 'No se pudo actualizar el lugar.');
         }
@@ -254,7 +254,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       );
     } catch (e) {
       console.warn('[FavPlaces] handleSaveFavorite error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
     setSelectedAddress(null);
     setIsFavorite(false);
@@ -274,7 +274,7 @@ export default function FavoritesScreen({ navigation }: Props) {
   const handleSearchSelect = async (data: any, details: any = null) => {
     if (!details || !supabaseUserId) return;
     if (favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
     const description = details.formatted_address || data.description;
@@ -306,7 +306,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       if (!resp.ok) {
         const err = await resp.text();
         if (err.includes('máximo 5') || err.includes('P0001')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           console.warn('[FavPlaces] insert error:', err);
           showAlert('error', 'Error', 'No se pudo guardar el lugar.');
@@ -327,7 +327,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       setAddresses(prev => [newAddr, ...prev]);
     } catch (e) {
       console.warn('[FavPlaces] handleSearchSelect error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
     setSearchQuery("");
     searchAutocompleteRef.current?.setAddressText("");
@@ -340,7 +340,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       return;
     }
     if (!newAddressDetails) {
-      showAlert('error', 'Error', 'Por favor, selecciona una direcci�n v�lida.');
+      showAlert('error', 'Error', 'Por favor, selecciona una dirección válida.');
       return;
     }
     if (!supabaseUserId) {
@@ -348,7 +348,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       return;
     }
     if (favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
 
@@ -370,8 +370,8 @@ export default function FavoritesScreen({ navigation }: Props) {
       });
       if (!resp.ok) {
         const err = await resp.text();
-        if (err.includes('m�ximo 5') || err.includes('P0001')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+        if (err.includes('máximo 5') || err.includes('P0001')) {
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           console.warn('[FavPlaces] modal insert error:', err);
           showAlert('error', 'Error', 'No se pudo guardar el lugar.');
@@ -392,7 +392,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       setAddresses(prev => [newAddr, ...prev]);
     } catch (e) {
       console.warn('[FavPlaces] handleAddAddress error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
 
     setNewAddressLabel("");
@@ -442,7 +442,7 @@ export default function FavoritesScreen({ navigation }: Props) {
 
   // ── DELETE lugar de Supabase ──
   const handleDeleteAddress = (id: string) => {
-    showAlert('confirm', 'Eliminar Direcci�n', '�Est�s seguro de que deseas eliminar esta direcci�n?', [
+    showAlert('confirm', 'Eliminar dirección', '¿Está Seguro de eliminar esta dirección favorita?', [
       { text: 'Cancelar', style: 'cancel', onPress: () => setAlertVisible(false) },
       {
         text: 'Eliminar',
@@ -460,7 +460,7 @@ export default function FavoritesScreen({ navigation }: Props) {
             setAddresses(prev => prev.filter(a => a.id !== id));
           } catch (e) {
             console.warn('[FavPlaces] delete error:', e);
-            showAlert('error', 'Error', 'Error de conexi�n al eliminar.');
+            showAlert('error', 'Error', 'Error de conexión al eliminar.');
           }
         },
       },
@@ -624,7 +624,7 @@ export default function FavoritesScreen({ navigation }: Props) {
           style={styles.addButton}
           onPress={() => {
             if (favoriteCount >= MAX_FAVORITES) {
-              showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+              showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
               return;
             }
             setModalVisible(true);

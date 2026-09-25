@@ -30,7 +30,8 @@ import { notifyIncomingCall } from '@/common/services/NotificationService';
 import { shareTrip } from '@/common/utils/tripShare';
 import { addActualsToBooking } from '@/common/other/sharedFunctions';
 import { formatBookingFareRange } from '@/constants/fare';
-import { fetchAndSyncUserRating } from '@/common/utils/userRating';
+import { submitTripRating } from '@/common/utils/userRating';
+import { preferredConductorId } from '@/common/utils/driverIds';
 import { useChatUnreadCount } from '@/hooks/useChatUnreadCount';
 import FloatingChatModal from '@/components/FloatingChatModal';
 import ProfilePhotoPreview from '@/components/ProfilePhotoPreview';
@@ -138,6 +139,7 @@ const ReservationTripScreen = () => {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
   const user = useSelector((s: RootState) => s.auth.user) as any;
+  const profile = useSelector((s: RootState) => s.auth.profile) as any;
 
   const reservation = (route.params as any)?.reservation;
   
@@ -662,10 +664,10 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // Confirm arrival at pickup
+  // Confirm arrival at pickup — máximo 200 m
   const handleConfirmArrival = async () => {
-    if (distanceToPickup !== null && distanceToPickup > 500) {
-      showAlert('warning', 'Aún estás lejos', 'Debes estar a menos de 500 metros del punto de recogida para confirmar tu llegada.');
+    if (distanceToPickup !== null && distanceToPickup > 200) {
+      showAlert('warning', 'Aún estás lejos', 'Debes estar a menos de 200 metros del punto de recogida para confirmar tu llegada.');
       return;
     }
     setLoading(true);
@@ -793,58 +795,50 @@ const ReservationTripScreen = () => {
     );
   };
 
-  // � Verificar si ya existe OTP guardado (cuando re-entra como conductor)
+  // Restaurar OTP + countdown al reentrar (usa driver_arrived_time, no otp_timer_started_at)
   useEffect(() => {
     const loadExistingOtp = async () => {
       try {
-        // Primero intentar usar OTP del objeto reservation (si vino en params)
-        if ((reservation as any)?.otp && !currentOtp) {
-          const otpString = String((reservation as any).otp).trim();
-          console.log('✅ [INIT] OTP desde reservation params:', otpString);
-          setCurrentOtp(otpString);
+        const { data, error } = await (supabase as any)
+          .from('bookings')
+          .select('otp, otp_verified, driver_arrived_time, status')
+          .eq('id', reservation?.id)
+          .single();
 
-          if ((reservation as any).otp_verified) {
-            setOtpVerified(true);
-            console.log('✅ [INIT] OTP ya verificado');
+        if (error || !data) {
+          // Fallback: OTP en params de navegación
+          if ((reservation as any)?.otp && !currentOtp) {
+            setCurrentOtp(String((reservation as any).otp).trim());
+            if ((reservation as any).otp_verified) setOtpVerified(true);
           }
           return;
         }
 
-        // Si no está en params, cargar desde BD
-        const { data, error } = await (supabase as any)
-          .from('bookings')
-          .select('otp, otp_verified, otp_timer_started_at, status')
-          .eq('id', reservation?.id)
-          .single();
-
-        if (error || !data) return;
-
-        // Si hay OTP guardado
         if (data.otp && !currentOtp) {
-          const otpString = String(data.otp).trim();
-          console.log('✅ [RELOAD] OTP encontrado:', otpString);
-          setCurrentOtp(otpString);
+          setCurrentOtp(String(data.otp).trim());
+        }
+        if (data.otp_verified) {
+          setOtpVerified(true);
+          setWaitingForOtpTimer(false);
+          return;
+        }
 
-          // Si ya fue verificado
-          if (data.otp_verified) {
-            setOtpVerified(true);
-            console.log('✅ [RELOAD] OTP ya verificado');
-          }
-
-          // Si timer está activo, calcular si aún queda tiempo
-          if (data.otp_timer_started_at) {
-            const startTime = new Date(data.otp_timer_started_at).getTime();
-            const elapsed = (Date.now() - startTime) / 1000;
+        // Countdown persistente: 3 min desde driver_arrived_time
+        const arrivedAt = data.driver_arrived_time || (reservation as any)?.driver_arrived_time;
+        if (arrivedAt && String(data.status || '').toUpperCase() === 'ARRIVED') {
+          const startMs = new Date(arrivedAt).getTime();
+          if (Number.isFinite(startMs)) {
+            localTimerStart.current = startMs;
+            const elapsed = (Date.now() - startMs) / 1000;
             const remaining = Math.min(180, Math.max(0, 180 - elapsed));
             setDriverCountdown(Math.ceil(remaining));
-            console.log(`✅ [RELOAD] Timer activo, remaining: ${remaining.toFixed(1)}s`);
-
-            if (!data.otp_verified && remaining > 0) {
-              // Aún queda tiempo en el countdown
+            if (remaining > 0) {
               setWaitingForOtpTimer(true);
+              otpTimer.startTimer(startMs).catch(() => {});
+              console.log(`[RELOAD] Countdown OTP restante: ${remaining.toFixed(0)}s`);
             } else {
-              // Timer ya expiró o ya verificado - mostrar botón de código
               setWaitingForOtpTimer(false);
+              console.log('[RELOAD] Countdown OTP ya expiró — se puede revelar código');
             }
           }
         }
@@ -856,10 +850,9 @@ const ReservationTripScreen = () => {
     if (reservation?.id && phase === 'ARRIVED_AT_PICKUP') {
       loadExistingOtp();
     }
-  }, [reservation?.id, phase, currentOtp]);
+  }, [reservation?.id, phase]);
 
-  // ⏲️ Driver Countdown - Calcula localmente desde otp_timer_started_at de Supabase
-  // Si Supabase aún no devuelve el timestamp, usa localTimerStart como fallback
+  // Countdown local anclado a driver_arrived_time / localTimerStart
   useEffect(() => {
     if (!waitingForOtpTimer) {
       setDriverCountdown(null);
@@ -867,11 +860,15 @@ const ReservationTripScreen = () => {
     }
 
     const updateCountdown = () => {
-      // Preferir timestamp local (mismo instante escrito a Supabase); fallback a DB
-      const startTime = localTimerStart.current
-        ?? (otpTimer.timerStartedAt ? new Date(otpTimer.timerStartedAt).getTime() : null);
+      const startTime =
+        localTimerStart.current ??
+        (otpTimer.timerStartedAt ? new Date(otpTimer.timerStartedAt).getTime() : null) ??
+        (reservation?.driver_arrived_time
+          ? new Date(reservation.driver_arrived_time).getTime()
+          : null);
 
-      if (!startTime) {
+      if (!startTime || !Number.isFinite(startTime)) {
+        // Sin marca de llegada no revelar OTP (fail-closed)
         setDriverCountdown(180);
         return;
       }
@@ -881,16 +878,16 @@ const ReservationTripScreen = () => {
       setDriverCountdown(Math.ceil(remaining));
 
       if (remaining <= 0) {
-        console.log('⏰ [DRIVER COUNTDOWN] Tiempo agotado - mostrando botón de código');
+        console.log('⏰ [DRIVER COUNTDOWN] Tiempo agotado - revelar código');
         setWaitingForOtpTimer(false);
       }
     };
 
     updateCountdown();
-    const interval = setInterval(updateCountdown, 100);
+    const interval = setInterval(updateCountdown, 250);
 
     return () => clearInterval(interval);
-  }, [waitingForOtpTimer, otpTimer.timerStartedAt]);
+  }, [waitingForOtpTimer, otpTimer.timerStartedAt, reservation?.driver_arrived_time]);
 
   // 🆕 Limpiar entrada OTP cuando se sale de ARRIVED_AT_PICKUP
   useEffect(() => {
@@ -1007,13 +1004,14 @@ const ReservationTripScreen = () => {
         id: reservation.id,
         startTime: tripStartTimestamp.current || Date.now(),
         carType: reservation.car_type,
+        booking_type: reservation.booking_type,
         status: 'COMPLETE',
-        driver_status: 'COMPLETE',
-        customer_status: 'COMPLETE',
       };
-      // isScheduled: true — todo viaje en esta pantalla es una reserva programada.
-      // isProtocol/tollsTotal/parking: deuda pendiente, ver [[10-deuda-tecnica]] #26.
-      const updated = await addActualsToBooking(bookingForActuals, { isScheduled: true });
+      // Solo programadas llevan isScheduled (delta programado). Inmediato = false.
+      const isScheduled =
+        String(reservation.booking_type || '').toLowerCase() === 'scheduled' ||
+        String(reservation.booking_type || '').toLowerCase() === 'reservation';
+      const updated = await addActualsToBooking(bookingForActuals, { isScheduled });
       completedBookingRef.current = updated;
       setFinalPrice(Number(updated?.price ?? updated?.trip_cost ?? 0));
       setFinalDistanceKm(Number(updated?.distance ?? 0));
@@ -1028,7 +1026,7 @@ const ReservationTripScreen = () => {
     }
   };
 
-  // Guardar la calificación del cliente y continuar con el flujo de finalización
+  // Guardar calificación del cliente en `calificacion` (no bookings.customer_rating)
   const submitCustomerRating = async () => {
     if (customerRating < 1) {
       showAlert('warning', 'Calificación requerida', 'Califica al cliente con 1 a 5 estrellas antes de finalizar el viaje.');
@@ -1037,34 +1035,26 @@ const ReservationTripScreen = () => {
     setSubmittingRating(true);
     try {
       const customerId = reservation.customer_id || reservation.customer;
-      const ratingValue = Math.round(customerRating);
-      const headers = await getSupabaseAuthHeaders(true);
-
-      // Update vía REST directo (evita cuelgue del cliente supabase-js)
-      const updateRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}`,
-        {
-          method: 'PATCH',
-          headers: { ...headers, Prefer: 'return=minimal' },
-          body: JSON.stringify({
-            customer_rating: ratingValue,
-            customer_review: customerReview?.trim() || null,
-          }),
-        },
-      );
-      if (!updateRes.ok) {
-        const text = await updateRes.text();
-        throw new Error(text || `HTTP ${updateRes.status}`);
+      const raterId =
+        preferredConductorId(user, profile) ||
+        profile?.id ||
+        user?.id ||
+        reservation.driver ||
+        reservation.driver_id;
+      if (!customerId || !raterId) {
+        showAlert('error', 'Error', 'No se pudo identificar cliente o conductor para calificar.');
+        return;
       }
 
-      // Recalcular promedio del cliente (no bloquea el flujo si falla)
-      if (customerId) {
-        try {
-          await fetchAndSyncUserRating(String(customerId), 'customer', { syncToProfile: true });
-        } catch (e) {
-          console.warn('No se pudo recalcular el promedio del cliente:', e);
-        }
-      }
+      const result = await submitTripRating({
+        reservaId: String(reservation.id),
+        ratedPersonaId: String(customerId),
+        raterPersonaId: String(raterId),
+        puntaje: Math.round(customerRating),
+        comentario: customerReview?.trim() || null,
+        ratedRole: 'customer',
+      });
+      if (!result.ok) throw new Error(result.error || 'Error al guardar');
 
       setRatingModalVisible(false);
       finalizeTrip();
@@ -1086,13 +1076,16 @@ const ReservationTripScreen = () => {
   const finalizeTrip = async () => {
     setLoading(true);
     try {
+      // Asegurar COMPLETE en BD (addActuals ya lo intenta; refuerzo si falló parcial)
+      try {
+        await updateBookingStatus('COMPLETE', {
+          trip_end_time: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn('[finalizeTrip] status COMPLETE refuerzo:', e);
+      }
       setPhase('TRIP_COMPLETE');
-      // Restore the default driver-online notification
       showDriverActiveNotification().catch(() => {});
-      // ⛔ "Viaje completado": la envía SOLO el servidor. El Database Webhook
-      // `bookingWebhookDispatcher` despacha el push de COMPLETE al cliente
-      // ("Servicio finalizado"). Enviarla también aquí duplicaba la notificación.
-      // Fuente única de verdad = el dispatcher del servidor.
       showAlert('success',
         '¡Viaje Completado!',
         `La reserva ${reservation.reference} ha sido completada exitosamente.`,
@@ -1290,7 +1283,7 @@ const ReservationTripScreen = () => {
   };
 
   const currentConfig = phaseConfig[phase];
-  const canConfirmArrival = distanceToPickup !== null && distanceToPickup <= 500;
+  const canConfirmArrival = distanceToPickup !== null && distanceToPickup <= 200;
 
   return (
     <View style={s.root}>

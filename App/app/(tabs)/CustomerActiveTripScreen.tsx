@@ -15,7 +15,7 @@ import axios from 'axios';
 import Mapbox, { MapboxStyles } from '@/config/MapboxConfig';
 import { getMapboxAccessToken } from '@/config/AppConfig';
 import { RootState } from '@/common/store';
-import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { useBookingDriverPosition } from '@/hooks/useBookingDriverPosition';
 import { useDriverSignalHealth, getPositionAgeSeconds } from '@/hooks/useDriverSignalHealth';
 import originIcon from '../../assets/images/rsz_2red_pin.png';
@@ -29,7 +29,8 @@ import {
   isActiveTripStatus,
   notifyTripStateChange,
 } from '@/common/services/ActiveTripNotificationService';
-import { fetchAndSyncUserRating } from '@/common/utils/userRating';
+import { submitTripRating } from '@/common/utils/userRating';
+import { preferredConductorId } from '@/common/utils/driverIds';
 import { sendPushNotification } from '@/common/actions/NotificationService';
 import { haversineKm, formatDistanceAndEta, DistanceEtaState } from '@/common/services/DriverTrackingService';
 import { shareTrip } from '@/common/utils/tripShare';
@@ -117,6 +118,7 @@ const CustomerActiveTripScreen = () => {
   const route = useRoute();
   const insets = useSafeAreaInsets();
   const user = useSelector((s: RootState) => s.auth.user) as any;
+  const profile = useSelector((s: RootState) => s.auth.profile) as any;
   
   const { bookingId, booking: initialBooking } = (route.params as any) || {};
 
@@ -307,7 +309,6 @@ const CustomerActiveTripScreen = () => {
     setCancelling(true);
     try {
       const headers = await getSupabaseAuthHeaders(true);
-      const now = new Date();
       const reason = 'Cliente canceló el viaje';
       const url = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${booking.id}`;
       const res = await fetch(url, {
@@ -315,8 +316,9 @@ const CustomerActiveTripScreen = () => {
         headers: { ...headers, Prefer: 'return=representation' },
         body: JSON.stringify({
           status: 'CANCELLED',
-          cancelled_by: 'customer',
-          cancellation_time: now.toLocaleTimeString('en-GB', { hour12: false }),
+          // Vista bookings: cancelled_by / reason (sin cancellation_time).
+          // Enum subyacente rol_persona → 'cliente' | 'conductor'.
+          cancelled_by: 'cliente',
           reason,
         }),
       });
@@ -346,7 +348,7 @@ const CustomerActiveTripScreen = () => {
     openAlertModal(setConfirmCancelVisible);
   }, [cancelling, openAlertModal]);
 
-  // ⭐ Enviar calificación del conductor
+  // ⭐ Enviar calificación del conductor (tabla calificacion)
   const handleSubmitDriverRating = useCallback(async () => {
     if (!booking?.id) return;
     if (driverRating < 1) {
@@ -359,35 +361,44 @@ const CustomerActiveTripScreen = () => {
     setSubmittingRating(true);
     try {
       const headers = await getSupabaseAuthHeaders(true);
-
-      const patchUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${booking.id}`;
-      const res = await fetch(patchUrl, {
-        method: 'PATCH',
-        headers: { ...headers, Prefer: 'return=representation' },
-        body: JSON.stringify({
-          driver_rating: driverRating,
-          review: driverReview?.trim() || null,
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-
-      // Recalcular promedio del conductor en users.rating
-      if (booking.driver_id) {
-        try {
-          await fetchAndSyncUserRating(booking.driver_id, 'driver', { syncToProfile: true });
-        } catch (avgErr) {
-          console.warn('⚠️ [RATING] No se pudo actualizar promedio del conductor:', avgErr);
-        }
+      if (!hasUserAuthHeader(headers)) {
+        Alert.alert('Sesión', 'Inicia sesión de nuevo para calificar.');
+        return;
       }
 
-      setBooking((prev: any) => prev ? { ...prev, driver_rating: driverRating, driver_review: driverReview?.trim() || null } : prev);
+      const raterId =
+        preferredConductorId(user, profile) ||
+        profile?.id ||
+        booking.customer ||
+        booking.customer_id;
+      const ratedId = booking.driver || booking.driver_id;
+      if (!raterId || !ratedId) {
+        Alert.alert('Error', 'No se pudo identificar cliente/conductor para calificar.');
+        return;
+      }
+
+      const result = await submitTripRating({
+        reservaId: String(booking.id),
+        ratedPersonaId: String(ratedId),
+        raterPersonaId: String(raterId),
+        puntaje: driverRating,
+        comentario: driverReview?.trim() || null,
+        ratedRole: 'driver',
+      });
+      if (!result.ok) throw new Error(result.error || 'Error al guardar');
+
+      setBooking((prev: any) =>
+        prev
+          ? { ...prev, driver_rating: driverRating, driver_review: driverReview?.trim() || null }
+          : prev,
+      );
     } catch (e: any) {
       console.error('❌ [RATING] Error al enviar calificación:', e);
       Alert.alert('Error', 'No se pudo enviar tu calificación. Inténtalo de nuevo.');
     } finally {
       setSubmittingRating(false);
     }
-  }, [booking?.id, booking?.driver_id, driverRating, driverReview]);
+  }, [booking?.id, booking?.driver, booking?.driver_id, booking?.customer, booking?.customer_id, driverRating, driverReview, user, profile]);
 
   // Fetch booking details
   const fetchBooking = useCallback(async () => {
@@ -764,31 +775,30 @@ const CustomerActiveTripScreen = () => {
     }
   }, [booking?.driver_rating, booking?.driver_review]);
 
-  // ⏲️ Contador de OTP - Calcular localmente cada segundo
+  // Contador OTP del cliente: 3 min desde driver_arrived_time (columna real)
   useEffect(() => {
-    if (!booking?.otp_timer_started_at) {
+    const arrivedAt = booking?.driver_arrived_time;
+    const status = String(booking?.status || '').toUpperCase();
+    if (!arrivedAt || booking?.otp_verified || (status !== 'ARRIVED' && status !== 'ACCEPTED')) {
       setCountdown(null);
       return;
     }
 
     const updateCountdown = () => {
-      const startTime = new Date(booking.otp_timer_started_at).getTime();
-      const now = new Date().getTime();
-      const elapsed = (now - startTime) / 1000;
+      const startTime = new Date(arrivedAt).getTime();
+      if (!Number.isFinite(startTime)) {
+        setCountdown(null);
+        return;
+      }
+      const elapsed = (Date.now() - startTime) / 1000;
       const remaining = Math.min(180, Math.max(0, 180 - elapsed));
-      
-      console.log(`⏰ [COUNTDOWN] elapsed: ${elapsed.toFixed(1)}s, remaining: ${remaining.toFixed(1)}s`);
       setCountdown(Math.ceil(remaining));
     };
 
-    // Update inicial
     updateCountdown();
-
-    // Update cada 100ms para suavidad
-    const interval = setInterval(updateCountdown, 100);
-
+    const interval = setInterval(updateCountdown, 250);
     return () => clearInterval(interval);
-  }, [booking?.otp_timer_started_at]);
+  }, [booking?.driver_arrived_time, booking?.otp_verified, booking?.status]);
 
 
 
@@ -821,13 +831,16 @@ const CustomerActiveTripScreen = () => {
   }
 
   // Determinar si estamos en fase de espera de 3 minutos (conductor llegó, esperando código)
-  const isWaitingForCode = booking.otp_timer_started_at && !booking.otp_verified;
-  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| timer_started_at:', booking.otp_timer_started_at, '| verified:', booking.otp_verified);
+  const driverHasArrived =
+    String(booking.status || '').toUpperCase() === 'ARRIVED' ||
+    Boolean(booking.driver_arrived_time);
+  const isWaitingForCode = driverHasArrived && !booking.otp_verified;
+  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| arrived:', booking.driver_arrived_time, '| verified:', booking.otp_verified);
 
   const statusText = () => {
     if (booking.status === 'PENDING' || booking.status === 'NEW') return 'Buscando conductor...';
-    if (booking.status === 'ACCEPTED' && !booking.otp_timer_started_at) return 'Viaje aceptado';
-    if (booking.status === 'ACCEPTED' && booking.otp_timer_started_at) return 'Conductor ha llegado';
+    if (booking.status === 'ACCEPTED' && !booking.driver_arrived_time) return 'Viaje aceptado';
+    if (booking.status === 'ACCEPTED' && booking.driver_arrived_time) return 'Conductor ha llegado';
     if (booking.status === 'ARRIVED') return 'Conductor ha llegado';
     if (booking.status === 'IN_PROGRESS' || booking.status === 'STARTED' || booking.status === 'TRIP_STARTED') return 'Viaje en progreso';
     if (booking.status === 'COMPLETE') return '¡Viaje completado!';
@@ -1266,7 +1279,7 @@ const CustomerActiveTripScreen = () => {
         )}
 
         {/* Contador de OTP - Mostrar cuando hay timer activo y tiempo restante */}
-        {countdown !== null && countdown > 0 && booking.otp_timer_started_at && (
+        {countdown !== null && countdown > 0 && booking.driver_arrived_time && !booking.otp_verified && (
           <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
             <View style={[s.countdownCard, s.countdownCardCompact]}>
               <View style={s.countdownContentCompact}>
@@ -1452,7 +1465,7 @@ const CustomerActiveTripScreen = () => {
         )}
 
         {/* OTP Countdown - solo mientras espera el código */}
-        {booking.otp_timer_started_at && !booking.otp_verified && (
+        {booking.driver_arrived_time && !booking.otp_verified && String(booking.status || '').toUpperCase() === 'ARRIVED' && (
           <Animatable.View animation="fadeInUp" duration={450} delay={180} useNativeDriver>
             <OtpCountdownNotification 
               bookingId={bookingId}
@@ -1465,7 +1478,7 @@ const CustomerActiveTripScreen = () => {
         {/* Cancelar viaje — al final del scroll, solo antes de llegada del conductor */}
         {(() => {
           const st = booking.status;
-          const driverHasArrived = st === 'ARRIVED' || !!booking.otp_timer_started_at;
+          const arrived = st === 'ARRIVED' || !!booking.driver_arrived_time;
           const canCancel = st !== 'COMPLETE'
             && st !== 'CANCELLED'
             && st !== 'ACCEPTED'
@@ -1473,7 +1486,7 @@ const CustomerActiveTripScreen = () => {
             && st !== 'IN_PROGRESS'
             && st !== 'TRIP_STARTED'
             && !booking.otp_verified
-            && !driverHasArrived;
+            && !arrived;
           if (!canCancel) return null;
           return (
             <Animatable.View animation="fadeInUp" duration={400} useNativeDriver style={{ marginTop: 8, marginBottom: 24 }}>

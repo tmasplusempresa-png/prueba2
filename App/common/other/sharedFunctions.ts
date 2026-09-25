@@ -196,20 +196,28 @@ export const addActualsToBooking = async (
 
       if (carTypeRows?.length) {
         const ct: any = carTypeRows[0];
+        // Columnas reales de vista car_types (aplicacioncore): sin valor_hora.
+        // rate_per_hour canónico = $/minuto; si viene > 2000, tratar como $/hora.
+        const rawRpm = parseFloat(ct.rate_per_hour) || 0;
+        const rawRpmInter = parseFloat(ct.rate_per_hour_inter) || 0;
+        const toPerMinute = (rpm: number) => {
+          if (rpm > 0 && rpm <= 2000) return rpm;
+          if (rpm > 2000) return rpm / 60;
+          return 0;
+        };
         rates = {
-          rate_per_unit_distance:     parseFloat(ct.price_per_km)       || 0,
-          rate_per_unit_distance_inter: parseFloat(ct.price_per_km_inter) || 0,
-          rate_per_hour:              parseFloat(ct.rate_per_hour)       || 0,
-          rate_per_hour_inter:        parseFloat(ct.rate_per_hour_inter) || 0,
-          valor_hora:                 parseFloat(ct.valor_hora)          || 0,
-          base_fare:                  parseFloat(ct.base_price)          || 0,
-          base_fare_inter:            parseFloat(ct.base_price_inter)    || 0,
-          min_fare:                   parseFloat(ct.min_fare)            || 0,
-          min_fare_inter:             parseFloat(ct.min_fare_inter)      || 0,
-          delta_aeropuerto:           parseFloat(ct.delta_aeropuerto)    || 0,
-          delta_aeropuerto_prog:      parseFloat(ct.delta_aeropuerto_prog) || 0,
-          convenience_fees:           parseFloat(ct.convenience_fee)     || 0,
-          convenience_fee_type:       ct.convenience_fee_type            || 'flat',
+          rate_per_unit_distance:       parseFloat(ct.price_per_km) || parseFloat(ct.rate_per_unit_distance) || 0,
+          rate_per_unit_distance_inter: parseFloat(ct.price_per_km_inter) || parseFloat(ct.rate_per_unit_distance_inter) || 0,
+          rate_per_hour:                toPerMinute(rawRpm),
+          rate_per_hour_inter:          toPerMinute(rawRpmInter),
+          base_fare:                    parseFloat(ct.base_price) || parseFloat(ct.base_fare) || 0,
+          base_fare_inter:              parseFloat(ct.base_price_inter) || parseFloat(ct.base_fare_inter) || 0,
+          min_fare:                     parseFloat(ct.min_fare) || 0,
+          min_fare_inter:               parseFloat(ct.min_fare_inter) || 0,
+          delta_aeropuerto:             parseFloat(ct.delta_aeropuerto) || 0,
+          delta_aeropuerto_prog:        parseFloat(ct.delta_aeropuerto_prog) || 0,
+          convenience_fees:             parseFloat(ct.convenience_fee) || parseFloat(ct.convenience_fees) || 0,
+          convenience_fee_type:         ct.convenience_fee_type || 'flat',
         };
       } else {
         console.warn('[addActualsToBooking] car_types no encontrado para:', carTypeName);
@@ -256,7 +264,6 @@ export const addActualsToBooking = async (
             driver_id: booking.driver || booking.driver_id || null,
             lat: p.lat,
             lng: p.lng,
-            accuracy: p.accuracy,
             // Preservar el instante real de captura, no el de la subida —
             // si no, todos los puntos reconciliados caerían con el mismo
             // created_at (ahora) y arruinarían el orden cronológico que usa
@@ -283,7 +290,7 @@ export const addActualsToBooking = async (
     // undefined y `distance` siempre daba 0 sin ningún error visible.
     const { data: trackingRows, error: trackingError } = await supabase
       .from('booking_tracking' as any)
-      .select('lat, lng, created_at, accuracy')
+      .select('lat, lng, created_at')
       .eq('booking_id', booking.id)
       .order('created_at', { ascending: true });
 
@@ -400,37 +407,37 @@ export const addActualsToBooking = async (
     booking.coords = res.coords;
   }
 
-  // Actualizar en Supabase
+  // Actualizar en Supabase — solo columnas reales de public.bookings.
+  // No existen: total_trip_time, customer_status, driver_status, coords.
+  // Duración del viaje → columna `duration` (segundos o minutos según vista;
+  // la app calcula en segundos; si duration es minutos, se redondea).
   try {
-    await supabase
+    const durationSec = Number(booking.total_trip_time) || 0;
+    const { error } = await supabase
       .from('bookings')
       .update({
         trip_cost:        booking.trip_cost,
         driver_share:     booking.driver_share,
-        // `price` es el campo que realmente lee la pantalla del cliente
-        // (`booking.price || booking.estimate`) y `estimate` el fallback —
-        // ninguno de los dos se tocaba acá antes, quedaban con la
-        // cotización original de creación para siempre. Ahora ambos
-        // reflejan el precio cliente final (conductor + margen 25%, con su
-        // propio piso — ver arriba), consistente con `trip_cost`.
         price:            booking.price,
         estimate:         booking.estimate,
         convenience_fees: booking.convenience_fees,
         distance:         booking.distance,
+        duration:         durationSec > 0 ? Math.round(durationSec / 60) || 1 : booking.duration,
         trip_end_time:    booking.trip_end_time,
-        total_trip_time:  booking.total_trip_time,
-        drop_lat:         booking.drop?.lat,
-        drop_lng:         booking.drop?.lng,
-        drop_address:     booking.drop?.add,
-        coords:           booking.coords,
-        status:           booking.status,
-        driver_status:    booking.driver_status,
-        customer_status:  booking.customer_status,
+        drop_lat:         booking.drop?.lat ?? booking.drop_lat,
+        drop_lng:         booking.drop?.lng ?? booking.drop_lng,
+        drop_address:     booking.drop?.add ?? booking.drop_address,
+        status:           booking.status || 'COMPLETE',
       } as any)
       .eq('id', booking.id);
-    console.log('Reserva actualizada en Supabase.');
+    if (error) {
+      console.error('Error al actualizar la reserva en Supabase:', error);
+      throw new Error(error.message || 'No se pudo guardar el cierre del viaje');
+    }
+    console.log('Reserva actualizada en Supabase (COMPLETE).');
   } catch (error) {
     console.error('Error al actualizar la reserva en Supabase:', error);
+    throw error;
   }
 
   return booking;
