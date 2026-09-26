@@ -198,7 +198,13 @@ const LoginScreen = ({ navigation }: Props) => {
       }),
     ]).start(() => {
       setUI(prev => ({ ...prev, isLoginMode: nextLogin, error: "" }));
-      if (!nextLogin) setRegisterStep(1);
+      if (!nextLogin) {
+        setRegisterStep(1);
+        // El registro NO debe heredar el email/clave precargados por "Recordarme"
+        // (que son para iniciar sesión). Se limpian al entrar a modo Registro.
+        setForm(prev => ({ ...prev, email: "", password: "", confirmPassword: "" }));
+        setValidation(v => ({ ...v, emailExists: false, phoneExists: false }));
+      }
       Animated.timing(formOpacityAnim, {
         toValue: 1,
         duration: 180,
