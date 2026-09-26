@@ -59,54 +59,31 @@ export const ValidationService = {
 
       console.log('📱 [ValidationService] Verificando teléfono:', { fullPhone, mobileOnly });
 
-      const fullPhoneQuery = supabase
-        .from('users')
-        .select('id,mobile')
-        .eq('mobile', fullPhone)
-        .limit(1);
+      // Durante el registro NO hay sesión → `anon`. No se puede leer `persona`/`users`
+      // directamente (permission denied, y expondría PII). Se usa el RPC
+      // `verificar_disponibilidad` (SECURITY DEFINER, concedido a anon), que normaliza
+      // el teléfono internamente. En el esquema nuevo el teléfono se guarda como número
+      // local de 10 dígitos, así que se envía `mobileOnly`.
+      const { data, error } = await supabase.rpc('verificar_disponibilidad', {
+        p_telefono: mobileOnly,
+      } as any);
 
-      const { data: fullPhoneData, error: fullPhoneError } = await fullPhoneQuery as any;
-
-      if (fullPhoneError) {
-        const duration = Date.now() - startTime;
-        console.error(`❌ [ValidationService] Error verificando fullPhone (${duration}ms):`, fullPhoneError.message);
-        return {
-          exists: false,
-          error: fullPhoneError.message,
-        };
-      }
-
-      if (Array.isArray(fullPhoneData) && fullPhoneData.length > 0) {
-        const duration = Date.now() - startTime;
-        console.log(`❌ [ValidationService] users.mobile: NO DISPONIBLE (${duration}ms)`);
-        console.log('[ValidationService] Coincidencia users.mobile:', fullPhoneData[0]?.mobile);
-        return { exists: true };
-      }
-
-      const mobileOnlyQuery = supabase
-        .from('users')
-        .select('id,mobile')
-        .eq('mobile', mobileOnly)
-        .limit(1);
-
-      const { data: mobileOnlyData, error: mobileOnlyError } = await mobileOnlyQuery as any;
       const duration = Date.now() - startTime;
 
-      if (mobileOnlyError) {
-        console.error(`❌ [ValidationService] Error verificando mobileOnly (${duration}ms):`, mobileOnlyError.message);
+      if (error) {
+        console.error(`❌ [ValidationService] Error verificando teléfono (${duration}ms):`, error.message);
         return {
           exists: false,
-          error: mobileOnlyError.message,
+          error: error.message,
         };
       }
 
-      const exists = Array.isArray(mobileOnlyData) && mobileOnlyData.length > 0;
+      const exists = (data as any)?.mobile_exists === true;
 
       if (exists) {
-        console.log(`❌ [ValidationService] users.mobile: NO DISPONIBLE (${duration}ms)`);
-        console.log('[ValidationService] Coincidencia users.mobile:', mobileOnlyData?.[0]?.mobile);
+        console.log(`❌ [ValidationService] teléfono: NO DISPONIBLE (${duration}ms)`);
       } else {
-        console.log(`✅ [ValidationService] users.mobile: DISPONIBLE (${duration}ms)`);
+        console.log(`✅ [ValidationService] teléfono: DISPONIBLE (${duration}ms)`);
       }
 
       return { exists };
