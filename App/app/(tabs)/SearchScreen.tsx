@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+﻿import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -27,6 +27,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import { API_KEY } from "@/config/AppConfig";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // ── Supabase REST directo (el cliente JS cuelga) ──
 const MAX_FAVORITES = 5;
@@ -108,8 +110,20 @@ const DiamondParticle = ({ size, x, y, color, duration, delay }: typeof PARTICLE
 };
 
 export default function FavoritesScreen({ navigation }: Props) {
-  const user = useSelector((state: RootState) => state.auth.user);
-  const profile = useSelector((state: RootState) => state.auth.profile);
+  const user = useSelector((state: RootState) => state.auth.user) as any;
+  const profile = useSelector((state: RootState) => state.auth.profile) as any;
+  const insets = useSafeAreaInsets();
+  const navBottomPad = useCustomerNavBottomPad();
+  const headerTopPadding = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+  const isCustomer = String(
+    profile?.user_type ||
+      user?.usertype ||
+      user?.user_type ||
+      user?.userType ||
+      user?.user_metadata?.usertype ||
+      user?.user_metadata?.user_type ||
+      ''
+  ).toLowerCase() === 'customer';
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
@@ -212,7 +226,7 @@ export default function FavoritesScreen({ navigation }: Props) {
     if (!selectedAddress || !supabaseUserId) return;
     // Validar límite de 5 al marcar como favorito
     if (isFavorite && !selectedAddress.isFavorite && favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
     try {
@@ -229,7 +243,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       if (!resp.ok) {
         const err = await resp.text();
         if (err.includes('máximo 5')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           showAlert('error', 'Error', 'No se pudo actualizar el lugar.');
         }
@@ -240,7 +254,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       );
     } catch (e) {
       console.warn('[FavPlaces] handleSaveFavorite error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
     setSelectedAddress(null);
     setIsFavorite(false);
@@ -260,7 +274,7 @@ export default function FavoritesScreen({ navigation }: Props) {
   const handleSearchSelect = async (data: any, details: any = null) => {
     if (!details || !supabaseUserId) return;
     if (favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
     const description = details.formatted_address || data.description;
@@ -292,7 +306,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       if (!resp.ok) {
         const err = await resp.text();
         if (err.includes('máximo 5') || err.includes('P0001')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           console.warn('[FavPlaces] insert error:', err);
           showAlert('error', 'Error', 'No se pudo guardar el lugar.');
@@ -313,7 +327,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       setAddresses(prev => [newAddr, ...prev]);
     } catch (e) {
       console.warn('[FavPlaces] handleSearchSelect error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
     setSearchQuery("");
     searchAutocompleteRef.current?.setAddressText("");
@@ -326,7 +340,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       return;
     }
     if (!newAddressDetails) {
-      showAlert('error', 'Error', 'Por favor, selecciona una direcci�n v�lida.');
+      showAlert('error', 'Error', 'Por favor, selecciona una dirección válida.');
       return;
     }
     if (!supabaseUserId) {
@@ -334,7 +348,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       return;
     }
     if (favoriteCount >= MAX_FAVORITES) {
-      showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+      showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
 
@@ -356,8 +370,8 @@ export default function FavoritesScreen({ navigation }: Props) {
       });
       if (!resp.ok) {
         const err = await resp.text();
-        if (err.includes('m�ximo 5') || err.includes('P0001')) {
-          showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
+        if (err.includes('máximo 5') || err.includes('P0001')) {
+          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
         } else {
           console.warn('[FavPlaces] modal insert error:', err);
           showAlert('error', 'Error', 'No se pudo guardar el lugar.');
@@ -378,7 +392,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       setAddresses(prev => [newAddr, ...prev]);
     } catch (e) {
       console.warn('[FavPlaces] handleAddAddress error:', e);
-      showAlert('error', 'Error', 'Error de conexi�n al guardar.');
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
 
     setNewAddressLabel("");
@@ -428,7 +442,7 @@ export default function FavoritesScreen({ navigation }: Props) {
 
   // ── DELETE lugar de Supabase ──
   const handleDeleteAddress = (id: string) => {
-    showAlert('confirm', 'Eliminar Direcci�n', '�Est�s seguro de que deseas eliminar esta direcci�n?', [
+    showAlert('confirm', 'Eliminar dirección', '¿Está Seguro de eliminar esta dirección favorita?', [
       { text: 'Cancelar', style: 'cancel', onPress: () => setAlertVisible(false) },
       {
         text: 'Eliminar',
@@ -446,7 +460,7 @@ export default function FavoritesScreen({ navigation }: Props) {
             setAddresses(prev => prev.filter(a => a.id !== id));
           } catch (e) {
             console.warn('[FavPlaces] delete error:', e);
-            showAlert('error', 'Error', 'Error de conexi�n al eliminar.');
+            showAlert('error', 'Error', 'Error de conexión al eliminar.');
           }
         },
       },
@@ -583,19 +597,24 @@ export default function FavoritesScreen({ navigation }: Props) {
       <Animated.View
         style={[
           styles.header,
+          isCustomer && styles.headerCustomer,
           {
+            paddingTop: headerTopPadding,
             opacity: headerAnim,
             transform: [{ translateY: headerAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
           },
         ]}
       >
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={{ padding: 10, marginRight: 12 }}
-        >
-          <AntDesign name="arrow-left" size={24} color="#E9F6FF" />
-        </TouchableOpacity> 
-        <View style={styles.headerCenter}>
+        {!isCustomer ? (
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.backButton}
+          >
+            <AntDesign name="arrow-left" size={24} color="#E9F6FF" />
+          </TouchableOpacity>
+        ) : null}
+        <View style={[styles.headerTitleWrap, isCustomer && styles.headerTitleWrapCustomer]}>
+          {isCustomer ? <Text style={styles.headerEyebrow}>T+plus</Text> : null}
           <Text style={styles.headerTitle}>Mis Direcciones</Text>
           <Text style={styles.headerSubtitle}>
             {favoriteCount}/{MAX_FAVORITES} favoritos • {addresses.length} {addresses.length === 1 ? "lugar" : "lugares"}
@@ -605,7 +624,7 @@ export default function FavoritesScreen({ navigation }: Props) {
           style={styles.addButton}
           onPress={() => {
             if (favoriteCount >= MAX_FAVORITES) {
-              showAlert('warning', 'L�mite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
+              showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
               return;
             }
             setModalVisible(true);
@@ -725,7 +744,7 @@ export default function FavoritesScreen({ navigation }: Props) {
             data={filteredAddresses}
             renderItem={renderAddressItem}
             keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[styles.listContent, isCustomer && { paddingBottom: navBottomPad + 30 }]}
             showsVerticalScrollIndicator={false}
             ListEmptyComponent={renderEmptyList}
             keyboardShouldPersistTaps="handled"
@@ -907,9 +926,13 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    paddingTop: Platform.OS === "ios" ? 56 : 48,
     paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingBottom: 14,
+  },
+  headerCustomer: {
+    backgroundColor: "rgba(5,26,38,0.85)",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
   },
   backButton: {
     width: 40,
@@ -918,19 +941,30 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.08)",
     alignItems: "center",
     justifyContent: "center",
+    marginRight: 12,
   },
-  headerCenter: {
+  headerTitleWrap: {
     flex: 1,
-    marginLeft: 14,
+    paddingHorizontal: 12,
+  },
+  headerTitleWrapCustomer: {
+    paddingHorizontal: 0,
+  },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#00E5FF",
+    textTransform: "uppercase",
+    letterSpacing: 1,
   },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "700",
-    color: "#fff",
-    letterSpacing: 0.5,
+    color: "#FFFFFF",
+    letterSpacing: -0.3,
   },
   headerSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: "rgba(255,255,255,0.45)",
     marginTop: 2,
   },

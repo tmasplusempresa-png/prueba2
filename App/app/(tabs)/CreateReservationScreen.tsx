@@ -1,8 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
   Platform, ActivityIndicator, Dimensions, Keyboard, KeyboardAvoidingView,
-  TouchableWithoutFeedback, Animated,
+  TouchableWithoutFeedback, Animated, PanResponder, Pressable, Image,
+  LayoutAnimation, UIManager, Modal,
 } from 'react-native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -10,23 +11,48 @@ import { useSelector } from 'react-redux';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { GooglePlacesAutocomplete } from 'react-native-google-places-autocomplete';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
-import DateTimePickerModal from 'react-native-modal-datetime-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RootState } from '@/common/store';
 import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { encodeTripTypeObservation } from '@/common/store/bookingsSlice';
 import { FareCalculator } from '@/common/actions/FareCalculator';
 import { isNearAirport } from '@/common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import { getGoogleMapStyle, GoogleMapTheme } from '@/config/googleMapsDarkStyle';
+import { RouteMapPin, ROUTE_PIN_WIDTH, ROUTE_PIN_HEIGHT } from '@/components/RouteMapPin';
+import {
+  CLIENT_ORIGIN_MARKER_IMAGE,
+  CLIENT_DEST_MARKER_IMAGE,
+} from '@/components/ClientOriginMapMarker';
 
-const { width: SW } = Dimensions.get('window');
+const { width: SW, height: SH } = Dimensions.get('window');
+const RECENT_SEARCHES_KEY = 'tmasplus_recent_destination_searches';
+const MAX_RECENT_SEARCHES = 4;
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+const animateChipSelect = () => {
+  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+};
 
 const GOOGLE_MAPS_KEY = API_KEY;
 
-type VehicleType = { key: string; label: string; icon: 'car-sport' | 'car' | 'bus' | 'car-outline' };
+type VehicleType = {
+  key: string;
+  label: string;
+  icon: 'car-sport' | 'car' | 'bus' | 'car-outline';
+  description: string;
+  /** URL de imagen desde car_types.image (DB) */
+  imageUri: string;
+};
 
 const VEHICLE_ICON_MAP: Record<string, VehicleType['icon']> = {
   ConfortPlus: 'car-sport',
@@ -35,13 +61,116 @@ const VEHICLE_ICON_MAP: Record<string, VehicleType['icon']> = {
   TaxiPlus:    'car-outline',
 };
 
-// Fallback mientras Supabase carga — valores reales de car_types
+/** Orden fijo en UI; categorías nuevas de la DB se agregan al final (scroll horizontal). */
+const VEHICLE_DISPLAY_ORDER = ['XPlus', 'ConfortPlus', 'VanPlus', 'TaxiPlus'] as const;
+
+/** Ancho de card: caben ~4 visibles; la 5ª+ se alcanza con scroll a la derecha. */
+const VEHICLE_CARD_GAP = 8;
+const VEHICLE_ROW_H_PAD = 0;
+const VEHICLE_CARD_W = Math.floor(
+  (SW - 32 - VEHICLE_ROW_H_PAD * 2 - VEHICLE_CARD_GAP * 3) / 4,
+);
+
+// Fallback mientras Supabase carga — sin descripción/imagen hasta que llegue de car_types
 const DEFAULT_VEHICLE_TYPES: VehicleType[] = [
-  { key: 'ConfortPlus', label: 'ConfortPlus', icon: 'car-sport' },
-  { key: 'XPlus',       label: 'XPlus',       icon: 'car'       },
-  { key: 'VanPlus',     label: 'VanPlus',     icon: 'bus'       },
-  { key: 'TaxiPlus',    label: 'TaxiPlus',    icon: 'car-outline'},
+  { key: 'XPlus',       label: 'XPlus',       icon: 'car',        description: '', imageUri: '' },
+  { key: 'ConfortPlus', label: 'ConfortPlus', icon: 'car-sport',  description: '', imageUri: '' },
+  { key: 'VanPlus',     label: 'VanPlus',     icon: 'bus',        description: '', imageUri: '' },
+  { key: 'TaxiPlus',    label: 'TaxiPlus',    icon: 'car-outline',description: '', imageUri: '' },
 ];
+
+/** Fallback local si car_types.image está vacío */
+const VEHICLE_CATEGORY_IMAGES: Record<string, any> = {
+  XPlus: require('@/assets/images/TREAS-X.png'),
+  ConfortPlus: require('@/assets/images/TREAS-E.png'),
+  TaxiPlus: require('@/assets/images/TREAS-T.png'),
+  VanPlus: require('@/assets/images/TREAS-Van.png'),
+};
+
+/** Logos pago (logo.dev) */
+const NEQUI_LOGO_URI = 'https://img.logo.dev/nequi.com.co?token=pk_c_F6FSsGSaKey4lkmcDLNw';
+const DAVIPLATA_LOGO_URI = 'https://img.logo.dev/daviplata.com?token=pk_c_F6FSsGSaKey4lkmcDLNw';
+
+const MONTHS_ES = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+];
+const WEEKDAYS_ES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const WEEKDAYS_SHORT = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const ROUTE_LINE_BLUE = '#00E5FF';
+const WHEEL_ITEM_H = 40;
+
+const formatScheduledLabel = (d: Date) => {
+  const day = d.getDate();
+  const month = MONTHS_ES[d.getMonth()];
+  const year = d.getFullYear();
+  let h = d.getHours();
+  const mins = d.getMinutes();
+  const ampm = h >= 12 ? 'p.m.' : 'a.m.';
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${day} de ${month} ${year} a las ${h}:${String(mins).padStart(2, '0')} ${ampm}`;
+};
+
+const buildDayOptions = (from: Date, count = 60) => {
+  const start = new Date(from);
+  start.setHours(0, 0, 0, 0);
+  return Array.from({ length: count }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return d;
+  });
+};
+
+type WheelColProps = {
+  data: { key: string; label: string }[];
+  index: number;
+  onChange: (index: number) => void;
+  width?: number | string;
+};
+
+function WheelColumn({ data, index, onChange, width }: WheelColProps) {
+  const ref = useRef<ScrollView>(null);
+  const ready = useRef(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      ref.current?.scrollTo({ y: index * WHEEL_ITEM_H, animated: false });
+      ready.current = true;
+    }, 40);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!ready.current) return;
+    ref.current?.scrollTo({ y: index * WHEEL_ITEM_H, animated: true });
+  }, [index]);
+
+  return (
+    <View style={{ width: width as any, height: WHEEL_ITEM_H * 5, overflow: 'hidden' }}>
+      <ScrollView
+        ref={ref}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={WHEEL_ITEM_H}
+        decelerationRate="fast"
+        contentContainerStyle={{ paddingVertical: WHEEL_ITEM_H * 2 }}
+        onMomentumScrollEnd={(e) => {
+          const i = Math.round(e.nativeEvent.contentOffset.y / WHEEL_ITEM_H);
+          const clamped = Math.max(0, Math.min(data.length - 1, i));
+          if (clamped !== index) onChange(clamped);
+        }}
+      >
+        {data.map((item, i) => (
+          <View key={item.key} style={st.wheelItem}>
+            <Text style={[st.wheelItemTxt, i === index && st.wheelItemTxtOn]} numberOfLines={1}>
+              {item.label}
+            </Text>
+          </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
 
 const DEFAULT_VEHICLE_RATES: Record<string, any> = {
   ConfortPlus: { base_fare:24125, base_fare_inter:48250,  rate_per_unit_distance:660,   rate_per_unit_distance_inter:1320, rate_per_hour:600,  rate_per_hour_inter:1200, min_fare:19200, min_fare_inter:38400,  delta_aeropuerto:12000, delta_aeropuerto_prog:5000, convenience_fees:0, convenience_fee_type:'flat', umbral_intermunicipal_km:29 },
@@ -51,6 +180,13 @@ const DEFAULT_VEHICLE_RATES: Record<string, any> = {
 };
 
 const COLOMBIA_CENTER = { latitude: 4.6097, longitude: -74.0817, latitudeDelta: 0.08, longitudeDelta: 0.06 };
+const MAP_MIN_ZOOM = 14;
+const MAP_MAX_ZOOM = 18;
+const MAP_REGION_DELTA = 0.012;
+/** Zoom más abierto al mostrar origen en la franja del formulario */
+const MAP_FORM_DELTA = 0.028;
+/** Zoom más cercano al ubicar punto en el mapa */
+const MAP_LOCATE_DELTA = 0.0045;
 
 type FavoritePlace = {
   id: string;
@@ -59,6 +195,18 @@ type FavoritePlace = {
   latitude: number;
   longitude: number;
   type_address: string | null;
+};
+
+type RecentDestination = {
+  id: string;
+  title: string;
+  latitude: number;
+  longitude: number;
+};
+
+type PlaceSuggestion = {
+  place_id: string;
+  description: string;
 };
 
 const FAVORITE_TYPE_ICONS: Record<string, { icon: string; color: string }> = {
@@ -108,10 +256,20 @@ const CreateReservationScreen = () => {
 
   /* ── Map / Location refs ── */
   const mapRef = useRef<MapView>(null);
-  const originAutoRef = useRef<any>(null);
-  const destAutoRef = useRef<any>(null);
+  const originInputRef = useRef<TextInput>(null);
+  const destInputRef = useRef<TextInput>(null);
   const sessionTokenOrigin = useRef<string | null>(null);
   const sessionTokenDest = useRef<string | null>(null);
+  // Timestamp hasta el cual se ignoran pan-completes (animaciones programáticas
+  // disparan varios onRegionChangeComplete; un flag booleano de un solo uso no basta).
+  const programmaticMoveUntilRef = useRef(0);
+  const markProgrammaticMove = useCallback((durationMs = 1000) => {
+    programmaticMoveUntilRef.current = Date.now() + durationMs;
+  }, []);
+  const isProgrammaticMove = useCallback(
+    () => Date.now() < programmaticMoveUntilRef.current,
+    [],
+  );
 
   const [myLat, setMyLat] = useState(COLOMBIA_CENTER.latitude);
   const [myLng, setMyLng] = useState(COLOMBIA_CENTER.longitude);
@@ -121,18 +279,63 @@ const CreateReservationScreen = () => {
   const [origin, setOrigin] = useState<any>(params.origin || null);
   const [destination, setDestination] = useState<any>(params.destination || null);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
-  const [relocatingMarker, setRelocatingMarker] = useState<'origin' | 'destination' | null>(null);
-  const [tempMarkerCoord, setTempMarkerCoord] = useState<{ latitude: number; longitude: number } | null>(null);
+  // 'search' = hoja de direcciones; 'locate' = fijar punto moviendo el mapa
+  const [sheetMode, setSheetMode] = useState<'search' | 'locate'>('search');
+  // 'form' = asignar ruta expandido; 'route' = resumen compacto tras trazar
+  const [panelView, setPanelView] = useState<'form' | 'route'>('form');
+  const [locateTarget, setLocateTarget] = useState<'origin' | 'destination' | null>(null);
+  const [activeField, setActiveField] = useState<'origin' | 'destination' | null>('destination');
+  const [originInputText, setOriginInputText] = useState(params.origin?.title || '');
+  const [destInputText, setDestInputText] = useState(params.destination?.title || '');
+  const [liveLocateAddress, setLiveLocateAddress] = useState('');
+  const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Centro pendiente al mover el mapa en modo locate
+  const pendingCenterRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const [confirmingPin, setConfirmingPin] = useState(false);
+  const preferFormRef = useRef(false);
+  const locateGeocodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /* ── Trip details ── */
-  const [carType, setCarType] = useState<string>(params.carType || DEFAULT_VEHICLE_TYPES[0].key);
+  /** Altura aprox. de la hoja "Tu ruta" para encuadrar el trazado encima del modal */
+  const ROUTE_SHEET_PAD = 340;
+  /** El form cubre ~78% → el pin de origen debe quedar en la franja superior visible */
+  const FORM_SHEET_PAD = Math.round(SH * 0.78);
+  /** Modal de detalles: altura por defecto y expandida al hacer scroll */
+  const DETAILS_SHEET_COLLAPSED = Math.round(SH * 0.72);
+  const DETAILS_SHEET_EXPANDED = Math.round(SH * 0.90);
+  const DETAILS_SHEET_PAD = DETAILS_SHEET_COLLAPSED;
+
+  const [carType, setCarType] = useState<string>(params.carType || 'ConfortPlus');
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>(DEFAULT_VEHICLE_TYPES);
   const [tripType, setTripType] = useState<'Ida' | 'Ida y Vuelta'>('Ida');
   const [serviceType, setServiceType] = useState<'immediate' | 'reservation'>('immediate');
   const [scheduledDate, setScheduledDate] = useState<Date | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [pickerDayIdx, setPickerDayIdx] = useState(0);
+  const [pickerHourIdx, setPickerHourIdx] = useState(0);
+  const [pickerMinIdx, setPickerMinIdx] = useState(0);
+  const [pickerAmPmIdx, setPickerAmPmIdx] = useState(0);
+  const dayOptions = useRef(buildDayOptions(new Date())).current;
+  const hourOptions = useRef(
+    Array.from({ length: 12 }, (_, i) => ({ key: `h${i}`, label: String(i + 1) })),
+  ).current;
+  const minOptions = useRef(
+    Array.from({ length: 12 }, (_, i) => ({
+      key: `m${i}`,
+      label: String(i * 5).padStart(2, '0'),
+    })),
+  ).current;
+  const ampmOptions = useRef([
+    { key: 'am', label: 'a.m.' },
+    { key: 'pm', label: 'p.m.' },
+  ]).current;
   const [observations, setObservations] = useState('');
   const [paymentMode, setPaymentMode] = useState<'cash' | 'nequi' | 'daviplata'>('cash');
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const detailsHeightAnim = useRef(new Animated.Value(DETAILS_SHEET_COLLAPSED)).current;
+  const detailsExpandLock = useRef(false);
+  const detailsExpandedRef = useRef(false);
 
   /* ── Calculated values ── */
   const [distance, setDistance] = useState(params.distance || 0);
@@ -145,10 +348,13 @@ const CreateReservationScreen = () => {
 
   /* ── UI state ── */
   const [step, setStep] = useState<'map' | 'details'>(params.origin ? 'details' : 'map');
+  const [mapTheme] = useState<GoogleMapTheme>('dark');
+  const [mapDragging, setMapDragging] = useState(false);
 
-  /* ── Favorite places ── */
+  /* ── Favorite places + recent destinations ── */
   const [favoritePlaces, setFavoritePlaces] = useState<FavoritePlace[]>([]);
-
+  const [recentDestinations, setRecentDestinations] = useState<RecentDestination[]>([]);
+  const [loadingRecents, setLoadingRecents] = useState(false);
   const customerName = [
     profile?.first_name || user?.first_name || user?.user_metadata?.first_name || user?.user_metadata?.nombre || '',
     profile?.last_name || user?.last_name || user?.user_metadata?.last_name || user?.user_metadata?.apellido || '',
@@ -156,86 +362,146 @@ const CreateReservationScreen = () => {
 
   /* ── Auto-detect current location ── */
   useEffect(() => {
+    if (params.origin) return;
+    let cancelled = false;
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      if (status !== 'granted' || cancelled) return;
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        if (cancelled) return;
         setMyLat(loc.coords.latitude);
         setMyLng(loc.coords.longitude);
         setHasMyLocation(true);
-        if (!origin) {
-          // Reverse geocode para obtener dirección real en lugar de "Mi ubicación actual"
-          try {
-            const resp = await fetch(
-              `https://maps.googleapis.com/maps/api/geocode/json?latlng=${loc.coords.latitude},${loc.coords.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
-            );
-            const data = await resp.json();
-            const addr = data.results?.[0]?.formatted_address || 'Mi ubicación actual';
-            setOrigin({
-              latitude: loc.coords.latitude,
-              longitude: loc.coords.longitude,
-              title: addr,
-            });
-            originAutoRef.current?.setAddressText(addr);
-          } catch {
-            setOrigin({
-              latitude: loc.coords.latitude,
-              longitude: loc.coords.longitude,
-              title: 'Mi ubicación actual',
-            });
-            originAutoRef.current?.setAddressText('Mi ubicación actual');
-          }
-        }
+
+        let addr = 'Mi ubicación actual';
+        try {
+          const resp = await fetch(
+            `https://maps.googleapis.com/maps/api/geocode/json?latlng=${loc.coords.latitude},${loc.coords.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
+          );
+          const data = await resp.json();
+          addr = data.results?.[0]?.formatted_address || addr;
+        } catch {}
+
+        if (cancelled) return;
+        setOrigin({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+          title: addr,
+        });
+        setOriginInputText(addr);
+        markProgrammaticMove(1200);
         mapRef.current?.animateToRegion(
-          { latitude: loc.coords.latitude, longitude: loc.coords.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
+          { latitude: loc.coords.latitude, longitude: loc.coords.longitude, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA },
           800,
         );
+        setActiveField('destination');
       } catch {}
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [params.origin, markProgrammaticMove]);
 
-  /* ── Cargar vehículos y tarifas desde car_types ── */
+  /* Ya no hace falta re-sincronizar autocomplete: TextInput controlado por estado */
+
+  /* ── Cargar vehículos y tarifas desde categoria_vehiculo (aplicacioncore)
+       con fallback a vista car_types si existe. ── */
   useEffect(() => {
     (async () => {
       try {
-        const { data, error } = await supabase
-          .from('car_types')
-          .select('name,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,rate_per_hour_inter,valor_hora,min_fare,min_fare_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_type,umbral_intermunicipal_km')
-          .eq('is_active', true)
-          .order('created_at', { ascending: true });
-        if (error || !data?.length) return;
+        // 1) Tabla nativa
+        let rows: any[] | null = null;
+        const cat = await supabase
+          .from('categoria_vehiculo' as any)
+          .select(
+            'id,nombre,descripcion,imagen_url,tarifa_base,tarifa_base_inter,valor_km,valor_km_inter,valor_hora,valor_hora_inter,tarifa_minima,tarifa_minima_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_tipo,umbral_intermunicipal_km',
+          )
+          .eq('activo', true)
+          .order('id', { ascending: true });
+
+        if (!cat.error && cat.data?.length) {
+          rows = (cat.data as any[]).map((c) => ({
+            id: c.id,
+            name: c.nombre,
+            description: c.descripcion,
+            image: c.imagen_url,
+            base_price: c.tarifa_base,
+            base_price_inter: c.tarifa_base_inter,
+            price_per_km: c.valor_km,
+            price_per_km_inter: c.valor_km_inter,
+            // valor_hora es $/hora. FareCalculator usa rate_per_hour como $/min
+            // (legacy car_types) o valor_hora/60. No mapear valor_hora→rate_per_hour.
+            rate_per_hour: 0,
+            rate_per_hour_inter: 0,
+            valor_hora: c.valor_hora,
+            min_fare: c.tarifa_minima,
+            min_fare_inter: c.tarifa_minima_inter,
+            delta_aeropuerto: c.delta_aeropuerto,
+            delta_aeropuerto_prog: c.delta_aeropuerto_prog,
+            convenience_fee: c.convenience_fee,
+            convenience_fee_type: c.convenience_fee_tipo || 'flat',
+            umbral_intermunicipal_km: c.umbral_intermunicipal_km,
+          }));
+        } else {
+          // 2) Vista compat
+          const { data, error } = await supabase
+            .from('car_types')
+            .select(
+              // Solo columnas reales de la vista car_types (ver information_schema).
+              'name,description,image,base_price,base_price_inter,price_per_km,price_per_km_inter,rate_per_hour,min_fare,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,umbral_intermunicipal_km,capacity',
+            )
+            .eq('is_active', true)
+            .order('created_at', { ascending: true });
+          if (error || !data?.length) {
+            console.warn('[CreateReservation] sin categorias:', cat.error?.message || error?.message);
+            return;
+          }
+          rows = data as any[];
+        }
+
+        if (!rows?.length) return;
 
         const rates: Record<string, any> = {};
         const types: VehicleType[] = [];
 
-        data.forEach((car: any) => {
-          rates[car.name] = {
-            base_fare:                   parseFloat(car.base_price) || 0,
-            base_fare_inter:             parseFloat(car.base_price_inter) || 0,
-            rate_per_unit_distance:      parseFloat(car.price_per_km) || 0,
-            rate_per_unit_distance_inter:parseFloat(car.price_per_km_inter) || 0,
-            rate_per_hour:               parseFloat(car.rate_per_hour) || 0,
-            rate_per_hour_inter:         parseFloat(car.rate_per_hour_inter) || 0,
-            valor_hora:                  parseFloat(car.valor_hora) || 0,
-            min_fare:                    parseFloat(car.min_fare) || 0,
-            min_fare_inter:              parseFloat(car.min_fare_inter) || 0,
-            delta_aeropuerto:            parseFloat(car.delta_aeropuerto) || 0,
-            delta_aeropuerto_prog:       parseFloat(car.delta_aeropuerto_prog) || 0,
-            convenience_fees:            parseFloat(car.convenience_fee) || 0,
-            convenience_fee_type:        car.convenience_fee_type || 'flat',
-            umbral_intermunicipal_km:    parseFloat(car.umbral_intermunicipal_km) || 29,
+        rows.forEach((car: any) => {
+          const name = String(car.name || '').trim();
+          if (!name) return;
+          rates[name] = {
+            id: car.id != null ? Number(car.id) : null,
+            base_fare: parseFloat(car.base_price) || 0,
+            base_fare_inter: parseFloat(car.base_price_inter) || 0,
+            rate_per_unit_distance: parseFloat(car.price_per_km) || 0,
+            rate_per_unit_distance_inter: parseFloat(car.price_per_km_inter) || 0,
+            rate_per_hour: parseFloat(car.rate_per_hour) || 0,
+            rate_per_hour_inter: parseFloat(car.rate_per_hour_inter) || 0,
+            valor_hora: parseFloat(car.valor_hora) || 0,
+            min_fare: parseFloat(car.min_fare) || 0,
+            min_fare_inter: parseFloat(car.min_fare_inter) || 0,
+            delta_aeropuerto: parseFloat(car.delta_aeropuerto) || 0,
+            delta_aeropuerto_prog: parseFloat(car.delta_aeropuerto_prog) || 0,
+            convenience_fees: parseFloat(car.convenience_fee) || 0,
+            convenience_fee_type: car.convenience_fee_type || 'flat',
+            umbral_intermunicipal_km: parseFloat(car.umbral_intermunicipal_km) || 29,
           };
           types.push({
-            key: car.name,
-            label: car.name,
-            icon: VEHICLE_ICON_MAP[car.name] ?? 'car',
+            key: name,
+            label: name,
+            icon: VEHICLE_ICON_MAP[name] ?? 'car',
+            description: String(car.description ?? '').trim(),
+            imageUri: String(car.image ?? '').trim(),
           });
         });
 
+        const known = VEHICLE_DISPLAY_ORDER
+          .map((name) => types.find((t) => t.key === name))
+          .filter((t): t is VehicleType => !!t);
+        const unknown = types.filter(
+          (t) => !(VEHICLE_DISPLAY_ORDER as readonly string[]).includes(t.key),
+        );
+
         setVehicleRates(rates);
-        setVehicleTypes(types);
-        setCarType(prev => (prev && rates[prev] ? prev : types[0]?.key ?? ''));
+        setVehicleTypes([...known, ...unknown]);
+        setCarType((prev) => (prev && rates[prev] ? prev : known[0]?.key ?? unknown[0]?.key ?? ''));
       } catch (e) {
         console.warn('[CreateReservation] Error cargando tarifas:', e);
       }
@@ -264,19 +530,79 @@ const CreateReservationScreen = () => {
     })();
   }, [user, profile]);
 
+  /* ── Destinos recientes = últimas búsquedas (AsyncStorage, máx 4) ── */
+  useEffect(() => {
+    (async () => {
+      setLoadingRecents(true);
+      try {
+        const raw = await AsyncStorage.getItem(RECENT_SEARCHES_KEY);
+        if (!raw) {
+          setRecentDestinations([]);
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setRecentDestinations(parsed.slice(0, MAX_RECENT_SEARCHES));
+        }
+      } catch (e) {
+        console.warn('[CreateReservation] loadRecents error:', e);
+      } finally {
+        setLoadingRecents(false);
+      }
+    })();
+  }, []);
+
+  const pushRecentSearch = useCallback(async (place: RecentDestination) => {
+    try {
+      const next = [
+        place,
+        ...recentDestinations.filter(
+          r => !(r.latitude === place.latitude && r.longitude === place.longitude),
+        ),
+      ].slice(0, MAX_RECENT_SEARCHES);
+      setRecentDestinations(next);
+      await AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next));
+    } catch {}
+  }, [recentDestinations]);
+
   const handleSelectFavorite = (place: FavoritePlace) => {
-    setDestination({
+    preferFormRef.current = false;
+    const loc = {
       latitude: place.latitude,
       longitude: place.longitude,
       title: place.description,
-    });
-    destAutoRef.current?.setAddressText(place.description);
+    };
+    setDestination(loc);
+    setDestInputText(place.description);
     sessionTokenDest.current = null;
+    setPlaceSuggestions([]);
+    setSheetMode('search');
+    setLocateTarget(null);
+    pushRecentSearch({
+      id: place.id || `fav-${Date.now()}`,
+      title: place.description,
+      latitude: place.latitude,
+      longitude: place.longitude,
+    });
     Keyboard.dismiss();
-    mapRef.current?.animateToRegion(
-      { latitude: place.latitude, longitude: place.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-      600,
-    );
+    markProgrammaticMove(1200);
+  };
+
+  const handleSelectRecent = (place: RecentDestination) => {
+    preferFormRef.current = false;
+    setDestination({
+      latitude: place.latitude,
+      longitude: place.longitude,
+      title: place.title,
+    });
+    setDestInputText(place.title);
+    sessionTokenDest.current = null;
+    setPlaceSuggestions([]);
+    setSheetMode('search');
+    setLocateTarget(null);
+    pushRecentSearch(place);
+    Keyboard.dismiss();
+    markProgrammaticMove(1200);
   };
 
   /* ── Keyboard listener for smooth animation ── */
@@ -324,33 +650,6 @@ const CreateReservationScreen = () => {
       keyboardHideSub.remove();
     };
   }, [keyboardOffsetAnim, mapKeyboardOffsetAnim]);
-
-  /* ── Enfoque del mapa: centra en cada punto al ingresarlo (origen o destino,
-     manual o automático). Cuando ya hay ruta trazada, el encuadre completo lo
-     hace el efecto "Animar mapa cuando aparece la ruta" de más abajo. ── */
-  useEffect(() => {
-    if (!mapRef.current) return;
-
-    // Ya hay ruta calculada → el efecto de abajo la encuadra. No competir.
-    if (routeCoords.length > 2) return;
-
-    // Destino recién ingresado (aún sin ruta) → centrar en el destino.
-    if (destination?.latitude) {
-      mapRef.current.animateToRegion(
-        { latitude: destination.latitude, longitude: destination.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-        600,
-      );
-      return;
-    }
-
-    // Solo origen todavía → centrar en el origen.
-    if (origin?.latitude) {
-      mapRef.current.animateToRegion(
-        { latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 },
-        600,
-      );
-    }
-  }, [origin, destination, routeCoords]);
 
   const calculateRoute = async () => {
     if (!origin?.latitude || !destination?.latitude) return;
@@ -410,6 +709,37 @@ const CreateReservationScreen = () => {
     setClientPrice(clientTotal);
   }, [distance, duration, carType, vehicleRates, tripType, serviceType, origin, destination]);
 
+  /** Rango de precio por categoría (mismo cálculo que el pill de método de pago). */
+  const vehicleFareRanges = useMemo(() => {
+    const empty: Record<string, { low: number; high: number }> = {};
+    if (!distance || !duration) return empty;
+
+    const mult = tripType === 'Ida y Vuelta' ? 2 : 1;
+    const oAir = origin && (origin as any).latitude != null
+      ? isNearAirport((origin as any).latitude, (origin as any).longitude) : null;
+    const dAir = destination && (destination as any).latitude != null
+      ? isNearAirport((destination as any).latitude, (destination as any).longitude) : null;
+    const isAirport = !!(oAir || dAir);
+    const isScheduled = serviceType === 'reservation';
+
+    const ranges: Record<string, { low: number; high: number }> = {};
+    Object.keys(vehicleRates).forEach((key) => {
+      const rates = vehicleRates[key];
+      if (!rates) return;
+      const isIntermunicipal = distance > (rates.umbral_intermunicipal_km || DEFAULT_UMBRAL_INTERMUNICIPAL_KM);
+      const { totalCost, clientTotal } = FareCalculator(
+        distance * mult,
+        duration * 60 * mult,
+        rates,
+        null,
+        2,
+        { isAirport, isScheduled, isIntermunicipal },
+      );
+      ranges[key] = { low: totalCost, high: clientTotal };
+    });
+    return ranges;
+  }, [distance, duration, vehicleRates, tripType, serviceType, origin, destination]);
+
   useEffect(() => {
     if (!origin?.latitude || !destination?.latitude) {
       setRouteCoords([]);
@@ -421,157 +751,610 @@ const CreateReservationScreen = () => {
   }, [origin, destination, tripType]);
 
 
-  /* ── Click-to-Relocate Handlers ── */
-  const handleOriginPress = () => {
-    setRelocatingMarker('origin');
-    setTempMarkerCoord(null);
-  };
-  
-  const handleDestinationPress = () => {
-    setRelocatingMarker('destination');
-    setTempMarkerCoord(null);
-  };
-  
-  const handleMapPress = async (e: any) => {
-    if (!relocatingMarker) return;
-    
-    const { coordinate } = e.nativeEvent;
-    setTempMarkerCoord(coordinate);
-    
-    try {
-      // Reverse geocode para obtener la dirección
-      const resp = await fetch(
-        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${coordinate.latitude},${coordinate.longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
-      );
-      const data = await resp.json();
-      const addr = data.results?.[0]?.formatted_address || 'Nueva ubicación';
-      
-      if (relocatingMarker === 'origin') {
-        setOrigin({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: addr,
-        });
-        originAutoRef.current?.setAddressText(addr);
-      } else {
-        setDestination({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: addr,
-        });
-        destAutoRef.current?.setAddressText(addr);
-      }
-    } catch (err) {
-      console.error('Error geocoding:', err);
-      if (relocatingMarker === 'origin') {
-        setOrigin({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: 'Nueva ubicación (Origen)',
-        });
-        originAutoRef.current?.setAddressText('Nueva ubicación (Origen)');
-      } else {
-        setDestination({
-          latitude: coordinate.latitude,
-          longitude: coordinate.longitude,
-          title: 'Nueva ubicación (Destino)',
-        });
-        destAutoRef.current?.setAddressText('Nueva ubicación (Destino)');
-      }
-    } finally {
-      setRelocatingMarker(null);
-      setTempMarkerCoord(null);
-    }
-  };
-
-  /* ── Animar mapa cuando aparece la ruta ── */
-  useEffect(() => {
-    if (routeCoords.length > 2) {
-      // Pequeño delay para que el polyline ya esté renderizado
-      const timer = setTimeout(() => {
-        if (mapRef.current) {
-          mapRef.current.fitToCoordinates(routeCoords, {
-            edgePadding: { top: 200, right: 50, bottom: 280, left: 50 },
-            animated: true,
-          });
-        }
-      }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [routeCoords]);
-
-  /* ── Place selection (same as CustomerMap) ── */
-  const handleLocationSelect = (data: any, details: any, type: 'origin' | 'destination') => {
-    if (!details?.geometry?.location) return;
-    const { lat, lng } = details.geometry.location;
-    const loc = { latitude: lat, longitude: lng, title: data.description };
-    if (type === 'origin') {
-      setOrigin(loc);
-      originAutoRef.current?.setAddressText(data.description);
-      sessionTokenOrigin.current = null;
-    } else {
-      setDestination(loc);
-      destAutoRef.current?.setAddressText(data.description);
-      sessionTokenDest.current = null;
-    }
-    Keyboard.dismiss();
-    mapRef.current?.animateToRegion({ latitude: lat, longitude: lng, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 600);
-  };
-
-  /* ── Marker drag end → reverse geocode ── */
-  const handleMarkerDragEnd = async (e: any, type: 'origin' | 'destination') => {
-    const { latitude, longitude } = e.nativeEvent.coordinate;
+  /* ── Geocode helper ── */
+  const reverseGeocode = useCallback(async (latitude: number, longitude: number, fallback: string) => {
     try {
       const resp = await fetch(
         `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_KEY}&language=es`,
       );
       const data = await resp.json();
-      const addr = data.results?.[0]?.formatted_address || 'Ubicación seleccionada';
-      const loc = { latitude, longitude, title: addr };
-      if (type === 'origin') {
+      return data.results?.[0]?.formatted_address || fallback;
+    } catch {
+      return fallback;
+    }
+  }, []);
+
+  /** Texto de la fila "Ubicar en el mapa" según foco / campos vacíos */
+  const locateMapLabel = (() => {
+    if (activeField === 'origin') return 'Ubicar en el mapa punto inicio';
+    if (activeField === 'destination') return 'Ubicar en mapa punto destino';
+    if (!originInputText.trim() && !destInputText.trim()) return 'Ubicar en mapa punto inicio';
+    if (!destInputText.trim()) return 'Ubicar en mapa Punto destino';
+    if (!originInputText.trim()) return 'Ubicar en el mapa punto inicio';
+    return 'Ubicar en mapa punto destino';
+  })();
+
+  const resolveLocateTarget = useCallback((): 'origin' | 'destination' => {
+    if (activeField === 'origin' || activeField === 'destination') return activeField;
+    if (!originInputText.trim() && !destInputText.trim()) return 'origin';
+    if (!destInputText.trim()) return 'destination';
+    if (!originInputText.trim()) return 'origin';
+    return 'destination';
+  }, [activeField, originInputText, destInputText]);
+
+  const openLocateOnMap = useCallback((forced?: 'origin' | 'destination') => {
+    const target = forced || resolveLocateTarget();
+    Keyboard.dismiss();
+    setPlaceSuggestions([]);
+    setLocateTarget(target);
+    setSheetMode('locate');
+    pendingCenterRef.current = null;
+
+    const existing = target === 'origin' ? origin : destination;
+    const fallbackLat = hasMyLocation ? myLat : (origin?.latitude ?? COLOMBIA_CENTER.latitude);
+    const fallbackLng = hasMyLocation ? myLng : (origin?.longitude ?? COLOMBIA_CENTER.longitude);
+    const lat = existing?.latitude ?? fallbackLat;
+    const lng = existing?.longitude ?? fallbackLng;
+    const initialAddr = existing?.title
+      || (target === 'origin' ? originInputText : destInputText)
+      || (hasMyLocation ? 'Mi ubicación actual' : 'Ubicación en el mapa');
+
+    setLiveLocateAddress(initialAddr);
+    pendingCenterRef.current = { latitude: lat, longitude: lng };
+
+    markProgrammaticMove(1200);
+    mapRef.current?.animateToRegion(
+      { latitude: lat, longitude: lng, latitudeDelta: MAP_LOCATE_DELTA, longitudeDelta: MAP_LOCATE_DELTA },
+      500,
+    );
+  }, [
+    resolveLocateTarget, origin, destination, hasMyLocation, myLat, myLng,
+    originInputText, destInputText, markProgrammaticMove,
+  ]);
+
+  const exitLocateToSearch = useCallback((focus?: 'origin' | 'destination') => {
+    // Volver al formulario de edición (NO a "Tu ruta")
+    preferFormRef.current = true;
+    setSheetMode('search');
+    setLocateTarget(null);
+    setMapDragging(false);
+    setPanelView('form');
+    setPlaceSuggestions([]);
+    if (focus) setActiveField(focus);
+    setTimeout(() => {
+      if (focus === 'origin') originInputRef.current?.focus?.();
+      else if (focus === 'destination') destInputRef.current?.focus?.();
+    }, 160);
+  }, []);
+
+  /** Confirma el centro del mapa (solo en modo locate). */
+  const confirmMapPin = useCallback(async () => {
+    if (sheetMode !== 'locate' || !locateTarget || confirmingPin || !mapRef.current) return;
+
+    setConfirmingPin(true);
+    try {
+      let center = pendingCenterRef.current;
+      if (!center) {
+        try {
+          const cam: any = await mapRef.current.getCamera();
+          if (cam?.center?.latitude != null) {
+            center = { latitude: cam.center.latitude, longitude: cam.center.longitude };
+          }
+        } catch {}
+      }
+      if (!center) return;
+
+      const fallback = locateTarget === 'origin' ? 'Punto de recogida' : 'Punto de destino';
+      const addr = liveLocateAddress?.trim()
+        || await reverseGeocode(center.latitude, center.longitude, fallback);
+      const loc = { latitude: center.latitude, longitude: center.longitude, title: addr };
+
+      const willHaveBoth = locateTarget === 'origin'
+        ? !!destination?.latitude
+        : !!origin?.latitude;
+
+      if (locateTarget === 'origin') {
         setOrigin(loc);
-        originAutoRef.current?.setAddressText(addr);
+        setOriginInputText(addr);
       } else {
         setDestination(loc);
-        destAutoRef.current?.setAddressText(addr);
+        setDestInputText(addr);
+        pushRecentSearch({
+          id: `map-${Date.now()}`,
+          title: addr,
+          latitude: center.latitude,
+          longitude: center.longitude,
+        });
       }
-    } catch {
-      const loc = { latitude, longitude, title: 'Ubicación seleccionada' };
-      if (type === 'origin') setOrigin(loc);
-      else setDestination(loc);
+
+      pendingCenterRef.current = null;
+      setMapDragging(false);
+      setSheetMode('search');
+      setLocateTarget(null);
+      setPlaceSuggestions([]);
+
+      if (willHaveBoth) {
+        preferFormRef.current = false;
+        // La vista "route" se activa cuando distance > 0 (efecto abajo)
+      } else {
+        preferFormRef.current = true;
+        setPanelView('form');
+        setActiveField(locateTarget === 'origin' ? 'destination' : 'origin');
+      }
+      markProgrammaticMove(1500);
     } finally {
-      setRelocatingMarker(null); // 🆕 Clear dragging state
+      setConfirmingPin(false);
     }
-  };
-  
-  // 🆕 Handle drag start - visual feedback
-  const handleMarkerDragStart = (type: 'origin' | 'destination') => {
-    setRelocatingMarker(type);
+  }, [
+    sheetMode, locateTarget, confirmingPin, liveLocateAddress,
+    reverseGeocode, destination, origin, markProgrammaticMove, pushRecentSearch,
+  ]);
+
+  const fitRouteInVisibleMap = useCallback(() => {
+    if (!mapRef.current || !origin?.latitude || !destination?.latitude) return;
+    markProgrammaticMove(1600);
+    const points = [
+      { latitude: origin.latitude, longitude: origin.longitude },
+      { latitude: destination.latitude, longitude: destination.longitude },
+    ];
+    if (routeCoords.length > 4) {
+      const mid = routeCoords[Math.floor(routeCoords.length / 2)];
+      if (mid) points.push(mid);
+    }
+    mapRef.current.fitToCoordinates(points, {
+      edgePadding: {
+        top: Math.max(topPad + 64, 90),
+        right: 44,
+        bottom: ROUTE_SHEET_PAD + Math.max(insets.bottom, 8),
+        left: 44,
+      },
+      animated: true,
+    });
+  }, [origin, destination, routeCoords, markProgrammaticMove, topPad, insets.bottom]);
+
+  /* ── Encuadre dinámico cuando hay ruta y estamos en vista resumen ── */
+  useEffect(() => {
+    if (sheetMode !== 'search' || panelView !== 'route') return;
+    if (step !== 'map') return;
+    if (!origin?.latitude || !destination?.latitude) return;
+    const timer = setTimeout(() => {
+      fitRouteInVisibleMap();
+    }, 280);
+    return () => clearTimeout(timer);
+  }, [
+    origin?.latitude, origin?.longitude,
+    destination?.latitude, destination?.longitude,
+    routeCoords, sheetMode, panelView, step, fitRouteInVisibleMap,
+  ]);
+
+  /* Encuadre al abrir modal de detalles (trazado visible arriba) */
+  useEffect(() => {
+    if (step !== 'details') return;
+    if (!origin?.latitude || !destination?.latitude) return;
+    const sheetH = detailsExpanded ? DETAILS_SHEET_EXPANDED : DETAILS_SHEET_COLLAPSED;
+    const timer = setTimeout(() => {
+      if (!mapRef.current) return;
+      markProgrammaticMove(1600);
+      const points = [
+        { latitude: origin.latitude, longitude: origin.longitude },
+        { latitude: destination.latitude, longitude: destination.longitude },
+      ];
+      if (routeCoords.length > 4) {
+        const mid = routeCoords[Math.floor(routeCoords.length / 2)];
+        if (mid) points.push(mid);
+      }
+      mapRef.current.fitToCoordinates(points, {
+        edgePadding: {
+          top: Math.max(topPad + 56, 80),
+          right: 40,
+          bottom: sheetH,
+          left: 40,
+        },
+        animated: true,
+      });
+    }, 280);
+    return () => clearTimeout(timer);
+  }, [step, detailsExpanded, origin?.latitude, origin?.longitude, destination?.latitude, destination?.longitude, routeCoords, markProgrammaticMove, topPad]);
+
+  /* En formulario: origen visible y más alejado, por encima del modal */
+  useEffect(() => {
+    if (step !== 'map') return;
+    if (sheetMode !== 'search' || panelView !== 'form') return;
+    if (!origin?.latitude) return;
+    const timer = setTimeout(() => {
+      if (!mapRef.current) return;
+      markProgrammaticMove(1200);
+      if (destination?.latitude) {
+        mapRef.current.fitToCoordinates(
+          [
+            { latitude: origin.latitude, longitude: origin.longitude },
+            { latitude: destination.latitude, longitude: destination.longitude },
+          ],
+          {
+            edgePadding: {
+              top: Math.max(topPad + 48, 72),
+              right: 48,
+              bottom: FORM_SHEET_PAD,
+              left: 48,
+            },
+            animated: true,
+          },
+        );
+      } else {
+        // Centro un poco al sur del pin → el marcador queda más arriba en la franja visible
+        const offsetLat = MAP_FORM_DELTA * 0.38;
+        mapRef.current.animateToRegion(
+          {
+            latitude: origin.latitude - offsetLat,
+            longitude: origin.longitude,
+            latitudeDelta: MAP_FORM_DELTA,
+            longitudeDelta: MAP_FORM_DELTA,
+          },
+          650,
+        );
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [
+    step, sheetMode, panelView, origin?.latitude, origin?.longitude,
+    destination?.latitude, destination?.longitude, markProgrammaticMove, topPad,
+  ]);
+
+  /* Al confirmar ambas direcciones y calcular → vista resumen (salvo si el usuario quiere editar) */
+  useEffect(() => {
+    if (step !== 'map') return;
+    if (sheetMode !== 'search') return;
+    if (preferFormRef.current) return;
+    if (origin?.latitude && destination?.latitude && distance > 0 && !calculating) {
+      setPanelView('route');
+      setPlaceSuggestions([]);
+      Keyboard.dismiss();
+    }
+  }, [origin?.latitude, destination?.latitude, distance, calculating, sheetMode, step]);
+
+  const fetchSuggestions = useCallback((text: string, field: 'origin' | 'destination') => {
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+    if (!text || text.trim().length < 2) {
+      setPlaceSuggestions([]);
+      setLoadingSuggestions(false);
+      return;
+    }
+    setLoadingSuggestions(true);
+    suggestTimerRef.current = setTimeout(async () => {
+      try {
+        const tokenRef = field === 'origin' ? sessionTokenOrigin : sessionTokenDest;
+        if (!tokenRef.current) tokenRef.current = generateUID();
+        const params = new URLSearchParams({
+          input: text.trim(),
+          key: GOOGLE_MAPS_KEY,
+          language: 'es',
+          components: 'country:co',
+          sessiontoken: tokenRef.current,
+        });
+        if (hasMyLocation) {
+          params.set('location', `${myLat},${myLng}`);
+          params.set('radius', '30000');
+        }
+        const res = await fetch(
+          `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params.toString()}`,
+        );
+        const data = await res.json();
+        const preds = Array.isArray(data?.predictions) ? data.predictions : [];
+        setPlaceSuggestions(
+          preds.slice(0, 6).map((p: any) => ({
+            place_id: p.place_id,
+            description: p.description,
+          })),
+        );
+      } catch {
+        setPlaceSuggestions([]);
+      } finally {
+        setLoadingSuggestions(false);
+      }
+    }, 280);
+  }, [hasMyLocation, myLat, myLng]);
+
+  const applyPlace = useCallback((loc: { latitude: number; longitude: number; title: string }, type: 'origin' | 'destination') => {
+    preferFormRef.current = false;
+    if (type === 'origin') {
+      setOrigin(loc);
+      setOriginInputText(loc.title);
+      sessionTokenOrigin.current = null;
+      setActiveField('destination');
+    } else {
+      setDestination(loc);
+      setDestInputText(loc.title);
+      sessionTokenDest.current = null;
+      setActiveField(null);
+      pushRecentSearch({
+        id: `search-${Date.now()}`,
+        title: loc.title,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+      });
+    }
+    setPlaceSuggestions([]);
+    setSheetMode('search');
+    setLocateTarget(null);
+    markProgrammaticMove(1500);
+    Keyboard.dismiss();
+  }, [pushRecentSearch, markProgrammaticMove]);
+
+  const selectSuggestion = useCallback(async (item: PlaceSuggestion, type: 'origin' | 'destination') => {
+    try {
+      const tokenRef = type === 'origin' ? sessionTokenOrigin : sessionTokenDest;
+      const params = new URLSearchParams({
+        place_id: item.place_id,
+        fields: 'geometry,formatted_address',
+        key: GOOGLE_MAPS_KEY,
+        language: 'es',
+        sessiontoken: tokenRef.current || '',
+      });
+      const res = await fetch(
+        `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`,
+      );
+      const data = await res.json();
+      const result = data?.result;
+      const lat = result?.geometry?.location?.lat;
+      const lng = result?.geometry?.location?.lng;
+      if (lat == null || lng == null) return;
+      const title = result?.formatted_address || item.description;
+      applyPlace({ latitude: lat, longitude: lng, title }, type);
+    } catch (e) {
+      console.warn('[CreateReservation] place details error:', e);
+    }
+  }, [applyPlace]);
+
+  const clearOriginField = () => {
+    setOrigin(null);
+    setOriginInputText('');
+    setRouteCoords([]);
+    setDistance(0);
+    setDuration(0);
+    setPanelView('form');
+    setActiveField('origin');
+    setPlaceSuggestions([]);
+    originInputRef.current?.focus?.();
   };
 
-  /* ── Center on my location ── */
+  const clearDestField = () => {
+    setDestination(null);
+    setDestInputText('');
+    setRouteCoords([]);
+    setDistance(0);
+    setDuration(0);
+    setPanelView('form');
+    setActiveField('destination');
+    setPlaceSuggestions([]);
+    destInputRef.current?.focus?.();
+  };
+
+  /* ── Center on my location / encuadrar ruta ── */
   const centerOnMe = () => {
-    if (mapRef.current && myLat) {
-      mapRef.current.animateToRegion({ latitude: myLat, longitude: myLng, latitudeDelta: 0.012, longitudeDelta: 0.012 }, 600);
+    if (!mapRef.current) return;
+    if (
+      (step === 'details' || (sheetMode === 'search' && panelView === 'route'))
+      && origin?.latitude && destination?.latitude
+    ) {
+      if (step === 'details') {
+        markProgrammaticMove(1600);
+        const points = [
+          { latitude: origin.latitude, longitude: origin.longitude },
+          { latitude: destination.latitude, longitude: destination.longitude },
+        ];
+        if (routeCoords.length > 4) {
+          const mid = routeCoords[Math.floor(routeCoords.length / 2)];
+          if (mid) points.push(mid);
+        }
+        mapRef.current.fitToCoordinates(points, {
+          edgePadding: {
+            top: Math.max(topPad + 56, 80),
+            right: 40,
+            bottom: DETAILS_SHEET_PAD,
+            left: 40,
+          },
+          animated: true,
+        });
+      } else {
+        fitRouteInVisibleMap();
+      }
+      return;
+    }
+    if (!myLat) return;
+    const delta = sheetMode === 'locate' ? MAP_LOCATE_DELTA : MAP_REGION_DELTA;
+    markProgrammaticMove(1000);
+    mapRef.current.animateToRegion(
+      { latitude: myLat, longitude: myLng, latitudeDelta: delta, longitudeDelta: delta },
+      600,
+    );
+    if (sheetMode === 'locate') {
+      pendingCenterRef.current = { latitude: myLat, longitude: myLng };
+      reverseGeocode(myLat, myLng, 'Mi ubicación actual').then(setLiveLocateAddress);
     }
   };
 
   /* ── Zoom controls ── */
   const handleZoomIn = () => {
-    if (mapRef.current) {
-      mapRef.current.getCamera().then((cam: any) => {
-        mapRef.current?.animateCamera({ zoom: cam.zoom + 1 }, { duration: 300 });
-      });
-    }
+    if (!mapRef.current) return;
+    markProgrammaticMove(500);
+    mapRef.current.getCamera().then((cam: any) => {
+      const zoom = cam.zoom ?? 15;
+      const next = Math.min(MAP_MAX_ZOOM, zoom + 1);
+      mapRef.current?.animateCamera({ zoom: next, center: cam.center }, { duration: 300 });
+    });
   };
 
   const handleZoomOut = () => {
-    if (mapRef.current) {
-      mapRef.current.getCamera().then((cam: any) => {
-        mapRef.current?.animateCamera({ zoom: Math.max(cam.zoom - 1, 3) }, { duration: 300 });
-      });
-    }
+    if (!mapRef.current) return;
+    markProgrammaticMove(500);
+    mapRef.current.getCamera().then((cam: any) => {
+      const zoom = cam.zoom ?? 15;
+      const next = Math.max(MAP_MIN_ZOOM, zoom - 1);
+      mapRef.current?.animateCamera({ zoom: next, center: cam.center }, { duration: 300 });
+    });
   };
+
+  const handleMapRegionChange = useCallback(() => {
+    if (sheetMode === 'locate') setMapDragging(true);
+  }, [sheetMode]);
+
+  const handleMapRegionChangeComplete = useCallback((region: { latitude: number; longitude: number }) => {
+    setMapDragging(false);
+    if (isProgrammaticMove()) return;
+    if (sheetMode !== 'locate' || !locateTarget) return;
+    pendingCenterRef.current = { latitude: region.latitude, longitude: region.longitude };
+    if (locateGeocodeTimer.current) clearTimeout(locateGeocodeTimer.current);
+    locateGeocodeTimer.current = setTimeout(async () => {
+      const addr = await reverseGeocode(region.latitude, region.longitude,
+        locateTarget === 'origin' ? 'Punto de recogida' : 'Punto de destino');
+      setLiveLocateAddress(addr);
+    }, 350);
+  }, [sheetMode, locateTarget, isProgrammaticMove, reverseGeocode]);
+
+  const mapStyle = getGoogleMapStyle(mapTheme);
+
+  const inLocateMode = sheetMode === 'locate' && !!locateTarget;
+  // En modo ubicar solo el pin central; el otro punto NO se muestra
+  const showOriginMarker = !!origin?.latitude && !inLocateMode;
+  const showDestMarker = !!destination?.latitude && !inLocateMode;
+  const showClearOrigin = activeField === 'origin' && !!originInputText.trim() && sheetMode === 'search' && panelView === 'form';
+  const showClearDest = activeField === 'destination' && !!destInputText.trim() && sheetMode === 'search' && panelView === 'form';
+  const hasConfirmedRoute = !!(origin?.latitude && destination?.latitude && distance > 0 && !calculating);
+  const hasConfirmedRouteRef = useRef(hasConfirmedRoute);
+  hasConfirmedRouteRef.current = hasConfirmedRoute;
+  // Controles del mapa: locate, resumen de ruta, o modal de detalles
+  const showMapFloatingControls =
+    (step === 'details' && !detailsExpanded)
+    || inLocateMode
+    || (step === 'map' && sheetMode === 'search' && panelView === 'route');
+  const mapControlsBottom = step === 'details'
+    ? (detailsExpanded ? DETAILS_SHEET_EXPANDED : DETAILS_SHEET_COLLAPSED) + 12
+    : inLocateMode
+      ? 300
+      : (ROUTE_SHEET_PAD + Math.max(insets.bottom, 8) + 16);
+
+  const openFormToEdit = useCallback((field: 'origin' | 'destination') => {
+    preferFormRef.current = true;
+    setStep('map');
+    setSheetMode('search');
+    setPanelView('form');
+    setActiveField(field);
+    setPlaceSuggestions([]);
+    setTimeout(() => {
+      if (field === 'origin') originInputRef.current?.focus?.();
+      else destInputRef.current?.focus?.();
+    }, 160);
+  }, []);
+
+  /** Desde detalles → modal Asigna tu ruta con foco en el campo */
+  const editAddressFromDetails = useCallback((field: 'origin' | 'destination') => {
+    openFormToEdit(field);
+  }, [openFormToEdit]);
+
+  const openSchedulePicker = useCallback(() => {
+    const base = scheduledDate && scheduledDate.getTime() > Date.now()
+      ? scheduledDate
+      : new Date(Date.now() + 60 * 60 * 1000);
+    const dayStart = new Date(base);
+    dayStart.setHours(0, 0, 0, 0);
+    let dIdx = dayOptions.findIndex(d => d.getTime() === dayStart.getTime());
+    if (dIdx < 0) dIdx = 0;
+    let h = base.getHours();
+    const isPm = h >= 12;
+    h = h % 12;
+    if (h === 0) h = 12;
+    const m = Math.round(base.getMinutes() / 5) * 5 % 60;
+    setPickerDayIdx(dIdx);
+    setPickerHourIdx(h - 1);
+    setPickerMinIdx(Math.floor(m / 5));
+    setPickerAmPmIdx(isPm ? 1 : 0);
+    setShowDatePicker(true);
+  }, [scheduledDate, dayOptions]);
+
+  const previewPickerDate = useCallback(() => {
+    const day = dayOptions[pickerDayIdx] || dayOptions[0];
+    let hour = pickerHourIdx + 1;
+    if (pickerAmPmIdx === 0) {
+      hour = hour === 12 ? 0 : hour;
+    } else {
+      hour = hour === 12 ? 12 : hour + 12;
+    }
+    const mins = pickerMinIdx * 5;
+    const d = new Date(day);
+    d.setHours(hour, mins, 0, 0);
+    return d;
+  }, [dayOptions, pickerDayIdx, pickerHourIdx, pickerMinIdx, pickerAmPmIdx]);
+
+  const confirmSchedulePicker = useCallback(() => {
+    let d = previewPickerDate();
+    const minOk = new Date(Date.now() + 5 * 60 * 1000);
+    if (d.getTime() < minOk.getTime()) d = minOk;
+    setScheduledDate(d);
+    setShowDatePicker(false);
+  }, [previewPickerDate]);
+
+  const setDetailsSheetExpanded = useCallback((expand: boolean) => {
+    if (detailsExpandLock.current || detailsExpandedRef.current === expand) return;
+    detailsExpandLock.current = true;
+    detailsExpandedRef.current = expand;
+    setDetailsExpanded(expand);
+    Animated.spring(detailsHeightAnim, {
+      toValue: expand ? DETAILS_SHEET_EXPANDED : DETAILS_SHEET_COLLAPSED,
+      useNativeDriver: false,
+      friction: 9,
+      tension: 68,
+    }).start(() => {
+      detailsExpandLock.current = false;
+    });
+  }, [detailsHeightAnim]);
+
+  const setDetailsSheetExpandedRef = useRef(setDetailsSheetExpanded);
+  setDetailsSheetExpandedRef.current = setDetailsSheetExpanded;
+
+  const handleDetailsScroll = useCallback((e: any) => {
+    const y = e?.nativeEvent?.contentOffset?.y ?? 0;
+    if (y > 28) setDetailsSheetExpandedRef.current(true);
+    else if (y <= 2) setDetailsSheetExpandedRef.current(false);
+  }, []);
+
+  useEffect(() => {
+    if (step !== 'details') {
+      detailsExpandedRef.current = false;
+      setDetailsExpanded(false);
+      detailsHeightAnim.setValue(DETAILS_SHEET_COLLAPSED);
+      detailsExpandLock.current = false;
+    }
+  }, [step, detailsHeightAnim]);
+
+  const detailsSheetPan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 10,
+      onPanResponderRelease: (_, g) => {
+        if (g.dy < -28) setDetailsSheetExpandedRef.current(true);
+        else if (g.dy > 28) setDetailsSheetExpandedRef.current(false);
+      },
+    }),
+  ).current;
+  const showSuggestions = placeSuggestions.length > 0 || loadingSuggestions;
+  const activeSuggestField = activeField === 'origin' || activeField === 'destination' ? activeField : 'destination';
+
+  const sheetPanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 8,
+      onPanResponderRelease: (_, g) => {
+        if (!hasConfirmedRouteRef.current) return;
+        if (g.dy > 40) {
+          preferFormRef.current = false;
+          setPanelView('route');
+          Keyboard.dismiss();
+          setPlaceSuggestions([]);
+        } else if (g.dy < -40) {
+          preferFormRef.current = true;
+          setPanelView('form');
+        }
+      },
+    }),
+  ).current;
 
 
   const canContinue = !!origin && !!destination && distance > 0 && !calculating;
@@ -649,41 +1432,45 @@ const CreateReservationScreen = () => {
 
       const bookingDateToUse = serviceType === 'reservation' && scheduledDate ? scheduledDate : new Date();
 
+      // Solo columnas que existen en la vista public.bookings (aplicacioncore).
+      // No hay trip_type: se guarda en observations + waypoints.
+      // No enviar: customer_status, customer_token, *_location JSON.
+      const tripLabel = tripType === 'Ida y Vuelta' ? 'Ida y Vuelta' : 'Ida';
+      const categoryId = vehicleRates?.[carType]?.id;
       const body = {
-        booking_type: serviceType,
+        booking_type: serviceType === 'reservation' ? 'scheduled' : 'immediate',
         status: 'PENDING',
-        customer_status: 'SEARCHING',
         reference: generateReference(),
         booking_date: bookingDateToUse.toISOString(),
         customer: userId,
         customer_id: userId,
-        customer_name: customerName,
-        customer_email: user?.email || '',
-        customer_contact: user?.mobile || '',
-        customer_token: user?.pushToken || user?.push_token || '',
+        customer_name: customerName || null,
+        customer_email: user?.email || null,
+        customer_contact: user?.mobile || profile?.mobile || null,
         pickup_address: origin?.title || 'Origen',
         pickup_lat: origin?.latitude,
         pickup_lng: origin?.longitude,
-        pickup_location: JSON.stringify({ lat: origin?.latitude, lng: origin?.longitude, address: origin?.title }),
         drop_address: destination?.title || 'Destino',
         drop_lat: destination?.latitude,
         drop_lng: destination?.longitude,
-        destination_location: JSON.stringify({ lat: destination?.latitude, lng: destination?.longitude, address: destination?.title }),
-        drop_location: JSON.stringify({ lat: destination?.latitude, lng: destination?.longitude, address: destination?.title }),
         distance: parseFloat(distance.toFixed(2)),
         duration: Math.round(duration),
-        trip_type: tripType,
         car_type: carType,
+        ...(Number.isFinite(categoryId) && categoryId > 0 ? { car_type_id: categoryId } : {}),
         estimate: clientPrice || 0,
         price: clientPrice || 0,
         trip_cost: driverPrice || 0,
         driver_share: driverPrice || 0,
-        // Piso de cobro (car_types.min_fare de la categoría elegida) para el
-        // trigger `calculate_total_cost`. Ver [[22-plan-fix-bug-min-fare]].
         min_fare_snapshot: vehicleRates?.[carType]?.min_fare || 0,
-        payment_mode: paymentMode,
+        payment_mode:
+          paymentMode === 'cash'
+            ? 'cash'
+            : paymentMode === 'nequi' || paymentMode === 'daviplata'
+              ? 'transfer'
+              : 'cash',
         prepaid: false,
-        observations: observations || null,
+        observations: encodeTripTypeObservation(tripLabel, observations),
+        waypoints: [{ trip_type: tripLabel }],
       };
       const resp = await fetch(`${SUPABASE_URL}/rest/v1/bookings`, {
         method: 'POST',
@@ -720,278 +1507,333 @@ const CreateReservationScreen = () => {
     }
   };
 
-  /* ── Google Places styles ── */
-  const gpStyles = {
-    container: { flex: 0, zIndex: 1000 },
-    textInputContainer: { backgroundColor: 'transparent' },
-    textInput: {
-      height: 50, fontSize: 15, fontWeight: '500' as const,
-      color: '#FFF', backgroundColor: 'rgba(4,39,58,0.95)',
-      borderRadius: 14, borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.38)',
-      paddingHorizontal: 44, paddingVertical: 10,
-    },
-    listView: {
-      backgroundColor: 'rgba(4,39,58,0.98)', borderRadius: 14,
-      borderWidth: 1, borderColor: 'rgba(0,229,255,0.35)',
-      marginTop: 4,
-      // Con el teclado abierto ya no caben 250px: la lista se pasaba de largo
-      // y sus ultimos resultados quedaban debajo del teclado, sin poder tocarse.
-      // Se reparte el hueco real que queda, con piso para que siempre se vean
-      // un par de sugerencias.
-      maxHeight: keyboardHeight > 0
-        ? Math.max(140, Math.min(250, Dimensions.get('window').height - keyboardHeight - 300))
-        : 250,
-      marginHorizontal: 0,
-      elevation: 8, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
-    },
-    row: { backgroundColor: 'rgba(10,46,61,0.6)', paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 0.5, borderBottomColor: 'rgba(0,229,255,0.1)' },
-    separator: { display: 'none' as const },
-    description: { fontSize: 14, color: 'rgba(255,255,255,0.9)', fontWeight: '500' as const },
-    poweredContainer: { display: 'none' as const },
-  };
-
   /* ══════════════════ RENDER ══════════════════ */
   return (
     <View style={st.root}>
-      {/* Header */}
-      <View style={[st.header, { paddingTop: topPad }]}>
-        <TouchableOpacity
-          style={st.backBtn}
-          onPress={() => (step === 'details' && !params.origin) ? setStep('map') : nav.goBack()}
-          activeOpacity={0.75}
-        >
-          <Ionicons name="chevron-back" size={24} color="#FFF" />
-        </TouchableOpacity>
-        <Text style={st.headerTitle}>{step === 'map' ? 'Selecciona tu ruta' : 'Detalles de Reserva'}</Text>
-        <View style={{ width: 40 }} />
-      </View>
-
-      {/* ════ STEP 1: MAP ════ */}
-      {step === 'map' && (
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          enabled={Platform.OS === 'ios'}
-        >
-          {/* Map */}
+      <KeyboardAvoidingView
+        style={{ flex: 1, position: 'relative' }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        enabled={Platform.OS === 'ios'}
+      >
+          {/* Map siempre visible (también detrás del modal de detalles) */}
           <View style={st.mapContainer}>
             <MapView
+              key={`reservation-map-${mapTheme}-poi-mute`}
               ref={mapRef}
               style={StyleSheet.absoluteFillObject}
               provider={PROVIDER_GOOGLE}
-              showsUserLocation
+              customMapStyle={mapStyle}
+              showsUserLocation={!showOriginMarker}
               showsMyLocationButton={false}
-              initialRegion={{ latitude: myLat, longitude: myLng, latitudeDelta: 0.015, longitudeDelta: 0.015 }}
+              showsCompass={false}
+              rotateEnabled
+              initialRegion={{ latitude: myLat, longitude: myLng, latitudeDelta: MAP_REGION_DELTA, longitudeDelta: MAP_REGION_DELTA }}
               zoomControlEnabled={false}
               loadingEnabled
               loadingIndicatorColor="#00E5FF"
-              onPress={handleMapPress}
+              onRegionChange={handleMapRegionChange}
+              onRegionChangeComplete={handleMapRegionChangeComplete}
             >
-              {origin && relocatingMarker !== 'origin' && (
+              {showOriginMarker && (
                 <Marker
                   coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                  title="📍 Origen"
-                  description={origin.title}
-                  draggable
-                  onPress={handleOriginPress}
-                  onDragStart={() => handleMarkerDragStart('origin')}
-                  onDragEnd={e => handleMarkerDragEnd(e, 'origin')}
-                >
-                  <View style={{
-                    backgroundColor: '#00FF7F',
-                    borderRadius: 50,
-                    padding: 8,
-                    borderWidth: 3,
-                    borderColor: '#FFFFFF',
-                    shadowColor: '#00FF7F',
-                    shadowOffset: { width: 0, height: 0 },
-                    shadowOpacity: 0.8,
-                    shadowRadius: 8,
-                    elevation: 10,
-                  }}>
-                    <Ionicons name="location" size={18} color="#051A26" style={{ fontWeight: '900' }} />
-                  </View>
-                </Marker>
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  image={CLIENT_ORIGIN_MARKER_IMAGE}
+                  tracksViewChanges={false}
+                  zIndex={2}
+                />
               )}
-              {destination && relocatingMarker !== 'destination' && (
+              {showDestMarker && (
                 <Marker
                   coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-                  title="🚩 Destino"
-                  description={destination.title}
-                  draggable
-                  onPress={handleDestinationPress}
-                  onDragStart={() => handleMarkerDragStart('destination')}
-                  onDragEnd={e => handleMarkerDragEnd(e, 'destination')}
-                >
-                  <View style={{
-                    backgroundColor: '#E91E63',
-                    borderRadius: 50,
-                    padding: 8,
-                    borderWidth: 3,
-                    borderColor: '#FFFFFF',
-                    shadowColor: '#E91E63',
-                    shadowOffset: { width: 0, height: 0 },
-                    shadowOpacity: 0.7,
-                    shadowRadius: 8,
-                    elevation: 10,
-                  }}>
-                    <Ionicons name="flag" size={18} color="#FFFFFF" style={{ fontWeight: '900' }} />
-                  </View>
-                </Marker>
-              )}
-              {/* 🆕 Marcador temporal mientras se reubica */}
-              {relocatingMarker && tempMarkerCoord && (
-                <Marker
-                  coordinate={tempMarkerCoord}
-                  title={relocatingMarker === 'origin' ? '✓ Nuevo Origen' : '✓ Nuevo Destino'}
-                  opacity={0.9}
-                >
-                  <View style={{
-                    backgroundColor: relocatingMarker === 'origin' ? '#00FF88' : '#FF8800',
-                    borderRadius: 50,
-                    padding: 8,
-                    borderWidth: 2.5,
-                    borderColor: '#FFFFFF',
-                    shadowColor: '#000',
-                    shadowOffset: { width: 0, height: 3 },
-                    shadowOpacity: 0.6,
-                    shadowRadius: 4,
-                    elevation: 8,
-                  }}>
-                    <Ionicons name="checkmark" size={16} color="#FFFFFF" style={{ fontWeight: '800' }} />
-                  </View>
-                </Marker>
-              )}
-              {routeCoords.length > 1 && (
-                <Polyline
-                  coordinates={routeCoords}
-                  strokeColor="#00E676"
-                  strokeWidth={6}
-                  lineJoin="round"
-                  lineCap="round"
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  image={CLIENT_DEST_MARKER_IMAGE}
+                  tracksViewChanges={false}
+                  zIndex={3}
                 />
+              )}
+              {routeCoords.length > 1 && !inLocateMode && (
+                <>
+                  {/* Borde azul del trazo */}
+                  <Polyline
+                    coordinates={routeCoords}
+                    strokeColor={ROUTE_LINE_BLUE}
+                    strokeWidth={8}
+                    lineJoin="round"
+                    lineCap="round"
+                    zIndex={1}
+                  />
+                  <Polyline
+                    coordinates={routeCoords}
+                    strokeColor="#00E676"
+                    strokeWidth={5}
+                    lineJoin="round"
+                    lineCap="round"
+                    zIndex={2}
+                  />
+                  {/* Punta inicio: bolita blanca con borde azul */}
+                  <Marker
+                    coordinate={routeCoords[0]}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    tracksViewChanges={false}
+                    zIndex={4}
+                  >
+                    <View style={st.routeEndpointStart} />
+                  </Marker>
+                  {/* Punta fin: bolita roja con borde azul */}
+                  <Marker
+                    coordinate={routeCoords[routeCoords.length - 1]}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    tracksViewChanges={false}
+                    zIndex={5}
+                  >
+                    <View style={st.routeEndpointEnd} />
+                  </Marker>
+                </>
               )}
             </MapView>
 
-            {/* Zoom controls */}
-            <View style={st.zoomControls}>
-              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomIn} activeOpacity={0.8}>
-                <Ionicons name="add" size={20} color="#00E5FF" />
-              </TouchableOpacity>
-              <TouchableOpacity style={st.zoomBtn} onPress={handleZoomOut} activeOpacity={0.8}>
-                <Ionicons name="remove" size={20} color="#00E5FF" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Center on my location */}
-            <TouchableOpacity style={st.myLocBtn} onPress={centerOnMe} activeOpacity={0.8}>
-              <Ionicons name="locate" size={22} color="#00E5FF" />
-            </TouchableOpacity>
-
-            {/* 🆕 Banner de instrucciones cuando se está reubicando */}
-            {relocatingMarker && (
-              <View style={st.relocatingBanner}>
-                <Ionicons name="hand-left-outline" size={18} color="#00E5FF" />
-                <Text style={st.relocatingText}>
-                  {`Toca el mapa para ubicar el ${relocatingMarker === 'origin' ? 'origen' : 'destino'}`}
-                </Text>
-                <TouchableOpacity onPress={() => setRelocatingMarker(null)} style={st.cancelRelocateBtn}>
-                  <Ionicons name="close" size={18} color="#FFF" />
-                </TouchableOpacity>
+            {inLocateMode && step === 'map' && (
+              <View pointerEvents="none" style={st.centerPinWrap}>
+                <RouteMapPin variant={locateTarget!} lifted={mapDragging} />
               </View>
             )}
 
-            {/* 🆕 Hint discreto cuando no se está reubicando y hay markers */}
-            {!relocatingMarker && origin && destination && (
-              <View style={st.mapHintPill}>
-                <Ionicons name="information-circle-outline" size={14} color="#00E5FF" />
-                <Text style={st.mapHintText}>Toca o arrastra los marcadores para reubicar</Text>
+            <LinearGradient
+              pointerEvents="none"
+              colors={['rgba(5,26,38,0.72)', 'rgba(5,26,38,0.28)', 'rgba(5,26,38,0)']}
+              locations={[0, 0.55, 1]}
+              style={[st.mapTopFade, { height: topPad + 52 }]}
+            />
+
+            <TouchableOpacity
+              style={[st.mapBackBtn, { top: topPad }]}
+              onPress={() => {
+                if (step === 'details') {
+                  setStep('map');
+                  preferFormRef.current = false;
+                  setPanelView('route');
+                  return;
+                }
+                if (inLocateMode) exitLocateToSearch(locateTarget || undefined);
+                else if (panelView === 'form' && hasConfirmedRoute) {
+                  preferFormRef.current = false;
+                  setPanelView('route');
+                } else nav.goBack();
+              }}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="chevron-back" size={24} color="#FFF" />
+            </TouchableOpacity>
+
+            {showMapFloatingControls && (
+              <>
+                <View style={[st.leftMapControls, { bottom: mapControlsBottom }]}>
+                  {/* Modo día/noche deshabilitado para el cliente — mapa siempre en noche */}
+                  {/*
+                  <TouchableOpacity
+                    style={st.mapCtrlBtn}
+                    onPress={() => setMapTheme(prev => (prev === 'dark' ? 'light' : 'dark'))}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons
+                      name={mapTheme === 'dark' ? 'moon' : 'sunny'}
+                      size={20}
+                      color="#00E5FF"
+                    />
+                  </TouchableOpacity>
+                  */}
+                  <TouchableOpacity style={st.mapCtrlBtn} onPress={handleZoomIn} activeOpacity={0.8}>
+                    <Ionicons name="add" size={20} color="#00E5FF" />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={st.mapCtrlBtn} onPress={handleZoomOut} activeOpacity={0.8}>
+                    <Ionicons name="remove" size={20} color="#00E5FF" />
+                  </TouchableOpacity>
+                </View>
+                <View style={[st.rightMapControls, { bottom: mapControlsBottom }]}>
+                  <TouchableOpacity style={st.mapCtrlBtn} onPress={centerOnMe} activeOpacity={0.8}>
+                    <Ionicons name="locate" size={22} color="#00E5FF" />
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+
+            {step === 'map' && sheetMode === 'search' && panelView === 'route' && (
+              <View style={[st.mapHintWrap, { top: topPad + 4 }]} pointerEvents="none">
+                <View style={st.mapHintPill}>
+                  <Ionicons name="information-circle-outline" size={13} color="#00E5FF" />
+                  <Text style={st.mapHintText} numberOfLines={1}>
+                    Edita direcciones o ubica en el mapa para editar
+                  </Text>
+                </View>
               </View>
             )}
           </View>
 
-          {/* Search panel - Animated */}
+          {/* ─── Hoja SEARCH: form / resumen (solo step map) ─── */}
+          {step === 'map' && sheetMode === 'search' && panelView === 'route' && (
+            <View style={[st.routeSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+              <View {...sheetPanResponder.panHandlers}>
+                <View style={st.sheetHandle} />
+              </View>
+              <Text style={st.panelTitle}>Mi Viaje</Text>
+              <TouchableOpacity style={st.routeAddrRow} onPress={() => openFormToEdit('origin')} activeOpacity={0.8}>
+                <View style={[st.inputDot, { backgroundColor: '#00E676' }]} />
+                <Text style={st.routeAddrTxt} numberOfLines={2}>{origin?.title || 'Origen'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={st.routeAddrRow} onPress={() => openFormToEdit('destination')} activeOpacity={0.8}>
+                <View style={[st.inputDot, { backgroundColor: '#E91E63' }]} />
+                <Text style={st.routeAddrTxt} numberOfLines={2}>{destination?.title || 'Destino'}</Text>
+              </TouchableOpacity>
+              <View style={st.routeSummary}>
+                <View style={st.routeChip}><Ionicons name="speedometer-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{distance.toFixed(1)} km</Text></View>
+                <View style={st.routeChip}><Ionicons name="time-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{Math.round(duration)} min</Text></View>
+              </View>
+              <TouchableOpacity
+                style={[st.continueBtn, !canContinue && { opacity: 0.45 }]}
+                disabled={!canContinue}
+                onPress={() => { Keyboard.dismiss(); setStep('details'); }}
+                activeOpacity={0.85}
+              >
+                <Text style={st.continueTxt}>Continuar</Text>
+                <Ionicons name="arrow-forward" size={20} color="#051A26" />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {step === 'map' && sheetMode === 'search' && panelView === 'form' && (
           <Animated.View
             style={[
               st.searchPanel,
-              {
-                transform: [
-                  {
-                    translateY: mapKeyboardOffsetAnim,
-                  },
-                ],
-              },
+              { transform: [{ translateY: mapKeyboardOffsetAnim }], paddingBottom: Math.max(insets.bottom, 12) },
             ]}
           >
-            {/* Origin input */}
-            <View style={{ zIndex: 20 }}>
+            <View {...sheetPanResponder.panHandlers}>
+              <View style={st.sheetHandle} />
+            </View>
+            <Text style={st.panelTitle}>Asigna tu ruta</Text>
+            <Text style={st.panelSubtitle}>
+              {hasConfirmedRoute ? 'Desliza abajo para ver el trazado' : 'Ingresa tu dirección de destino'}
+            </Text>
+
+            {/* Origen */}
+            <View style={st.fieldWrap}>
               <View style={st.inputIconWrap}><View style={[st.inputDot, { backgroundColor: '#00E676' }]} /></View>
-              <GooglePlacesAutocomplete
-                ref={originAutoRef}
+              <TextInput
+                ref={originInputRef}
+                style={st.addrInput}
                 placeholder="¿Dónde te recogemos?"
-                fetchDetails
-                minLength={2}
-                debounce={150}
-                enablePoweredByContainer={false}
-                nearbyPlacesAPI="GooglePlacesSearch"
-                onPress={(data, details) => handleLocationSelect(data, details, 'origin')}
-                query={{
-                  key: GOOGLE_MAPS_KEY,
-                  language: 'es',
-                  components: 'country:co',
-                  // Sesgo por ubicación: prioriza resultados cerca del usuario
-                  // (radio 30 km) solo cuando el GPS real ya resolvió. Bias
-                  // suave — no excluye destinos lejanos (viajes intermunicipales).
-                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
-                  sessiontoken: sessionTokenOrigin.current,
+                placeholderTextColor="rgba(255,255,255,0.4)"
+                value={originInputText}
+                onFocus={() => {
+                  if (!sessionTokenOrigin.current) sessionTokenOrigin.current = generateUID();
+                  setActiveField('origin');
+                  if (originInputText.trim().length >= 2) fetchSuggestions(originInputText, 'origin');
                 }}
-                styles={gpStyles}
-                textInputProps={{
-                  placeholderTextColor: 'rgba(255,255,255,0.4)',
-                  onFocus: () => { if (!sessionTokenOrigin.current) sessionTokenOrigin.current = generateUID(); },
-                  onBlur: () => { if (!origin) sessionTokenOrigin.current = null; },
-                  editable: true,
+                onChangeText={(t) => {
+                  setOriginInputText(t);
+                  setActiveField('origin');
+                  setPanelView('form');
+                  fetchSuggestions(t, 'origin');
                 }}
               />
+              {showClearOrigin && (
+                <Pressable style={st.clearFieldBtn} onPress={clearOriginField} hitSlop={12}>
+                  <Ionicons name="close-circle" size={22} color="rgba(255,255,255,0.7)" />
+                </Pressable>
+              )}
             </View>
 
-            {/* Connecting dots */}
             <View style={st.connectLine}>
               <View style={st.connectDash} /><View style={st.connectDash} /><View style={st.connectDash} />
             </View>
 
-            {/* Destination input */}
-            <View style={{ zIndex: 15 }}>
+            {/* Destino */}
+            <View style={st.fieldWrap}>
               <View style={st.inputIconWrap}><View style={[st.inputDot, { backgroundColor: '#E91E63' }]} /></View>
-              <GooglePlacesAutocomplete
-                ref={destAutoRef}
+              <TextInput
+                ref={destInputRef}
+                style={st.addrInput}
                 placeholder="¿A dónde vas?"
-                fetchDetails
-                minLength={2}
-                debounce={150}
-                enablePoweredByContainer={false}
-                nearbyPlacesAPI="GooglePlacesSearch"
-                onPress={(data, details) => handleLocationSelect(data, details, 'destination')}
-                query={{
-                  key: GOOGLE_MAPS_KEY,
-                  language: 'es',
-                  components: 'country:co',
-                  // Mismo sesgo por ubicación que el origen (ver comentario arriba).
-                  ...(hasMyLocation ? { location: `${myLat},${myLng}`, radius: 30000 } : {}),
-                  sessiontoken: sessionTokenDest.current,
+                placeholderTextColor="rgba(255,255,255,0.4)"
+                value={destInputText}
+                onFocus={() => {
+                  if (!sessionTokenDest.current) sessionTokenDest.current = generateUID();
+                  setActiveField('destination');
+                  if (destInputText.trim().length >= 2) fetchSuggestions(destInputText, 'destination');
                 }}
-                styles={gpStyles}
-                textInputProps={{
-                  placeholderTextColor: 'rgba(255,255,255,0.4)',
-                  onFocus: () => { if (!sessionTokenDest.current) sessionTokenDest.current = generateUID(); },
-                  onBlur: () => { if (!destination) sessionTokenDest.current = null; },
-                  editable: true,
+                onChangeText={(t) => {
+                  setDestInputText(t);
+                  setActiveField('destination');
+                  setPanelView('form');
+                  fetchSuggestions(t, 'destination');
                 }}
               />
+              {showClearDest && (
+                <Pressable style={st.clearFieldBtn} onPress={clearDestField} hitSlop={12}>
+                  <Ionicons name="close-circle" size={22} color="rgba(255,255,255,0.7)" />
+                </Pressable>
+              )}
             </View>
 
-            {/* Favorite places chips */}
-            {favoritePlaces.length > 0 && (
+            {/* Lista scrolleable: sugerencias o recientes */}
+            <ScrollView
+              style={st.listScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              nestedScrollEnabled
+            >
+              <Text style={st.recentsTitle}>
+                {showSuggestions ? 'Sugerencias' : 'Búsquedas destinos recientes'}
+              </Text>
+              {showSuggestions ? (
+                loadingSuggestions ? (
+                  <ActivityIndicator size="small" color="#00E5FF" style={{ marginVertical: 12 }} />
+                ) : (
+                  placeSuggestions.map(item => (
+                    <TouchableOpacity
+                      key={item.place_id}
+                      style={st.recentRow}
+                      onPress={() => selectSuggestion(item, activeSuggestField)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={st.recentIcon}>
+                        <Ionicons name="search-outline" size={18} color="#00E5FF" />
+                      </View>
+                      <Text style={st.recentTxt} numberOfLines={2}>{item.description}</Text>
+                    </TouchableOpacity>
+                  ))
+                )
+              ) : loadingRecents ? (
+                <ActivityIndicator size="small" color="#00E5FF" style={{ marginVertical: 12 }} />
+              ) : recentDestinations.length === 0 ? (
+                <Text style={st.recentsEmpty}>No hay destinos recientes</Text>
+              ) : (
+                recentDestinations.map(item => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={st.recentRow}
+                    onPress={() => handleSelectRecent(item)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={st.recentIcon}>
+                      <Ionicons name="time-outline" size={18} color="#00E5FF" />
+                    </View>
+                    <Text style={st.recentTxt} numberOfLines={2}>{item.title}</Text>
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
+
+            <TouchableOpacity style={st.locateMapRow} onPress={() => openLocateOnMap()} activeOpacity={0.8}>
+              <View style={st.locateMapIcon}>
+                <Ionicons name="map-outline" size={20} color="#051A26" />
+              </View>
+              <Text style={st.locateMapTxt} numberOfLines={1}>{locateMapLabel}</Text>
+              <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.4)" />
+            </TouchableOpacity>
+
+            {favoritePlaces.length > 0 && !showSuggestions && (
               <View style={st.favoritesSection}>
                 <View style={st.favoritesHeader}>
                   <Ionicons name="star" size={12} color="#00E5FF" />
@@ -1030,21 +1872,13 @@ const CreateReservationScreen = () => {
               </View>
             )}
 
-            {/* Route summary chips */}
             {calculating && (
               <View style={st.routeSummary}>
                 <ActivityIndicator size="small" color="#00E5FF" />
                 <Text style={st.routeSummaryTxt}>Calculando ruta...</Text>
               </View>
             )}
-            {!calculating && distance > 0 && (
-              <View style={st.routeSummary}>
-                <View style={st.routeChip}><Ionicons name="speedometer-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{distance.toFixed(1)} km</Text></View>
-                <View style={st.routeChip}><Ionicons name="time-outline" size={14} color="#00E5FF" /><Text style={st.routeChipTxt}>{Math.round(duration)} min</Text></View>
-              </View>
-            )}
 
-            {/* Continue button */}
             <TouchableOpacity
               style={[st.continueBtn, !canContinue && { opacity: 0.45 }]}
               disabled={!canContinue}
@@ -1055,230 +1889,416 @@ const CreateReservationScreen = () => {
               <Ionicons name="arrow-forward" size={20} color="#051A26" />
             </TouchableOpacity>
           </Animated.View>
-        </KeyboardAvoidingView>
-      )}
+          )}
 
-      {/* ════ STEP 2: DETAILS ════ */}
-      {step === 'details' && (
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={{ flex: 1 }}
-          enabled={Platform.OS === 'ios'}
-        >
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <ScrollView
-              ref={scrollViewRef}
-              style={{ flex: 1 }}
-              contentContainerStyle={[st.detailsContent, { paddingBottom: insets.bottom + 200 }]}
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-              bounces={false}
-              overScrollMode="never"
-              removeClippedSubviews={true}
-              scrollEventThrottle={16}
-              decelerationRate="fast"
-              nestedScrollEnabled={false}
-            >
-          {/* Route summary card */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={0} useNativeDriver>
-            <View style={st.routeCard}>
-              <TouchableOpacity style={st.routeCardRow} onPress={() => !params.origin && setStep('map')} activeOpacity={!params.origin ? 0.7 : 1}>
-                <View style={[st.routeCardDot, { backgroundColor: '#00E676' }]} />
-                <Text style={st.routeCardAddr} numberOfLines={1}>{origin?.title}</Text>
-                {!params.origin && <Ionicons name="create-outline" size={14} color="#00E5FF" style={{ marginLeft: 8 }} />}
-              </TouchableOpacity>
-              <View style={st.routeCardLine} />
-              <TouchableOpacity style={st.routeCardRow} onPress={() => setStep('map')} activeOpacity={0.7}>
-                <View style={[st.routeCardDot, { backgroundColor: '#E91E63' }]} />
-                <Text style={st.routeCardAddr} numberOfLines={1}>{destination?.title}</Text>
-                <Ionicons name="create-outline" size={14} color="#00E5FF" style={{ marginLeft: 8 }} />
-              </TouchableOpacity>
-              <View style={st.routeCardMeta}>
-                <Text style={st.routeCardMetaTxt}>{distance.toFixed(1)} km</Text>
-                <Text style={st.routeCardMetaTxt}>•</Text>
-                <Text style={st.routeCardMetaTxt}>{Math.round(duration)} min</Text>
-              </View>
-            </View>
-          </Animatable.View>
-
-          {/* Service type */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={0} useNativeDriver>
-            <Text style={st.label}>Tipo de Servicio</Text>
-            <View style={st.tripRow}>
-              <TouchableOpacity
-                style={[st.tripBtn, serviceType === 'immediate' && st.tripBtnActive]}
-                onPress={() => setServiceType('immediate')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="flash" size={20} color={serviceType === 'immediate' ? '#051A26' : 'rgba(255,255,255,0.6)'} />
-                <Text style={[st.tripTxt, serviceType === 'immediate' && st.tripTxtActive]}>Inmediato</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[st.tripBtn, serviceType === 'reservation' && st.tripBtnActive]}
-                onPress={() => setServiceType('reservation')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="calendar" size={20} color={serviceType === 'reservation' ? '#051A26' : 'rgba(255,255,255,0.6)'} />
-                <Text style={[st.tripTxt, serviceType === 'reservation' && st.tripTxtActive]}>Programado</Text>
-              </TouchableOpacity>
-            </View>
-            {serviceType === 'reservation' && (
-              <TouchableOpacity
-                style={st.datePickerBtn}
-                onPress={() => setShowDatePicker(true)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="calendar-outline" size={18} color="#00E5FF" />
-                <Text style={st.datePickerTxt}>
-                  {scheduledDate
-                    ? scheduledDate.toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' })
-                    : 'Seleccionar fecha y hora'}
-                </Text>
-                <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
-              </TouchableOpacity>
-            )}
-          </Animatable.View>
-
-          {/* Vehicle type */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={0} useNativeDriver>
-            <Text style={st.label}>Tipo de Vehículo</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.vehicleRow}>
-              {vehicleTypes.map(v => (
-                <TouchableOpacity
-                  key={v.key}
-                  style={[st.vehicleBtn, carType === v.key && st.vehicleBtnActive]}
-                  onPress={() => setCarType(v.key)}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons name={v.icon} size={24} color={carType === v.key ? '#051A26' : 'rgba(255,255,255,0.5)'} />
-                  <Text style={[st.vehicleTxt, carType === v.key && st.vehicleTxtActive]}>{v.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </Animatable.View>
-
-          {/* Trip type */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={20} useNativeDriver>
-            <Text style={st.label}>Tipo de Recorrido</Text>
-            <View style={st.tripRow}>
-              {(['Ida', 'Ida y Vuelta'] as const).map(t => (
-                <TouchableOpacity
-                  key={t}
-                  style={[st.tripBtn, tripType === t && st.tripBtnActive]}
-                  onPress={() => setTripType(t)}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons name={t === 'Ida' ? 'arrow-forward-circle' : 'repeat'} size={20} color={tripType === t ? '#051A26' : 'rgba(255,255,255,0.6)'} />
-                  <Text style={[st.tripTxt, tripType === t && st.tripTxtActive]}>{t}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </Animatable.View>
-
-          {/* Prices */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={80} useNativeDriver>
-            <Text style={st.label}>
-              Valor Estimado ⚡ (Dinámico)
+          {/* ─── Hoja LOCATE (fijar punto en mapa) ─── */}
+          {step === 'map' && inLocateMode && (
+          <View style={[st.locateSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+            <View style={st.sheetHandle} />
+            <Text style={st.locateSheetTitle}>
+              {locateTarget === 'origin' ? 'Ubica el punto de inicio' : 'Ubica el punto de destino'}
             </Text>
-            <View style={st.priceRow}>
-              <View style={st.priceCard}>
-                <Text style={st.priceLbl}>Desde</Text>
-                <Text style={st.priceAmt}>$ {(driverPrice || 0).toLocaleString('es-CO')}</Text>
-              </View>
-              <View style={st.priceCard}>
-                <Text style={st.priceLbl}>Hasta</Text>
-                <Text style={st.priceAmt}>$ {(clientPrice || 0).toLocaleString('es-CO')}</Text>
-              </View>
-            </View>
-          </Animatable.View>
-
-          {/* Observations */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={100} useNativeDriver>
-            <Text style={st.label}>Observaciones (opcional)</Text>
-            <TextInput
-              style={st.obsInput}
-              placeholder="Instrucciones adicionales..."
-              placeholderTextColor="rgba(255,255,255,0.35)"
-              value={observations}
-              onChangeText={setObservations}
-              multiline
-              maxLength={500}
-            />
-          </Animatable.View>
-
-          {/* Payment method selector */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={120} useNativeDriver>
-            <Text style={st.label}>Método de Pago</Text>
-            <View style={st.payMethodRow}>
-              {[
-                { key: 'cash' as const, label: 'Efectivo', icon: 'cash-outline' as const },
-                { key: 'nequi' as const, label: 'Nequi', icon: 'phone-portrait-outline' as const },
-                { key: 'daviplata' as const, label: 'Daviplata', icon: 'wallet-outline' as const },
-              ].map((m) => (
-                <TouchableOpacity
-                  key={m.key}
-                  style={[
-                    st.payMethodBtn,
-                    paymentMode === m.key && st.payMethodBtnActive,
-                  ]}
-                  onPress={() => setPaymentMode(m.key)}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons
-                    name={m.icon}
-                    size={20}
-                    color={paymentMode === m.key ? '#051A26' : '#00E5FF'}
-                  />
-                  <Text
-                    style={[
-                      st.payMethodTxt,
-                      paymentMode === m.key && st.payMethodTxtActive,
-                    ]}
-                  >
-                    {m.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </Animatable.View>
-
-          {/* Submit */}
-          <Animatable.View animation="fadeInUp" duration={250} delay={140} useNativeDriver>
+            <Text style={st.locateSheetSub}>Arrastra el mapa para mover la ubicación</Text>
             <TouchableOpacity
-              style={[st.submitBtn, !canSubmit && { opacity: 0.5 }]}
-              onPress={handleSubmit}
-              disabled={!canSubmit}
-              activeOpacity={0.85}
+              style={st.locateAddressCard}
+              onPress={() => exitLocateToSearch(locateTarget || undefined)}
+              activeOpacity={0.8}
             >
-              {saving ? (
-                <ActivityIndicator color="#051A26" size="small" />
+              <Ionicons
+                name={locateTarget === 'origin' ? 'navigate-circle' : 'flag'}
+                size={18}
+                color={locateTarget === 'origin' ? '#00E676' : '#E91E63'}
+              />
+              <Text style={st.locateAddressTxt} numberOfLines={2}>
+                {liveLocateAddress || 'Buscando dirección...'}
+              </Text>
+              <Ionicons name="create-outline" size={16} color="#00E5FF" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[st.confirmPinBtnInSheet, confirmingPin && st.confirmPinBtnDisabled]}
+              onPress={confirmMapPin}
+              activeOpacity={0.85}
+              disabled={confirmingPin}
+            >
+              {confirmingPin ? (
+                <ActivityIndicator size="small" color="#333333" />
               ) : (
-                <>
-                  <Ionicons name="send" size={20} color="#051A26" />
-                  <Text style={st.submitTxt}>Crear Reserva</Text>
-                </>
+                <Text style={st.confirmPinTxt}>
+                  {locateTarget === 'origin' ? 'Confirmar punto inicio' : 'Confirmar Destino'}
+                </Text>
               )}
             </TouchableOpacity>
-          </Animatable.View>
-
-          <View style={st.userRow}>
-            <Ionicons name="person-circle-outline" size={16} color="rgba(255,255,255,0.35)" />
-            <Text style={st.userTxt}>Reservando como: {customerName}</Text>
           </View>
-              </ScrollView>
-            </TouchableWithoutFeedback>
-        </KeyboardAvoidingView>
-      )}
+          )}
 
-      <DateTimePickerModal
-        isVisible={showDatePicker}
-        mode="datetime"
-        minimumDate={new Date()}
-        locale="es_CO"
-        onConfirm={(date) => { setScheduledDate(date); setShowDatePicker(false); }}
-        onCancel={() => setShowDatePicker(false)}
-      />
+          {/* ─── Modal DETALLES DE RESERVA (mapa con trazado visible arriba) ─── */}
+          {step === 'details' && (
+            <Animated.View
+              style={[
+                st.detailsSheet,
+                {
+                  height: detailsHeightAnim,
+                  paddingBottom: Math.max(insets.bottom, 8),
+                },
+              ]}
+            >
+              <View style={st.detailsSheetInner}>
+                <View {...detailsSheetPan.panHandlers}>
+                  <View style={st.sheetHandle} />
+                  <Text style={st.detailsSheetTitle}>Detalles De Reserva</Text>
+                </View>
+
+                <ScrollView
+                  ref={scrollViewRef}
+                  style={{ flex: 1 }}
+                  contentContainerStyle={st.detailsContent}
+                  showsVerticalScrollIndicator={false}
+                  keyboardShouldPersistTaps="handled"
+                  keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+                  bounces
+                  nestedScrollEnabled
+                  onScroll={handleDetailsScroll}
+                  scrollEventThrottle={16}
+                >
+                  {/* Ruta compacta */}
+                  <View style={st.glassCard}>
+                    <TouchableOpacity
+                      style={st.routeCardRow}
+                      onPress={() => editAddressFromDetails('origin')}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[st.routeCardDot, { backgroundColor: '#00E676' }]} />
+                      <Text style={st.routeCardAddr}>{origin?.title || 'Origen'}</Text>
+                      <Ionicons name="create-outline" size={15} color="#00E5FF" />
+                    </TouchableOpacity>
+                    <View style={st.routeCardLine} />
+                    <TouchableOpacity
+                      style={st.routeCardRow}
+                      onPress={() => editAddressFromDetails('destination')}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[st.routeCardDot, { backgroundColor: '#E91E63' }]} />
+                      <Text style={st.routeCardAddr}>{destination?.title || 'Destino'}</Text>
+                      <Ionicons name="create-outline" size={15} color="#00E5FF" />
+                    </TouchableOpacity>
+                    <View style={st.routeCardMeta}>
+                      <Text style={st.routeCardMetaTxt}>{distance.toFixed(1)} km</Text>
+                      <Text style={st.routeCardMetaTxt}>·</Text>
+                      <Text style={st.routeCardMetaTxt}>{Math.round(duration)} min</Text>
+                    </View>
+                  </View>
+
+                  {/* Tipo De Servicio */}
+                  <Text style={st.label}>Tipo De Servicio</Text>
+                  <View style={st.segRow}>
+                    <TouchableOpacity
+                      style={[st.segItem, serviceType === 'immediate' && st.segItemOn]}
+                      onPress={() => { animateChipSelect(); setServiceType('immediate'); }}
+                      activeOpacity={0.85}
+                    >
+                      <BlurView intensity={serviceType === 'immediate' ? 28 : 18} tint="dark" style={st.segBlur} />
+                      <View style={st.segInner}>
+                        <View style={st.segIconWrap}>
+                          <Ionicons name="flash" size={17} color="#051A26" />
+                        </View>
+                        <Text style={[st.segTxt, serviceType === 'immediate' && st.segTxtOn]} numberOfLines={1}>
+                          Inmediato
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[st.segItem, serviceType === 'reservation' && st.segItemOn]}
+                      onPress={() => { animateChipSelect(); setServiceType('reservation'); }}
+                      activeOpacity={0.85}
+                    >
+                      <BlurView intensity={serviceType === 'reservation' ? 28 : 18} tint="dark" style={st.segBlur} />
+                      <View style={st.segInner}>
+                        <View style={st.segIconWrap}>
+                          <Ionicons name="calendar" size={17} color="#051A26" />
+                        </View>
+                        <Text style={[st.segTxt, serviceType === 'reservation' && st.segTxtOn]} numberOfLines={1}>
+                          Programar Viaje
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                  {serviceType === 'reservation' && (
+                    <TouchableOpacity
+                      style={st.datePickerBtn}
+                      onPress={openSchedulePicker}
+                      activeOpacity={0.8}
+                    >
+                      <Ionicons name="calendar-outline" size={18} color="#00E5FF" />
+                      <Text style={st.datePickerTxt}>
+                        {scheduledDate
+                          ? formatScheduledLabel(scheduledDate)
+                          : 'Seleccionar fecha y hora'}
+                      </Text>
+                      <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Tipo De Recorrido (debajo de servicio) */}
+                  <Text style={st.label}>Tipo De Recorrido</Text>
+                  <View style={st.segRow}>
+                    <TouchableOpacity
+                      style={[st.segItem, tripType === 'Ida' && st.segItemOn]}
+                      onPress={() => { animateChipSelect(); setTripType('Ida'); }}
+                      activeOpacity={0.85}
+                    >
+                      <BlurView intensity={tripType === 'Ida' ? 28 : 18} tint="dark" style={st.segBlur} />
+                      <View style={st.segInner}>
+                        <View style={st.segIconWrap}>
+                          <Ionicons name="arrow-forward" size={17} color="#051A26" />
+                        </View>
+                        <Text style={[st.segTxt, tripType === 'Ida' && st.segTxtOn]}>Ida</Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[st.segItem, tripType === 'Ida y Vuelta' && st.segItemOn]}
+                      onPress={() => { animateChipSelect(); setTripType('Ida y Vuelta'); }}
+                      activeOpacity={0.85}
+                    >
+                      <BlurView intensity={tripType === 'Ida y Vuelta' ? 28 : 18} tint="dark" style={st.segBlur} />
+                      <View style={st.segInner}>
+                        <View style={st.segIconWrap}>
+                          <Ionicons name="swap-horizontal" size={17} color="#051A26" />
+                        </View>
+                        <Text style={[st.segTxt, tripType === 'Ida y Vuelta' && st.segTxtOn]} numberOfLines={1}>
+                          Ida Y Vuelta
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Vehículo de preferencia */}
+                  <Text style={st.label}>Selecciona Vehiculo De Preferencia</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    nestedScrollEnabled
+                    contentContainerStyle={st.vehicleRow}
+                  >
+                    {vehicleTypes.map(v => {
+                      const active = carType === v.key;
+                      const fare = vehicleFareRanges[v.key];
+                      const desc = v.description;
+                      const imgSource = v.imageUri
+                        ? { uri: v.imageUri }
+                        : VEHICLE_CATEGORY_IMAGES[v.key] || null;
+                      return (
+                        <TouchableOpacity
+                          key={v.key}
+                          style={[st.vehicleBtn, active && st.vehicleBtnActive]}
+                          onPress={() => setCarType(v.key)}
+                          activeOpacity={0.8}
+                        >
+                          <BlurView intensity={active ? 30 : 16} tint="dark" style={st.segBlur} />
+                          <View style={st.vehicleBtnInner}>
+                            {imgSource ? (
+                              <Image
+                                source={imgSource}
+                                style={[st.vehicleImg, active && st.vehicleImgActive]}
+                                resizeMode="contain"
+                              />
+                            ) : (
+                              <Ionicons name={v.icon} size={22} color={active ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+                            )}
+                            <Text style={[st.vehicleTxt, active && st.vehicleTxtActive]} numberOfLines={1}>
+                              {v.label}
+                            </Text>
+                            <Text
+                              style={[st.vehicleDesc, active && st.vehicleDescActive]}
+                              numberOfLines={2}
+                            >
+                              {desc || ' '}
+                            </Text>
+                            {fare ? (
+                              <View style={[st.vehiclePricePill, active && st.vehiclePricePillActive]}>
+                                <Text
+                                  style={st.vehiclePriceTxt}
+                                  numberOfLines={1}
+                                  adjustsFontSizeToFit
+                                  minimumFontScale={0.6}
+                                >
+                                  {`$ ${fare.low.toLocaleString('es-CO')} – $ ${fare.high.toLocaleString('es-CO')}`}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+
+                  {/* Observaciones */}
+                  <Text style={st.label}>Observaciones (Opcional)</Text>
+                  <View style={st.obsGlass}>
+                    <BlurView intensity={18} tint="dark" style={st.segBlur} />
+                    <TextInput
+                      style={st.obsInput}
+                      placeholder="Instrucciones adicionales..."
+                      placeholderTextColor="rgba(255,255,255,0.35)"
+                      value={observations}
+                      onChangeText={setObservations}
+                      multiline
+                      maxLength={500}
+                    />
+                  </View>
+                  <View style={{ height: 12 }} />
+                </ScrollView>
+
+                {/* Footer fijo: precio + pago + crear */}
+                <View style={st.detailsFooter}>
+                  <View style={st.footerInner}>
+                      <View style={st.payHeaderRow}>
+                        <Text style={st.footerLabel}>Selecciona Método De Pago</Text>
+                        <View style={st.pricePill}>
+                          <Text style={st.pricePillTxt}>
+                            $ {(driverPrice || 0).toLocaleString('es-CO')}
+                          </Text>
+                          <Text style={st.pricePillSep}>–</Text>
+                          <Text style={st.pricePillTxt}>
+                            $ {(clientPrice || 0).toLocaleString('es-CO')}
+                          </Text>
+                        </View>
+                      </View>
+
+                    <View style={st.segRow}>
+                      {([
+                        {
+                          key: 'cash' as const,
+                          label: 'Efectivo',
+                          accent: '#16A34A',
+                          logo: null as string | null,
+                          icon: 'cash-outline' as const,
+                        },
+                        {
+                          key: 'nequi' as const,
+                          label: 'Nequi',
+                          accent: '#E6007E',
+                          logo: NEQUI_LOGO_URI,
+                          icon: 'phone-portrait-outline' as const,
+                        },
+                        {
+                          key: 'daviplata' as const,
+                          label: 'Daviplata',
+                          accent: '#ED1C24',
+                          logo: DAVIPLATA_LOGO_URI,
+                          icon: 'wallet-outline' as const,
+                        },
+                      ]).map((m) => {
+                        const selected = paymentMode === m.key;
+                        return (
+                          <TouchableOpacity
+                            key={m.key}
+                            style={[
+                              st.paySeg,
+                              { flex: selected ? 2.4 : 1 },
+                              selected && { borderColor: m.accent },
+                            ]}
+                            onPress={() => { animateChipSelect(); setPaymentMode(m.key); }}
+                            activeOpacity={0.85}
+                          >
+                            <BlurView intensity={selected ? 32 : 16} tint="dark" style={st.segBlur} />
+                            <View style={st.paySegInner}>
+                              <View style={[st.payIconBox, selected && { borderColor: m.accent }]}>
+                                {m.logo ? (
+                                  <Image source={{ uri: m.logo }} style={st.payLogo} resizeMode="contain" />
+                                ) : (
+                                  <Ionicons name={m.icon} size={17} color={m.accent} />
+                                )}
+                              </View>
+                              {selected && (
+                                <Text style={[st.paySegTxt, { color: m.accent }]} numberOfLines={1}>
+                                  {m.label}
+                                </Text>
+                              )}
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    <TouchableOpacity
+                      style={[st.submitBtn, !canSubmit && { opacity: 0.5 }]}
+                      onPress={handleSubmit}
+                      disabled={!canSubmit}
+                      activeOpacity={0.85}
+                    >
+                      {saving ? (
+                        <ActivityIndicator color="#051A26" size="small" />
+                      ) : (
+                        <>
+                          <Ionicons name="send" size={16} color="#051A26" />
+                          <Text style={st.submitTxt}>Crear Reserva con {carType}</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </Animated.View>
+          )}
+      </KeyboardAvoidingView>
+
+      <Modal
+        visible={showDatePicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowDatePicker(false)}
+      >
+        <View style={st.schedOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowDatePicker(false)} />
+          <View style={[st.schedSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+            <View style={st.sheetHandle} />
+            <Text style={st.schedTitle}>Programar Viaje</Text>
+            <Text style={st.schedPreview}>{formatScheduledLabel(previewPickerDate())}</Text>
+
+            <View style={st.wheelWrap}>
+              <View style={st.wheelHighlight} pointerEvents="none" />
+              <WheelColumn
+                width="42%"
+                index={pickerDayIdx}
+                onChange={setPickerDayIdx}
+                data={dayOptions.map((d, i) => ({
+                  key: `d${i}`,
+                  label: `${WEEKDAYS_SHORT[d.getDay()]} ${d.getDate()} de ${MONTHS_ES[d.getMonth()].slice(0, 3)}.`,
+                }))}
+              />
+              <WheelColumn
+                width="16%"
+                index={pickerHourIdx}
+                onChange={setPickerHourIdx}
+                data={hourOptions}
+              />
+              <Text style={st.wheelColon}>:</Text>
+              <WheelColumn
+                width="16%"
+                index={pickerMinIdx}
+                onChange={setPickerMinIdx}
+                data={minOptions}
+              />
+              <WheelColumn
+                width="18%"
+                index={pickerAmPmIdx}
+                onChange={setPickerAmPmIdx}
+                data={ampmOptions}
+              />
+            </View>
+
+            <View style={st.schedActions}>
+              <TouchableOpacity style={st.schedCancelBtn} onPress={() => setShowDatePicker(false)} activeOpacity={0.8}>
+                <Text style={st.schedCancelTxt}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={st.schedConfirmBtn} onPress={confirmSchedulePicker} activeOpacity={0.85}>
+                <Text style={st.schedConfirmTxt}>Confirmar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <CustomAlert
         visible={alertVisible}
@@ -1307,24 +2327,73 @@ const st = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
+  mapBackBtn: {
+    position: 'absolute', left: 16, zIndex: 40,
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(5,26,38,0.88)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 6,
+  },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
 
-  mapContainer: { flex: 1 },
-  myLocBtn: {
-    position: 'absolute', bottom: 120, right: 16, width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  mapContainer: { flex: 1, position: 'relative', overflow: 'visible' },
+  // Punta del pin (tip) anclada al centro exacto del mapa
+  centerPinWrap: {
+    position: 'absolute',
+    left: '50%',
+    top: '50%',
+    width: ROUTE_PIN_WIDTH,
+    height: ROUTE_PIN_HEIGHT,
+    marginLeft: -ROUTE_PIN_WIDTH / 2,
+    marginTop: -ROUTE_PIN_HEIGHT,
+    zIndex: 40,
+    elevation: 40,
+    alignItems: 'center',
   },
-  zoomControls: {
-    position: 'absolute', left: 16, top: 220, gap: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  mapTopFade: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 30,
   },
-  zoomBtn: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(5,26,38,0.88)', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
+  panelTitle: {
+    fontSize: 20, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3, marginBottom: 4,
+    textAlign: 'center',
+  },
+  panelSubtitle: {
+    fontSize: 13, fontWeight: '400', color: 'rgba(255,255,255,0.45)', marginBottom: 16,
+    textAlign: 'center',
+  },
+  leftMapControls: {
+    position: 'absolute',
+    left: 16,
+    bottom: 120,
+    gap: 10,
+    zIndex: 15,
+    elevation: 15,
+  },
+  rightMapControls: {
+    position: 'absolute',
+    right: 16,
+    bottom: 120,
+    gap: 10,
+    zIndex: 15,
+    elevation: 15,
+  },
+  mapCtrlBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(5,26,38,0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.3)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   /* ═══ Relocating UI (overlay sobre el mapa) ═══ */
   relocatingBanner: {
@@ -1342,18 +2411,217 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(5,26,38,0.85)',
     alignItems: 'center', justifyContent: 'center',
   },
-  mapHintPill: {
-    position: 'absolute', top: 14, alignSelf: 'center',
-    backgroundColor: 'rgba(5,26,38,0.88)',
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14,
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)',
+  mapHintWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 35,
   },
-  mapHintText: { color: '#00E5FF', fontSize: 11, fontWeight: '600' },
+  mapHintPill: {
+    height: 32,
+    maxWidth: '78%',
+    backgroundColor: 'rgba(5,26,38,0.88)',
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  mapHintText: {
+    color: '#00E5FF',
+    fontSize: 11,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
   searchPanel: {
-    backgroundColor: 'rgba(5,26,38,0.95)', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 40,
-    borderTopLeftRadius: 28, borderTopRightRadius: 28, marginTop: -60,
+    backgroundColor: '#051A26',
+    paddingHorizontal: 16, paddingTop: 10,
+    borderTopLeftRadius: 28, borderTopRightRadius: 28,
     borderTopWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    top: '16%',
+    zIndex: 40,
+    elevation: 40,
+  },
+  routeSheet: {
+    backgroundColor: '#051A26',
+    paddingHorizontal: 16, paddingTop: 10,
+    borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    borderTopWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 40,
+    elevation: 40,
+  },
+  routeAddrRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(10,46,61,0.85)',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,229,255,0.28)',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  routeAddrTxt: {
+    flex: 1,
+    color: '#FFF',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  fieldWrap: {
+    position: 'relative',
+    marginBottom: 0,
+  },
+  addrInput: {
+    height: 46,
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#FFF',
+    backgroundColor: 'rgba(10,46,61,0.85)',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,229,255,0.38)',
+    paddingLeft: 36,
+    paddingRight: 42,
+    paddingVertical: 10,
+    textAlign: 'left',
+  },
+  listScroll: {
+    flexGrow: 1,
+    flexShrink: 1,
+    marginTop: 10,
+    maxHeight: SH * 0.28,
+  },
+  markerPad: {
+    paddingTop: 18,
+    paddingHorizontal: 18,
+    paddingBottom: 6,
+    overflow: 'visible',
+    backgroundColor: 'transparent',
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    marginBottom: 12,
+  },
+  clearFieldBtn: {
+    position: 'absolute',
+    right: 10,
+    top: 14,
+    zIndex: 50,
+    elevation: 50,
+  },
+  recentsSection: {
+    marginTop: 14,
+    flexShrink: 1,
+  },
+  recentsList: {
+    // Panel alto: caben los 5 recientes sin ScrollView (evita VirtualizedList nested)
+  },
+  recentsTitle: {
+    fontSize: 11, fontWeight: '700', color: 'rgba(255,255,255,0.45)',
+    letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 8, paddingHorizontal: 2,
+  },
+  recentsEmpty: {
+    fontSize: 13, color: 'rgba(255,255,255,0.4)', paddingVertical: 10, paddingHorizontal: 4,
+  },
+  recentRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 10, paddingHorizontal: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'transparent',
+  },
+  recentIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(0,229,255,0.1)', alignItems: 'center', justifyContent: 'center',
+  },
+  recentTxt: {
+    flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.88)', fontWeight: '500',
+  },
+  locateMapRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginTop: 8, marginBottom: 4,
+    paddingVertical: 12, paddingHorizontal: 4,
+    backgroundColor: 'rgba(10,46,61,0.55)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.15)',
+  },
+  locateMapIcon: {
+    width: 36, height: 36, borderRadius: 10,
+    backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center',
+  },
+  locateMapTxt: {
+    flex: 1, fontSize: 14, fontWeight: '600', color: '#FFFFFF',
+  },
+  locateSheet: {
+    backgroundColor: '#051A26',
+    paddingHorizontal: 16, paddingTop: 10,
+    borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    borderTopWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 45,
+    elevation: 45,
+  },
+  locateSheetTitle: {
+    fontSize: 18, fontWeight: '700', color: '#FFF', textAlign: 'center', marginBottom: 4,
+  },
+  locateSheetSub: {
+    fontSize: 13, color: 'rgba(255,255,255,0.45)', textAlign: 'center', marginBottom: 14,
+  },
+  locateAddressCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: 'rgba(10,46,61,0.85)',
+    borderRadius: 14, borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.35)',
+    paddingHorizontal: 14, paddingVertical: 14,
+    marginBottom: 12,
+  },
+  locateAddressTxt: {
+    flex: 1, fontSize: 13, color: '#FFF', fontWeight: '500',
+  },
+  confirmPinBtnInSheet: {
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  confirmPinBtn: {
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+    minWidth: 220,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmPinBtnDisabled: {
+    opacity: 0.7,
+  },
+  confirmPinTxt: {
+    color: '#333333',
+    fontSize: 15,
+    fontWeight: '600',
+    letterSpacing: 0.2,
   },
   inputIconWrap: { position: 'absolute', left: 14, top: 15, zIndex: 20 },
   inputDot: { width: 10, height: 10, borderRadius: 5 },
@@ -1365,7 +2633,7 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)',
   },
   favoritesSection: {
-    marginTop: 12,
+    marginTop: 10,
   },
   favoritesHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, paddingHorizontal: 2,
@@ -1405,90 +2673,489 @@ const st = StyleSheet.create({
   },
   continueTxt: { fontSize: 17, fontWeight: '700', color: '#051A26' },
 
-  detailsContent: { paddingHorizontal: 20, paddingTop: 14 },
-  label: { fontSize: 12, fontWeight: '600', color: '#00E5FF', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 8, marginTop: 18 },
+  detailsSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#051A26',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+    zIndex: 50,
+    elevation: 50,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+  },
+  detailsSheetInner: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+  },
+  detailsSheetTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    letterSpacing: -0.2,
+    marginBottom: 10,
+  },
+  detailsContent: {
+    paddingBottom: 8,
+  },
+  detailsSection: {
+    marginBottom: 4,
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.15,
+    marginBottom: 8,
+    marginTop: 14,
+  },
+  glassCard: {
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
   routeCard: {
-    padding: 16, borderRadius: 18,
-    backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.14)',
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: 'rgba(10,46,61,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.18)',
   },
-  routeCardRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  routeCardDot: { width: 10, height: 10, borderRadius: 5 },
-  routeCardLine: { width: 2, height: 14, backgroundColor: 'rgba(255,255,255,0.12)', marginLeft: 4 },
-  routeCardAddr: { flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.8)' },
-  routeCardMeta: { flexDirection: 'row', gap: 6, marginTop: 12, justifyContent: 'center' },
-  routeCardMetaTxt: { fontSize: 12, color: 'rgba(255,255,255,0.5)', fontWeight: '600' },
-  editRouteBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    marginTop: 12, paddingVertical: 8, borderRadius: 10,
-    backgroundColor: 'rgba(0,229,255,0.08)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.15)',
+  routeCardRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
   },
-  editRouteTxt: { fontSize: 12, fontWeight: '600', color: '#00E5FF' },
-  vehicleRow: { gap: 10, paddingVertical: 4 },
+  routeCardDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    marginTop: 4,
+  },
+  routeCardLine: {
+    width: 2,
+    height: 10,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    marginLeft: 3.5,
+    marginVertical: 4,
+  },
+  routeCardAddr: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    color: 'rgba(255,255,255,0.9)',
+    fontWeight: '500',
+  },
+  routeCardMeta: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 10,
+    justifyContent: 'center',
+  },
+  routeCardMetaTxt: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.5)',
+    fontWeight: '600',
+  },
+  /* Segmented liquid-glass */
+  segRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  segItem: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  segItemOn: {
+    borderColor: 'rgba(0,229,255,0.55)',
+    backgroundColor: 'rgba(0,229,255,0.12)',
+  },
+  segBlur: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  segInner: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  segIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  segTxt: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+  },
+  segTxtOn: {
+    color: '#00E5FF',
+  },
+  /* legacy dyn (kept if referenced) */
+  dynRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dynChip: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 46, paddingHorizontal: 8, borderRadius: 14, backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.18)', overflow: 'hidden' },
+  dynChipWide: { flex: 3, backgroundColor: 'rgba(0,229,255,0.14)', borderColor: '#00E5FF' },
+  dynChipNarrow: { flex: 2 },
+  dynIconBox: { width: 32, height: 32, borderRadius: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: 'rgba(0,0,0,0.08)', alignItems: 'center', justifyContent: 'center' },
+  dynIconBoxOn: { borderColor: 'rgba(5,26,38,0.2)' },
+  dynChipTxt: { flexShrink: 1, fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
+  vehicleRow: {
+    flexDirection: 'row',
+    gap: VEHICLE_CARD_GAP,
+    paddingRight: 4,
+  },
   vehicleBtn: {
-    width: (SW - 70) / 4, alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 14, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.15)',
+    width: VEHICLE_CARD_W,
+    minHeight: 118,
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
   },
-  vehicleBtnActive: { backgroundColor: '#00E5FF', borderColor: '#00E5FF' },
-  vehicleTxt: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.5)' },
-  vehicleTxtActive: { color: '#051A26' },
-  tripRow: { flexDirection: 'row', gap: 12 },
+  vehicleBtnActive: {
+    borderColor: 'rgba(0,229,255,0.55)',
+    backgroundColor: 'rgba(0,229,255,0.12)',
+  },
+  vehicleBtnInner: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 3,
+    paddingTop: 6,
+    paddingBottom: 8,
+    paddingHorizontal: 4,
+  },
+  vehicleImg: {
+    width: 52,
+    height: 36,
+    marginTop: 0,
+    opacity: 0.95,
+  },
+  vehicleImgActive: {
+    opacity: 1,
+  },
+  vehicleTxt: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.5)',
+    textAlign: 'center',
+    marginTop: 1,
+  },
+  vehicleTxtActive: {
+    color: '#00E5FF',
+  },
+  vehicleDesc: {
+    fontSize: 8,
+    fontWeight: '500',
+    lineHeight: 10,
+    minHeight: 20, // siempre 2 líneas → precios alineados
+    color: 'rgba(255,255,255,0.38)',
+    textAlign: 'center',
+    paddingHorizontal: 2,
+  },
+  vehicleDescActive: {
+    color: 'rgba(0,229,255,0.72)',
+  },
+  vehiclePricePill: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 'auto',
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.35)',
+    maxWidth: '100%',
+  },
+  vehiclePricePillActive: {
+    backgroundColor: 'rgba(0,229,255,0.18)',
+    borderColor: 'rgba(0,229,255,0.5)',
+  },
+  vehiclePriceTxt: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#00E5FF',
+    textAlign: 'center',
+  },
+  tripRow: { flexDirection: 'row', gap: 10 },
   tripBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    paddingVertical: 14, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.15)',
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 12, borderRadius: 14,
+    backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.16)',
   },
   tripBtnActive: { backgroundColor: '#00E5FF', borderColor: '#00E5FF' },
-  tripTxt: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.6)' },
+  tripTxt: { fontSize: 13, fontWeight: '600', color: 'rgba(255,255,255,0.6)' },
   tripTxtActive: { color: '#051A26' },
-  infoCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    paddingVertical: 14, paddingHorizontal: 16, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+  obsGlass: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    minHeight: 56,
   },
-  infoVal: { flex: 1, fontSize: 14, fontWeight: '500', color: '#FFF' },
-  priceRow: { flexDirection: 'row', gap: 12 },
-  priceCard: {
-    flex: 1, paddingVertical: 16, paddingHorizontal: 14, borderRadius: 16, alignItems: 'center',
-    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
-  },
-  priceLbl: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', marginBottom: 6 },
-  priceAmt: { fontSize: 18, fontWeight: '700', color: '#00E5FF' },
   obsInput: {
-    minHeight: 80, padding: 16, borderRadius: 16, fontSize: 14, color: '#FFF',
-    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
+    minHeight: 56,
+    padding: 12,
+    fontSize: 13,
+    color: '#FFF',
     textAlignVertical: 'top',
+    backgroundColor: 'transparent',
   },
-  payMethodRow: {
-    flexDirection: 'row', gap: 10, marginTop: 8,
+  detailsFooter: {
+    marginHorizontal: -16,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.10)',
+    overflow: 'hidden',
   },
-  payMethodBtn: {
-    flex: 1, flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    gap: 6, paddingVertical: 14, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1.5, borderColor: 'rgba(0,229,255,0.18)',
+  footerInner: {
+    gap: 8,
+    paddingBottom: 2,
   },
-  payMethodBtnActive: {
-    backgroundColor: '#00E5FF', borderColor: '#00E5FF',
+  footerLabel: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.15,
   },
-  payMethodTxt: {
-    fontSize: 12, fontWeight: '600', color: '#00E5FF',
+  payHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 8,
   },
-  payMethodTxtActive: {
-    color: '#051A26',
+  pricePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.35)',
   },
+  pricePillTxt: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#00E5FF',
+  },
+  pricePillSep: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(0,229,255,0.55)',
+  },
+  paySeg: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  paySegInner: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingHorizontal: 6,
+  },
+  payIconBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  payLogo: {
+    width: 20,
+    height: 20,
+  },
+  paySegTxt: {
+    flexShrink: 1,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  payChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 6,
+    borderRadius: 14,
+    backgroundColor: 'rgba(10,46,61,0.45)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,229,255,0.14)',
+    overflow: 'hidden',
+  },
+  payChipWide: { flex: 3 },
+  payChipNarrow: { flex: 1 },
+  payChipTxt: { flexShrink: 1, fontSize: 13, fontWeight: '700' },
   submitBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    marginTop: 24, paddingVertical: 16, borderRadius: 20, backgroundColor: '#00E5FF',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: 14, backgroundColor: '#00E5FF',
+    marginTop: 2,
   },
-  submitTxt: { fontSize: 16, fontWeight: '700', color: '#051A26' },
-  userRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 16, paddingVertical: 10 },
-  userTxt: { fontSize: 12, color: 'rgba(255,255,255,0.4)' },
+  submitTxt: { fontSize: 14, fontWeight: '700', color: '#051A26' },
+  userRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10, paddingVertical: 6 },
+  userTxt: { fontSize: 11, color: 'rgba(255,255,255,0.4)' },
   datePickerBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
-    marginTop: 10, paddingVertical: 14, paddingHorizontal: 16, borderRadius: 16,
-    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)',
+    marginTop: 8, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.12)',
   },
-  datePickerTxt: { flex: 1, fontSize: 14, fontWeight: '600', color: '#FFF' },
+  datePickerTxt: { flex: 1, fontSize: 13, fontWeight: '600', color: '#FFF' },
+
+  routeEndpointStart: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 2.5,
+    borderColor: ROUTE_LINE_BLUE,
+  },
+  routeEndpointEnd: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#E91E63',
+    borderWidth: 2.5,
+    borderColor: ROUTE_LINE_BLUE,
+  },
+
+  schedOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  schedSheet: {
+    backgroundColor: '#051A26',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderColor: 'rgba(0,229,255,0.22)',
+  },
+  schedTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#FFF',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  schedPreview: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#00E5FF',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  wheelWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: WHEEL_ITEM_H * 5,
+    marginBottom: 14,
+  },
+  wheelHighlight: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    top: WHEEL_ITEM_H * 2,
+    height: WHEEL_ITEM_H,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  wheelItem: {
+    height: WHEEL_ITEM_H,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  wheelItemTxt: {
+    fontSize: 15,
+    color: 'rgba(255,255,255,0.35)',
+    fontWeight: '500',
+  },
+  wheelItemTxtOn: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  wheelColon: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.7)',
+    marginHorizontal: 2,
+  },
+  schedActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  schedCancelBtn: {
+    flex: 1,
+    paddingVertical: 13,
+    borderRadius: 14,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  schedCancelTxt: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.7)',
+  },
+  schedConfirmBtn: {
+    flex: 1,
+    paddingVertical: 13,
+    borderRadius: 14,
+    alignItems: 'center',
+    backgroundColor: '#00E5FF',
+  },
+  schedConfirmTxt: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#051A26',
+  },
 
   /* ═══ Mini Map Preview ═══ */
   miniMapContainer: {

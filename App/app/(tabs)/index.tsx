@@ -48,27 +48,58 @@ import RNPickerSelect from "react-native-picker-select";
 import * as ImagePicker from "expo-image-picker";
 import { closeModalBeforeCamera } from "@/common/utils/cameraPresentation";
 import { Button, Input } from "react-native-elements";
-import { ActivityIndicator } from "react-native"; // Aseg�rate de importar ActivityIndicator
+import { ActivityIndicator } from "react-native"; // Asegúrate de importar ActivityIndicator
 import axios from "axios";
-import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import supabase, { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { mapSupabaseBooking } from '@/common/store/bookingsSlice';
 const { width, height: screenHeight } = Dimensions.get("window");
 import { useRoute } from "@react-navigation/native";
 import { useFocusEffect } from "@react-navigation/native";
 import BottomSheet from "@gorhom/bottom-sheet"; // Importa el BottomSheet
-import MapSensor from "./mapaSensors";
+import MapSensor, { MapSensorHandle, MapViewMode } from "./mapaSensors";
+import type { GoogleMapTheme } from '@/config/googleMapsDarkStyle';
+import MapCompassIcon from '@/components/MapCompassIcon';
+import { LinearGradient } from 'expo-linear-gradient';
 import DriverReservationsScreen from "./DriverReservationsScreen";
+import { ActiveTripBannerStack } from "@/components/ActiveTripFloatingBanner";
+import { useActiveTripBanner } from "@/hooks/useActiveTripBanner";
+import DriverNotificationsModal from "@/components/DriverNotificationsModal";
+import { listServiceNotices } from "@/common/services/driverServiceNotices";
 import * as Speech from "expo-speech";
 import { useAppDispatch } from "../../common/store/hooks";
+import { updateUserProfile } from "@/common/reducers/authReducer";
 import { showDriverActiveNotification, dismissDriverNotification, updateDriverNotification } from '@/hooks/DriverNotificationService';
 import { requestIgnoreBatteryOptimization } from '@/common/services/batteryOptimizationPrompt';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { registerDriverGoHandlers } from '@/common/utils/driverGoBridge';
+import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
+import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
+import { useDriverNavBottomPad } from '@/components/DriverBottomNav';
 
 const tourImage = require("../../assets/images/icon.png");
 
 // Tracks driver IDs that have already seen the membership-renewal reminder
 // in the current app session. Reset on app reload (i.e. on next login).
 const driversShownRenewalReminder = new Set<string>();
+
+/** Puntos animados para "Buscando servicios..." */
+function SearchingServicesLabel({ style }: { style?: object }) {
+  const [dots, setDots] = useState('');
+  useEffect(() => {
+    let step = 0;
+    const timer = setInterval(() => {
+      step = (step + 1) % 4;
+      setDots('.'.repeat(step));
+    }, 420);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <Text style={style}>
+      Buscando servicios
+      <Text style={{ color: '#00E5FF' }}>{dots || ''}</Text>
+    </Text>
+  );
+}
 
 type UserDataState = {
   profile_image: string | null;
@@ -324,6 +355,7 @@ const MapScreen = () => {
     .trim()
     .toLowerCase();
   const isDriverView = userTypeRaw === 'driver';
+  const driverNavBottomPad = useDriverNavBottomPad();
 
   const resolveDriverName = useCallback(async () => {
     const profileFirst = String(profile?.first_name || profile?.firstName || '').trim();
@@ -383,7 +415,7 @@ const MapScreen = () => {
       .channel(`balance-bookings-${user.id}`)
       .on(
         'postgres_changes' as any,
-        { event: '*', schema: 'public', table: 'bookings', filter: `driver=eq.${user.id}` },
+        { event: '*', schema: 'public', table: 'reserva', filter: `id_conductor=eq.${user.id}` },
         () => { fetchBalanceBookings(); }
       )
       .subscribe();
@@ -484,20 +516,15 @@ const MapScreen = () => {
     dispatch(listenToSettingsChanges());
   }, [dispatch]);
 
-  // El FK de memberships.conductor referencia auth.users(id), o sea el auth_id del conductor.
-  // Probamos auth_id primero, con fallbacks por compatibilidad con datos legacy creados con users.id.
+  // memberships.conductor / bookings.driver_id = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
+  );
   // Marca el id para el cual ya completó (ok o error) el fetch inicial de membresías.
   // Sin esto, en el primer render con driverConductorId presente, membershipsLoading sigue
   // siendo `false` (estado inicial) en el closure del effect del popup, así que el modal
@@ -667,7 +694,7 @@ const MapScreen = () => {
       .channel('index-new-bookings')
       .on(
         'postgres_changes' as any,
-        { event: 'INSERT', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
+        { event: 'INSERT', schema: 'public', table: 'reserva', filter: 'estado=eq.NEW' },
         (payload: any) => {
           console.log('[DRIVER-FEED] Realtime INSERT recibido:', payload.new?.id, payload.new?.car_type);
           const booking = mapSupabaseBooking(payload.new);
@@ -680,9 +707,10 @@ const MapScreen = () => {
       )
       .on(
         'postgres_changes' as any,
-        { event: 'UPDATE', schema: 'public', table: 'bookings' },
+        { event: 'UPDATE', schema: 'public', table: 'reserva' },
         (payload: any) => {
-          if (payload.new.status !== 'NEW') {
+          const estado = payload.new.status ?? payload.new.estado;
+          if (estado !== 'NEW') {
             setFilteredBookings((prev: any[]) => prev.filter((b) => b.id !== payload.new.id));
           }
         }
@@ -916,7 +944,9 @@ const MapScreen = () => {
 
   const [lastDeclineTime, setLastDeclineTime] = useState<number | null>(null);
   const [bookingModalDecline, setBookingModalDecline] = useState(false);
-  const [driverOnline, setDriverOnline] = useState(Boolean(user?.driverActiveStatus));
+  const [driverOnline, setDriverOnline] = useState(
+    Boolean(profile?.driver_active_status || user?.driver_active_status || user?.driverActiveStatus)
+  );
   const [showIncomingRequest, setShowIncomingRequest] = useState(false);
   const [showNovedades, setShowNovedades] = useState(false);
   const [showDriverServicesModal, setShowDriverServicesModal] = useState(false);
@@ -933,8 +963,13 @@ const MapScreen = () => {
   // sigue activo e independiente de este flag. Volver a `true` cuando se
   // necesite el modal de solicitud entrante, una vez descartado el GL.
   const ENABLE_DRIVER_MAP_RESERVATIONS = false;
-  const [driverTab, setDriverTab] = useState<'home' | 'routes' | 'activity' | 'profile'>('home');
   const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
+  const goToggleLockRef = useRef(false);
+  const mapSensorRef = useRef<MapSensorHandle>(null);
+  const [mapViewMode, setMapViewMode] = useState<MapViewMode>('2D');
+  const [mapTheme, setMapTheme] = useState<GoogleMapTheme>('dark');
+  const [mapBearing, setMapBearing] = useState(0);
+  const { bookings: activeTripBookings, hasActiveTrip } = useActiveTripBanner();
   const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
@@ -948,12 +983,13 @@ const MapScreen = () => {
     setAlertButtons(buttons || [{ text: 'OK', onPress: () => setAlertVisible(false) }]);
     setAlertVisible(true);
   };
-  const goPulseAnim = useRef(new Animated.Value(0)).current;
-  const goBreathAnim = useRef(new Animated.Value(0)).current;
   const destGlowAnim = useRef(new Animated.Value(0)).current;
 
   const [driverHasUnreadNotif, setDriverHasUnreadNotif] = useState(false);
   const [driverActiveBookingId, setDriverActiveBookingId] = useState<string | null>(null);
+  const [driverNotifModalVisible, setDriverNotifModalVisible] = useState(false);
+  const [pendingServiceDetail, setPendingServiceDetail] = useState<any | null>(null);
+  const [driverAvailableServiceCount, setDriverAvailableServiceCount] = useState(0);
   const driverLastBookingIdRef = useRef<string | null>(null);
   const driverBellAnim = useRef(new Animated.Value(0)).current;
 
@@ -969,15 +1005,69 @@ const MapScreen = () => {
   }, [driverBellAnim]);
 
   const onDriverBellPress = useCallback(() => {
-    setDriverHasUnreadNotif(false);
     shakeDriverBell();
-    navigation.navigate('Notifications' as never);
-  }, [navigation, shakeDriverBell]);
+    setDriverNotifModalVisible(true);
+  }, [shakeDriverBell]);
 
   const driverBellRot = driverBellAnim.interpolate({
     inputRange: [-15, 0, 15],
     outputRange: ['-15deg', '0deg', '15deg'],
   });
+
+  // Misma animación de clic, cada 3.5s solo si hay punto verde / notificaciones
+  useEffect(() => {
+    if (!isDriverView) return;
+    const hasNotif = driverHasUnreadNotif || !!driverActiveBookingId;
+    if (!hasNotif) return;
+    const id = setInterval(() => {
+      shakeDriverBell();
+    }, 3500);
+    return () => clearInterval(id);
+  }, [isDriverView, driverHasUnreadNotif, driverActiveBookingId, shakeDriverBell]);
+
+  // Indicador verde: servicios disponibles (tab) o notificaciones guardadas
+  useEffect(() => {
+    if (!isDriverView) return;
+    let cancelled = false;
+    const checkNotices = async () => {
+      try {
+        const notices = await listServiceNotices();
+        if (cancelled) return;
+        const availableNotices = notices.filter((n) => !n.takenExpiresAt).length;
+        const hasLive = driverAvailableServiceCount > 0;
+        if (availableNotices > 0 || hasLive || notices.length > 0) {
+          // notices.length incluye tomados aún visibles 3 min → también cuenta
+          setDriverHasUnreadNotif(true);
+        } else if (!driverActiveBookingId) {
+          setDriverHasUnreadNotif(false);
+        }
+      } catch {}
+    };
+    if (driverAvailableServiceCount > 0) {
+      setDriverHasUnreadNotif(true);
+    }
+    checkNotices();
+    const id = setInterval(checkNotices, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isDriverView, driverActiveBookingId, driverAvailableServiceCount]);
+
+  // Circulito verde al instante cuando el panel embebido reporta servicios
+  useEffect(() => {
+    if (!isDriverView) return;
+    if (driverAvailableServiceCount > 0) {
+      setDriverHasUnreadNotif(true);
+    } else if (!driverActiveBookingId) {
+      // Sin servicios vivos: el poll de notices decide si quedan avisos "tomados"
+      listServiceNotices()
+        .then((notices) => {
+          if (notices.length === 0) setDriverHasUnreadNotif(false);
+        })
+        .catch(() => {});
+    }
+  }, [isDriverView, driverAvailableServiceCount, driverActiveBookingId]);
 
   const refreshDriverActiveBooking = useCallback(async () => {
     if (!isDriverView) return;
@@ -1042,6 +1132,14 @@ const MapScreen = () => {
   };
 
   const immediateBookings = useMemo(() => homeImmediateBookings || [], [homeImmediateBookings]);
+
+  // Circulito verde cuando hay servicios inmediatos en el feed
+  useEffect(() => {
+    if (!isDriverView) return;
+    if (immediateBookings.length > 0) {
+      setDriverHasUnreadNotif(true);
+    }
+  }, [isDriverView, immediateBookings.length]);
 
   useEffect(() => {
     if (!ENABLE_DRIVER_MAP_RESERVATIONS) {
@@ -1246,52 +1344,6 @@ const MapScreen = () => {
     );
   }, [navigation]);
 
-  useEffect(() => {
-    if (driverOnline) {
-      goPulseAnim.stopAnimation();
-      goBreathAnim.stopAnimation();
-      goPulseAnim.setValue(0);
-      goBreathAnim.setValue(0);
-      return;
-    }
-
-    goPulseAnim.setValue(0);
-    goBreathAnim.setValue(0);
-
-    const pulseLoop = Animated.loop(
-      Animated.timing(goPulseAnim, {
-        toValue: 1,
-        duration: 1800,
-        useNativeDriver: true,
-      })
-    );
-
-    const breathLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(goBreathAnim, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-        Animated.timing(goBreathAnim, {
-          toValue: 0,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-
-    pulseLoop.start();
-    breathLoop.start();
-
-    return () => {
-      pulseLoop.stop();
-      breathLoop.stop();
-      goPulseAnim.stopAnimation();
-      goBreathAnim.stopAnimation();
-    };
-  }, [driverOnline, goBreathAnim, goPulseAnim]);
-
   const speakDriverGreeting = useCallback(async () => {
     const hour = new Date().getHours();
     const periodGreeting = hour < 12 ? 'Buenos dias' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
@@ -1376,43 +1428,76 @@ const MapScreen = () => {
 
   }, [dbFirstName, dbLastName, profile?.first_name, profile?.firstName, profile?.last_name, profile?.lastName, resolveDriverName]);
 
-  const toggleDriverOnline = async () => {
-    console.log('[GO-DEBUG] toggleDriverOnline start, driverOnline actual:', driverOnline);
-    const newStatus = !driverOnline;
+  const setDriverOnlineStatus = async (newStatus: boolean) => {
+    if (goToggleLockRef.current) return;
+    if (newStatus === driverOnline) return;
+
+    // Al activar GO: ubicación «Siempre» + notificaciones son obligatorias
+    if (newStatus) {
+      const { ensureDriverGoPermissions, openAppSettings } = await import(
+        '@/common/utils/driverGoPermissions'
+      );
+      const perm = await ensureDriverGoPermissions();
+      if (!perm.ok) {
+        const buttons: AlertButton[] = perm.openSettings
+          ? [
+              { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+              {
+                text: 'Abrir ajustes',
+                onPress: () => {
+                  setAlertVisible(false);
+                  openAppSettings();
+                },
+              },
+            ]
+          : [{ text: 'Entendido', onPress: () => setAlertVisible(false) }];
+        showAlert('warning', perm.title, perm.message, buttons);
+        return;
+      }
+    }
+
+    goToggleLockRef.current = true;
+
     setDriverOnline(newStatus);
+    dispatch(updateUserProfile({ driver_active_status: newStatus }));
     setDriverReservationsMinimized(!newStatus);
     setShowIncomingRequest(false);
     setShowNovedades(false);
     setShowDriverServicesModal(false);
     setIsEnabled(newStatus);
-    console.log('[GO-DEBUG] newStatus:', newStatus);
 
-    if (newStatus) {
-      console.log('[GO-DEBUG] antes de speakDriverGreeting()');
-      await speakDriverGreeting();
-      console.log('[GO-DEBUG] despues de speakDriverGreeting(), antes de setIsMapVisible(true)');
-      setIsMapVisible(true);
-      console.log('[GO-DEBUG] setIsMapVisible(true) llamado — MapSensor deberia montar ahora');
-      // Show persistent notification
-      const name = dbFirstName || user?.firstName || user?.first_name || '';
-      showDriverActiveNotification(name).catch((e) => console.log('[GO-DEBUG] showDriverActiveNotification error:', e));
-      // Pedir desactivación de battery optimization (Android). Sin esto,
-      // OEMs agresivos matan el foreground service de tracking y booking_tracking
-      // queda vacío. Se muestra una vez cada 30 días o hasta que el usuario
-      // marca "No molestar". No-op en iOS.
-      requestIgnoreBatteryOptimization().catch((e) =>
-        console.warn('[GO-DEBUG] batteryOptimizationPrompt error:', e),
-      );
-    } else {
-      setIsMapVisible(false);
-      // Dismiss persistent notification
-      dismissDriverNotification().catch(() => {});
+    try {
+      if (newStatus) {
+        await speakDriverGreeting();
+        setIsMapVisible(true);
+        const name = dbFirstName || user?.firstName || user?.first_name || '';
+        showDriverActiveNotification(name).catch(() => {});
+        requestIgnoreBatteryOptimization().catch(() => {});
+      } else {
+        setIsMapVisible(false);
+        dismissDriverNotification().catch(() => {});
+      }
+
+      await handleSwipeSuccess(newStatus);
+    } finally {
+      goToggleLockRef.current = false;
     }
-
-    console.log('[GO-DEBUG] antes de handleSwipeSuccess');
-    await handleSwipeSuccess(newStatus);
-    console.log('[GO-DEBUG] toggleDriverOnline FIN');
   };
+
+  const activateDriverOnline = () => setDriverOnlineStatus(true);
+  const deactivateDriverOnline = () => setDriverOnlineStatus(false);
+
+  const activateDriverOnlineRef = useRef(activateDriverOnline);
+  activateDriverOnlineRef.current = activateDriverOnline;
+  const deactivateDriverOnlineRef = useRef(deactivateDriverOnline);
+  deactivateDriverOnlineRef.current = deactivateDriverOnline;
+
+  useEffect(() => {
+    return registerDriverGoHandlers({
+      activate: () => activateDriverOnlineRef.current(),
+      deactivate: () => deactivateDriverOnlineRef.current(),
+    });
+  }, []);
 
   const handleAcceptIncoming = () => {
     if (!incomingBooking) return;
@@ -1425,46 +1510,6 @@ const MapScreen = () => {
     handleDecline();
   };
 
-  const onDriverNavPress = (tab: 'home' | 'routes' | 'activity' | 'profile' | 'go') => {
-    if (tab === 'go') {
-      void toggleDriverOnline();
-      return;
-    }
-
-    setDriverTab(tab);
-    if (tab === 'home') {
-      navigation.navigate('CarsScreen' as never);
-      return;
-    }
-    if (tab === 'routes') {
-      navigation.navigate('Wallet' as never);
-      return;
-    }
-    if (tab === 'activity') {
-      navigation.navigate('DriverActivity' as never);
-      return;
-    }
-    if (tab === 'profile') {
-      navigation.navigate('Profile' as never);
-      return;
-    }
-  };
-
-  const goPulseScale = goPulseAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.6],
-  });
-
-  const goPulseOpacity = goPulseAnim.interpolate({
-    inputRange: [0, 0.35, 1],
-    outputRange: [0.28, 0.16, 0],
-  });
-
-  const goButtonScale = goBreathAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1.07],
-  });
-
   useEffect(() => {
     const unsubscribe = dispatch(listenForNewBookings() as any) as unknown as (() => void) | undefined;
     return () => {
@@ -1474,6 +1519,13 @@ const MapScreen = () => {
 
   //-----------------..........................................................................................................................................................................................................
 
+
+  useEffect(() => {
+    const online = Boolean(
+      profile?.driver_active_status || user?.driver_active_status || user?.driverActiveStatus
+    );
+    setDriverOnline(online);
+  }, [profile?.driver_active_status, user?.driver_active_status, user?.driverActiveStatus]);
 
   useEffect(() => {
     if (user?.driverActiveStatus && !currentPosition) {
@@ -2111,6 +2163,10 @@ const MapScreen = () => {
   const fetchBalanceBookings = async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
+      if (!hasUserAuthHeader(headers)) {
+        console.warn('[HOY] sin JWT de usuario — se omite fetch de balance');
+        return;
+      }
       const url =
         `${SUPABASE_URL}/rest/v1/bookings` +
         `?status=eq.COMPLETE` +
@@ -2162,7 +2218,7 @@ const MapScreen = () => {
       .channel(channelName)
       .on(
         'postgres_changes' as any,
-        { event: '*', schema: 'public', table: 'bookings', filter: `driver=eq.${driverIdForBalance}` },
+        { event: '*', schema: 'public', table: 'reserva', filter: `id_conductor=eq.${driverIdForBalance}` },
         () => { fetchBalanceBookings(); }
       )
       .subscribe();
@@ -2539,30 +2595,117 @@ const MapScreen = () => {
     );
   };
 
+  const driverOfflinePanelHeight = 168;
+  // Altura extra del banner de viaje activo (GO desconectado) para no tapar controles del mapa
+  const offlineActiveBannerExtra = useMemo(() => {
+    if (driverOnline || !hasActiveTrip) return 0;
+    const count = Math.min(activeTripBookings.length, 4);
+    return count * 118;
+  }, [driverOnline, hasActiveTrip, activeTripBookings.length]);
+
+  const driverServicesPanelHeight = useMemo(() => {
+    if (!isDriverView || showNovedades) return 0;
+    if (driverOnline) {
+      return driverReservationsMinimized ? 108 : driverReservationsExpandedHeight;
+    }
+    return driverOfflinePanelHeight + offlineActiveBannerExtra;
+  }, [
+    isDriverView,
+    showNovedades,
+    driverOnline,
+    driverReservationsMinimized,
+    driverReservationsExpandedHeight,
+    offlineActiveBannerExtra,
+  ]);
+
+  const mapBottomPadding = isDriverView
+    ? driverNavBottomPad - 12 + driverServicesPanelHeight
+    : 0;
+  // Empuja un poco más los controles laterales por encima del stack offline
+  const mapControlsBottom = mapBottomPadding + 16 + (offlineActiveBannerExtra > 0 ? 8 : 0);
+
   return (
     <View style={styles.container}>
 
       {(IsMapVisible || isDriverView) ? (
         <View style={isDriverView ? nS.driverSplitRoot : nS.mapStage}>
           <View style={isDriverView ? nS.driverMapHalf : nS.mapStage}>
-            <MapSensor currentPosition={currentPosition} />
+            <MapSensor
+              ref={mapSensorRef}
+              currentPosition={currentPosition}
+              viewMode={mapViewMode}
+              mapTheme={mapTheme}
+              mapBottomPadding={mapBottomPadding}
+              onMapBearingChange={setMapBearing}
+            />
             <View pointerEvents="box-none" style={nS.driverOverlay}>
+            {isDriverView && (
+              <LinearGradient
+                pointerEvents="none"
+                colors={['rgba(5,26,38,0.78)', 'rgba(5,26,38,0.38)', 'transparent']}
+                locations={[0, 0.42, 1]}
+                style={nS.driverTopGradient}
+              />
+            )}
+            {isDriverView && (
+              <View pointerEvents="box-none" style={[nS.driverMapZoomControls, { bottom: mapControlsBottom }]}>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => mapSensorRef.current?.zoomIn()}
+                >
+                  <Ionicons name="add" size={22} color="#00E5FF" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => mapSensorRef.current?.zoomOut()}
+                >
+                  <Ionicons name="remove" size={22} color="#00E5FF" />
+                </TouchableOpacity>
+              </View>
+            )}
+            {isDriverView && (
+              <View pointerEvents="box-none" style={[nS.driverMapControls, { bottom: mapControlsBottom }]}>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => setMapTheme(prev => (prev === 'dark' ? 'light' : 'dark'))}
+                >
+                  <Ionicons
+                    name={mapTheme === 'dark' ? 'moon' : 'sunny'}
+                    size={20}
+                    color="#00E5FF"
+                  />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    const next: MapViewMode = mapViewMode === '3D' ? '2D' : '3D';
+                    setMapViewMode(next);
+                    mapSensorRef.current?.setViewMode(next);
+                  }}
+                >
+                  <Text style={nS.driverMapCtrlTxt}>{mapViewMode}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => mapSensorRef.current?.resetMapNorth()}
+                >
+                  <MapCompassIcon heading={mapBearing} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={nS.driverMapCtrlBtn}
+                  activeOpacity={0.85}
+                  onPress={() => mapSensorRef.current?.locateUser()}
+                >
+                  <Ionicons name="locate" size={20} color="#00E5FF" />
+                </TouchableOpacity>
+              </View>
+            )}
             <View style={nS.driverTopBar}>
-              <TouchableOpacity
-                style={nS.driverCircleBtn}
-                onPress={() => {
-                  // Antes no hacía nada para conductor (isDriverView=true) —
-                  // botón visible pero muerto. Ahora navega atrás siempre.
-                  if (navigation.canGoBack()) {
-                    navigation.goBack();
-                    return;
-                  }
-                  if (!isDriverView) setIsMapVisible(false);
-                }}
-              >
-                <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
-              </TouchableOpacity>
-
               <View style={nS.driverEarningsPill}>
                 <Text style={nS.driverEarningsLabel}>Hoy</Text>
                 <Text style={nS.driverEarningsAmount}>$ {Number(balance || 0).toLocaleString('es-CO')}</Text>
@@ -2572,20 +2715,26 @@ const MapScreen = () => {
                 style={nS.driverNotifBtn}
                 onPress={onDriverBellPress}
                 activeOpacity={0.8}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Animated.View style={{ transform: [{ rotate: driverBellRot }] }}>
-                  <Ionicons name="notifications-outline" size={22} color="rgba(255,255,255,0.85)" />
+                  <Ionicons name="notifications" size={24} color="#00E5FF" />
                 </Animated.View>
-                {(driverHasUnreadNotif || !!driverActiveBookingId) && <View style={nS.driverNotifDot} />}
+                {(driverHasUnreadNotif || !!driverActiveBookingId) && (
+                  <View style={nS.driverNotifDot}>
+                    <View style={nS.driverNotifDotInner} />
+                  </View>
+                )}
               </TouchableOpacity>
 
-              <View style={nS.driverMiniAvatarRing}>
+              {/* Avatar de perfil en top bar — ya no necesario (Perfil está en el navbar) */}
+              {/* <View style={nS.driverMiniAvatarRing}>
                 {user?.profile_image ? (
                   <Image source={{ uri: user.profile_image }} style={nS.driverMiniAvatarImg} />
                 ) : (
                   <Ionicons name="person" size={18} color="#00E5FF" />
                 )}
-              </View>
+              </View> */}
             </View>
 
             {ENABLE_DRIVER_MAP_RESERVATIONS && showIncomingRequest && incomingBooking && (
@@ -2628,104 +2777,36 @@ const MapScreen = () => {
               </View>
             )}
 
-            {!showNovedades && (
-              <View style={nS.driverMiniPanel}>
-                <Text style={nS.driverMiniPanelTitle}>{driverOnline ? 'Buscando servicios...' : 'Buscar servicios'}</Text>
-                <Text style={nS.driverMiniPanelSub}>
-                  {driverOnline ? 'Conectado y esperando solicitudes' : 'Activa GO para iniciar'}
-                </Text>
+            {!showNovedades && !driverOnline && (
+              <View style={[nS.driverOfflineStack, { bottom: driverNavBottomPad - 12 }]}>
+                <ActiveTripBannerStack
+                  stackNavigation={navigation}
+                  maxItems={4}
+                  tripFilter="all"
+                />
+                <View style={nS.driverMiniPanel}>
+                  <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={nS.driverMiniPanelTitle}>Conductor desconectado</Text>
+                  <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverMiniPanelSub}>Activa GO para iniciar</Text>
 
-                <TouchableOpacity
-                  style={nS.driverReservasBtn}
-                  activeOpacity={0.82}
-                  onPress={() => navigation.navigate('DriverReservations' as never)}
-                >
-                  <View style={nS.driverReservasBtnIcon}>
-                    <Ionicons name="calendar-outline" size={22} color="#051A26" />
-                  </View>
-                  <View style={nS.driverReservasBtnTextWrap}>
-                    <Text style={nS.driverReservasBtnTitle}>Reservas Disponibles</Text>
-                    <Text style={nS.driverReservasBtnSub}>Ver y aceptar reservas de clientes</Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={20} color="rgba(0,229,255,0.7)" />
-                </TouchableOpacity>
+                  <TouchableOpacity
+                    style={nS.driverReservasBtn}
+                    activeOpacity={0.82}
+                    onPress={() =>
+                      navigation.navigate('DriverReservations' as never, { initialTab: 'reservations' } as never)
+                    }
+                  >
+                    <View style={nS.driverReservasBtnIcon}>
+                      <Ionicons name="calendar-outline" size={22} color="#051A26" />
+                    </View>
+                    <View style={nS.driverReservasBtnTextWrap}>
+                      <Text style={nS.driverReservasBtnTitle}>Reservas Disponibles</Text>
+                      <Text style={nS.driverReservasBtnSub}>Ver y aceptar reservas de clientes</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="rgba(0,229,255,0.7)" />
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
-
-            <View style={nS.driverBottomNav}>
-              <View style={nS.driverNavItems}>
-                <TouchableOpacity
-                  style={[nS.driverNavItem, driverTab === 'home' && nS.driverNavItemActive]}
-                  onPress={() => onDriverNavPress('home')}
-                >
-                  <Ionicons name="car-outline" size={20} color={driverTab === 'home' ? '#00E5FF' : 'rgba(255,255,255,0.35)'} />
-                  <Text style={[nS.driverNavLabel, driverTab === 'home' && nS.driverNavLabelActive]}>Vehiculo</Text>
-                  {driverTab === 'home' && <View style={nS.driverNavIndicator} />}
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[nS.driverNavItem, driverTab === 'routes' && nS.driverNavItemActive]}
-                  onPress={() => onDriverNavPress('routes')}
-                >
-                  <Ionicons name="wallet-outline" size={20} color={driverTab === 'routes' ? '#00E5FF' : 'rgba(255,255,255,0.35)'} />
-                  <Text style={[nS.driverNavLabel, driverTab === 'routes' && nS.driverNavLabelActive]}>Billetera</Text>
-                  {driverTab === 'routes' && <View style={nS.driverNavIndicator} />}
-                </TouchableOpacity>
-                <TouchableOpacity style={nS.driverNavCenter} onPress={() => onDriverNavPress('go')}>
-                  <View style={nS.driverNavCenterStack}>
-                    {!driverOnline && (
-                      <Animated.View
-                        pointerEvents="none"
-                        style={[
-                          nS.driverNavCenterPulseRing,
-                          {
-                            opacity: goPulseOpacity,
-                            transform: [{ scale: goPulseScale }],
-                          },
-                        ]}
-                      />
-                    )}
-                    <Animated.View
-                      style={[
-                        nS.driverNavCenterBtn,
-                        !driverOnline && nS.driverNavCenterBtnGo,
-                        !driverOnline && {
-                          transform: [{ scale: goButtonScale }],
-                        },
-                      ]}
-                    >
-                      {driverOnline ? (
-                        <Image
-                          source={require('../../assets/images/logo-Preview-Photoroom.png')}
-                          style={nS.driverLogoImage}
-                          resizeMode="contain"
-                        />
-                      ) : (
-                        <Text style={[nS.driverNavGoText, !driverOnline && nS.driverNavGoTextGo]}>GO</Text>
-                      )}
-                    </Animated.View>
-                  </View>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[nS.driverNavItem, driverTab === 'activity' && nS.driverNavItemActive]}
-                  onPress={() => onDriverNavPress('activity')}
-                >
-                  <Ionicons name="pulse-outline" size={20} color={driverTab === 'activity' ? '#00E5FF' : 'rgba(255,255,255,0.35)'} />
-                  <Text style={[nS.driverNavLabel, driverTab === 'activity' && nS.driverNavLabelActive]}>Historial</Text>
-                  {driverTab === 'activity' && <View style={nS.driverNavIndicator} />}
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[nS.driverNavItem, driverTab === 'profile' && nS.driverNavItemActive]}
-                  onPress={() => onDriverNavPress('profile')}
-                >
-                  <Ionicons name="person-outline" size={20} color={driverTab === 'profile' ? '#00E5FF' : 'rgba(255,255,255,0.35)'} />
-                  <Text style={[nS.driverNavLabel, driverTab === 'profile' && nS.driverNavLabelActive]}>Perfil</Text>
-                  {driverTab === 'profile' && <View style={nS.driverNavIndicator} />}
-                </TouchableOpacity>
-              </View>
-            </View>
 
             <Modal
               visible={showDriverServicesModal}
@@ -2771,35 +2852,53 @@ const MapScreen = () => {
             </View>
           </View>
 
-          {isDriverView && (
+          {isDriverView && driverOnline && !showNovedades && (
             <View
               style={[
                 nS.driverReservationsHalf,
-                { height: driverReservationsExpandedHeight },
+                { bottom: driverNavBottomPad - 12, height: driverReservationsExpandedHeight },
                 driverReservationsMinimized && nS.driverReservationsHalfMinimized,
               ]}
             >
               <View style={nS.driverReservationsHeaderRow}>
                 <View style={nS.driverReservationsHandle} />
-                <TouchableOpacity
-                  style={nS.driverReservationsToggleBtn}
-                  activeOpacity={0.85}
-                  onPress={() => setDriverReservationsMinimized((prev) => !prev)}
-                >
-                  <Ionicons
-                    name={driverReservationsMinimized ? 'chevron-up' : 'chevron-down'}
-                    size={17}
-                    color="#00E5FF"
-                  />
-                  <Text style={nS.driverReservationsToggleText}>
-                    {driverReservationsMinimized ? 'Maximizar servicios' : 'Minimizar servicios'}
-                  </Text>
-                </TouchableOpacity>
+                {driverReservationsMinimized ? (
+                  <View style={nS.driverCollapsedRow}>
+                    <SearchingServicesLabel style={nS.driverSearchingText} />
+                    <TouchableOpacity
+                      style={nS.driverReservationsToggleBtn}
+                      activeOpacity={0.85}
+                      onPress={() => setDriverReservationsMinimized(false)}
+                    >
+                      <Ionicons name="chevron-up" size={17} color="#00E5FF" />
+                      <Text style={nS.driverReservationsToggleText}>Maximizar servicios</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={nS.driverReservationsToggleBtn}
+                    activeOpacity={0.85}
+                    onPress={() => setDriverReservationsMinimized(true)}
+                  >
+                    <Ionicons name="chevron-down" size={17} color="#00E5FF" />
+                    <Text style={nS.driverReservationsToggleText}>Minimizar servicios</Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
               {!driverReservationsMinimized && (
                 <View style={nS.driverReservationsBody}>
-                  <DriverReservationsScreen embedded />
+                  <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverConnectedSub}>Conectado y esperando solicitudes</Text>
+                  <DriverReservationsScreen
+                    embedded
+                    initialTab="immediate"
+                    pendingDetailBooking={pendingServiceDetail}
+                    onPendingDetailConsumed={() => setPendingServiceDetail(null)}
+                    onAvailableServicesChange={(counts) => {
+                      const total = (counts.immediate || 0) + (counts.reservation || 0);
+                      setDriverAvailableServiceCount(total);
+                    }}
+                  />
                 </View>
               )}
             </View>
@@ -3202,6 +3301,24 @@ const MapScreen = () => {
         buttons={alertButtons}
         onDismiss={() => setAlertVisible(false)}
       />
+
+      {isDriverView ? (
+        <DriverNotificationsModal
+          visible={driverNotifModalVisible}
+          onClose={() => setDriverNotifModalVisible(false)}
+          onOpenBookingDetail={(booking, opts) => {
+            setDriverNotifModalVisible(false);
+            setDriverReservationsMinimized(false);
+            const item = {
+              ...(booking || {}),
+              ...(opts?.taken
+                ? { __taken: true, __expiresAt: opts.expiresAt }
+                : {}),
+            };
+            setPendingServiceDetail(item);
+          }}
+        />
+      ) : null}
 
   
     </View>
@@ -4404,16 +4521,78 @@ const nS = StyleSheet.create({
     overflow: 'hidden',
   },
   driverReservationsHalfMinimized: {
-    height: 62,
+    height: 108,
   },
   driverReservationsHeaderRow: {
-    height: 62,
+    minHeight: 62,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(6,27,38,0.98)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,229,255,0.16)',
+    backgroundColor: 'rgba(8,33,46,0.95)',
+    borderBottomWidth: 0,
     paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  driverCollapsedRow: {
+    width: '100%',
+    alignItems: 'center',
+    gap: 8,
+  },
+  driverSearchingText: {
+    color: '#00E5FF',
+    fontSize: 16,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  driverConnectedSub: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 12,
+    marginBottom: 8,
+    marginTop: 0,
+    textAlign: 'center',
+    backgroundColor: 'rgba(8,33,46,0.95)',
+  },
+  driverTopGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 96,
+    zIndex: 25,
+  },
+  driverMapControls: {
+    position: 'absolute',
+    left: 16,
+    zIndex: 35,
+    elevation: 35,
+    gap: 10,
+  },
+  driverMapZoomControls: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 35,
+    elevation: 35,
+    gap: 10,
+  },
+  driverMapCtrlBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(10,46,61,0.82)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  driverMapCtrlTxt: {
+    color: '#00E5FF',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.4,
   },
   driverReservationsHandle: {
     width: 52,
@@ -4440,7 +4619,8 @@ const nS = StyleSheet.create({
   },
   driverReservationsBody: {
     flex: 1,
-    backgroundColor: '#051A26',
+    backgroundColor: 'rgba(8,33,46,0.95)',
+    borderTopWidth: 0,
   },
   mapStage: {
     flex: 1,
@@ -4739,6 +4919,7 @@ const nS = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 10,
   },
   driverCircleBtn: {
     width: 44,
@@ -4788,23 +4969,31 @@ const nS = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(10,46,61,0.72)',
+    backgroundColor: 'rgba(5, 26, 38, 0.92)',
     borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.22)',
+    borderColor: '#00E5FF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   driverNotifDot: {
     position: 'absolute',
-    top: 10,
-    right: 10,
+    top: 2,
+    right: 2,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#051A26',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverNotifDotInner: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#E91E63',
-    shadowColor: '#E91E63',
+    backgroundColor: '#00E676',
+    shadowColor: '#00E676',
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.7,
+    shadowOpacity: 0.8,
     shadowRadius: 4,
     elevation: 2,
   },
@@ -4812,19 +5001,23 @@ const nS = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  driverMiniPanel: {
+  driverOfflineStack: {
     position: 'absolute',
     left: 12,
     right: 12,
-    bottom: 108,
-    zIndex: 20,
-    elevation: 20,
+    zIndex: 40,
+    elevation: 40,
+    gap: 8,
+    alignItems: 'center',
+  },
+  driverMiniPanel: {
     borderRadius: 18,
     borderWidth: 1,
     borderColor: 'rgba(0,229,255,0.24)',
     backgroundColor: 'rgba(8,33,46,0.88)',
     paddingHorizontal: 14,
     paddingVertical: 12,
+    width: '100%',
   },
   driverMiniPanelTitle: {
     color: '#00E5FF',

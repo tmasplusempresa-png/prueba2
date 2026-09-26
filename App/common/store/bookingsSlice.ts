@@ -29,28 +29,94 @@ import { addActualsToBooking } from "../other/sharedFunctions";
 
 // ─── Helpers Supabase ───────────────────────────────────────────────────────
 
+/**
+ * La vista `bookings` (aplicacioncore) NO tiene columna `trip_type`.
+ * Persistimos el recorrido en `observations` / `waypoints` al crear, y aquí lo resolvemos.
+ * Histórico sin dato → "Ida" (default de UI).
+ */
+export const encodeTripTypeObservation = (
+  tripType: string,
+  userObs?: string | null,
+): string | null => {
+  const label = /vuelta/i.test(String(tripType || '')) ? 'Ida y Vuelta' : 'Ida';
+  const note = String(userObs || '').replace(/^\[recorrido:[^\]]+\]\s*/i, '').trim();
+  return note ? `[recorrido:${label}] ${note}` : `[recorrido:${label}]`;
+};
+
+export const resolveTripTypeLabel = (row: any): string => {
+  const raw = row?.trip_type ?? row?.tripType;
+  if (raw != null && String(raw).trim()) {
+    const s = String(raw).trim();
+    if (/vuelta/i.test(s)) return 'Ida y Vuelta';
+    if (/ida/i.test(s)) return 'Ida';
+    return s;
+  }
+  const obs = String(row?.observations ?? row?.observaciones ?? '');
+  const m = obs.match(/\[recorrido:\s*(Ida y Vuelta|Ida)\]/i);
+  if (m) return /vuelta/i.test(m[1]) ? 'Ida y Vuelta' : 'Ida';
+  try {
+    const wp =
+      typeof row?.waypoints === 'string' ? JSON.parse(row.waypoints) : row?.waypoints;
+    if (Array.isArray(wp)) {
+      const hit = wp.find(
+        (w: any) =>
+          w &&
+          (w.trip_type || w.recorrido || w.round_trip === true || w.kind === 'return'),
+      );
+      if (hit) {
+        const t = String(hit.trip_type || hit.recorrido || '');
+        if (/vuelta/i.test(t) || hit.round_trip || hit.kind === 'return') return 'Ida y Vuelta';
+        if (/ida/i.test(t)) return 'Ida';
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return 'Ida';
+};
+
+export const resolveCarTypeLabel = (row: any): string => {
+  const name = row?.car_type ?? row?.carType ?? row?.categoria;
+  if (name != null && String(name).trim()) return String(name).trim();
+  return '';
+};
+
 /** Convierte una fila de Supabase bookings al formato que usa Redux (compatible con legacy). */
+// Tolerante a DOS formas de fila:
+//  - vista de compatibilidad `bookings` (nombres viejos), y
+//  - payload de Realtime de la tabla `reserva` (nombres nuevos).
+// Por eso cada campo hace `row.<viejo> ?? row.<nuevo>`.
 export const mapSupabaseBooking = (row: any) => ({
   id: row.id,
-  status: row.status,
-  customer: row.customer,
+  status: row.status ?? row.estado,
+  customer: row.customer ?? row.id_cliente,
   customer_name: row.customer_name,
   customer_contact: row.customer_contact,
   customer_city: row.customer_city,
   customer_token: row.customer_token,
   customer_status: row.customer_status,
-  driver: row.driver,
+  driver: row.driver ?? row.id_conductor,
   driver_name: row.driver_name,
   driver_contact: row.driver_contact,
   driver_token: row.driver_token,
   driver_status: row.driver_status,
   driver_image: row.driver_image,
-  driver_arrived_time: row.driver_arrived_time,
-  pickup: { lat: row.pickup_lat, lng: row.pickup_lng, add: row.pickup_address },
-  drop: { lat: row.drop_lat, lng: row.drop_lng, add: row.drop_address },
-  pickupAddress: row.pickup_address,
-  dropAddress: row.drop_address,
-  carType: row.car_type,
+  driver_arrived_time: row.driver_arrived_time ?? row.conductor_llego_en,
+  pickup: {
+    lat: row.pickup_lat ?? row.origen_lat,
+    lng: row.pickup_lng ?? row.origen_lng,
+    add: row.pickup_address ?? row.origen_direccion,
+  },
+  drop: {
+    lat: row.drop_lat ?? row.destino_lat,
+    lng: row.drop_lng ?? row.destino_lng,
+    add: row.drop_address ?? row.destino_direccion,
+  },
+  pickupAddress: row.pickup_address ?? row.origen_direccion,
+  dropAddress: row.drop_address ?? row.destino_direccion,
+  carType: resolveCarTypeLabel(row) || row.car_type,
+  car_type: resolveCarTypeLabel(row) || row.car_type,
+  car_type_id: row.car_type_id ?? row.id_categoria ?? null,
   car_image: row.car_image,
   vehicle_number: row.vehicle_number,
   vehicleNumber: row.vehicle_number,
@@ -58,50 +124,69 @@ export const mapSupabaseBooking = (row: any) => ({
   vehicleColor: row.vehicle_color,
   vehicleMake: row.vehicle_make,
   plate_number: row.plate_number,
-  estimate: row.estimate,
-  trip_cost: row.trip_cost,
+  estimate: row.estimate ?? row.precio_estimado,
+  trip_cost: row.trip_cost ?? row.costo_viaje,
   convenience_fees: row.convenience_fees,
-  discount: row.discount,
-  driver_share: row.driver_share,
-  payment_mode: row.payment_mode,
-  reference: row.reference,
-  distance: row.distance,
-  estimateTime: row.duration,
-  tripType: row.trip_type,
+  discount: row.discount ?? row.descuento,
+  driver_share: row.driver_share ?? row.ganancia_conductor,
+  payment_mode: row.payment_mode ?? row.modo_pago,
+  reference: row.reference ?? row.referencia,
+  distance: row.distance ?? row.distancia_km,
+  estimateTime: row.duration ?? row.duracion_seg,
+  tripType: resolveTripTypeLabel(row),
+  trip_type: resolveTripTypeLabel(row),
   tripUrban: row.trip_urban,
   otp: row.otp,
   coords: row.coords,
-  startTime: row.trip_start_time,
-  endTime: row.trip_end_time,
+  waypoints: row.waypoints,
+  startTime: row.trip_start_time ?? row.viaje_inicio_en,
+  endTime: row.trip_end_time ?? row.viaje_fin_en,
   total_trip_time: row.total_trip_time,
-  observations: row.observations,
+  observations: row.observations ?? row.observaciones,
   requestedDrivers: row.requested_drivers || {},
   driverEstimates: row.driver_estimates || {},
-  booking_date: row.booking_date,
-  created_at: row.created_at,
+  booking_date: row.booking_date ?? row.solicitado_en,
+  created_at: row.created_at ?? row.creado_en,
 });
 
-/** Actualiza un booking en Supabase a partir del objeto Redux. */
+/** Actualiza un booking en Supabase a partir del objeto Redux.
+ *  Solo columnas de la vista public.bookings (aplicacioncore).
+ */
 const updateBookingInSupabase = async (booking: any) => {
   const payload: any = {
     status: booking.status,
-    driver_status: booking.driver_status ?? null,
-    customer_status: booking.customer_status ?? null,
   };
-  if (booking.driver !== undefined)            payload.driver = booking.driver;
-  if (booking.trip_cost !== undefined)         payload.trip_cost = booking.trip_cost;
-  if (booking.driver_share !== undefined)      payload.driver_share = booking.driver_share;
-  if (booking.convenience_fees !== undefined)  payload.convenience_fees = booking.convenience_fees;
-  if (booking.trip_start_time)                 payload.trip_start_time = booking.trip_start_time;
-  if (booking.trip_end_time)                   payload.trip_end_time = booking.trip_end_time;
-  if (booking.total_trip_time !== undefined)   payload.total_trip_time = booking.total_trip_time;
-  if (booking.drop?.lat)                       payload.drop_lat = booking.drop.lat;
-  if (booking.drop?.lng)                       payload.drop_lng = booking.drop.lng;
-  if (booking.drop?.add)                       payload.drop_address = booking.drop.add;
-  if (booking.reason)                          payload.observations = booking.reason;
-  if (booking.coords)                          payload.coords = booking.coords;
-  if (booking.distance !== undefined)          payload.distance = booking.distance;
-  if (booking.driver_arrived_time)             payload.driver_arrived_time = booking.driver_arrived_time;
+
+  // cancelled_by: enum rol_persona en reserva (cliente|conductor|…)
+  if (booking.cancelled_by || booking.cancelledBy) {
+    const raw = String(booking.cancelled_by || booking.cancelledBy).toLowerCase();
+    payload.cancelled_by =
+      raw === 'customer' || raw === 'cliente'
+        ? 'cliente'
+        : raw === 'driver' || raw === 'conductor'
+          ? 'conductor'
+          : raw;
+  }
+  if (booking.reason) payload.reason = booking.reason;
+
+  if (booking.driver !== undefined) payload.driver = booking.driver;
+  if (booking.driver_id !== undefined) payload.driver_id = booking.driver_id;
+  if (booking.trip_cost !== undefined) payload.trip_cost = booking.trip_cost;
+  if (booking.driver_share !== undefined) payload.driver_share = booking.driver_share;
+  if (booking.convenience_fees !== undefined) payload.convenience_fees = booking.convenience_fees;
+  if (booking.estimate !== undefined) payload.estimate = booking.estimate;
+  if (booking.price !== undefined) payload.price = booking.price;
+  if (booking.trip_start_time) payload.trip_start_time = booking.trip_start_time;
+  if (booking.trip_end_time) payload.trip_end_time = booking.trip_end_time;
+  if (booking.drop?.lat) payload.drop_lat = booking.drop.lat;
+  if (booking.drop?.lng) payload.drop_lng = booking.drop.lng;
+  if (booking.drop?.add) payload.drop_address = booking.drop.add;
+  if (booking.distance !== undefined) payload.distance = booking.distance;
+  if (booking.driver_arrived_time) payload.driver_arrived_time = booking.driver_arrived_time;
+  if (booking.otp_verified !== undefined) payload.otp_verified = booking.otp_verified;
+
+  // No enviar: customer_status, driver_status, cancellation_time, coords,
+  // total_trip_time — no existen en la vista bookings actual.
 
   const { error } = await supabase.from('bookings').update(payload).eq('id', booking.id);
   if (error) throw new Error(error.message);
@@ -341,12 +426,12 @@ export const updateBookingAsync =
       .channel('new-bookings-realtime')
       .on(
         'postgres_changes' as any,
-        { event: 'INSERT', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
+        { event: 'INSERT', schema: 'public', table: 'reserva', filter: 'estado=eq.NEW' },
         (payload: any) => handleNewBooking(payload.new)
       )
       .on(
         'postgres_changes' as any,
-        { event: 'UPDATE', schema: 'public', table: 'bookings', filter: 'status=eq.NEW' },
+        { event: 'UPDATE', schema: 'public', table: 'reserva', filter: 'estado=eq.NEW' },
         (payload: any) => handleNewBooking(payload.new)
       )
       .subscribe((status: string) => {
@@ -398,11 +483,11 @@ export const acceptBooking = createAsyncThunk(
         .from('bookings')
         .update({
           driver: driverProfile.uid || driverProfile.id || '',
+          driver_id: driverProfile.uid || driverProfile.id || '',
           status: 'ACCEPTED',
           driver_name: `${driverProfile.firstName || ''} ${driverProfile.lastName || ''}`.trim() || null,
           driver_contact: mobileRaw || null,
           driver_image: driverProfile.profile_image || null,
-          car_image: driverProfile.car_image || null,
           vehicle_number: driverProfile.vehicleNumber || null,
           plate_number: driverProfile.vehicleNumber || null,
           vehicle_make: driverProfile.vehicleMake || null,
@@ -526,10 +611,8 @@ export const cancelBooking = createAsyncThunk(
         status: "CANCELLED",
         reason,
         cancelledBy,
-        cancellation_time: currentTime.toLocaleTimeString(),
+        cancelled_by: cancelledBy,
         cancelledAt: currentTime.getTime(),
-        driver_status: `${booking.driver || ""}_CANCELLED`,
-        customer_status: `${booking.customer || ""}_CANCELLED`,
       };
 
       await updateBookingInSupabase(updatedBooking);

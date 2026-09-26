@@ -204,35 +204,17 @@ export const SupabaseAuth = {
         return { data: null, error: errorMessage, success: false };
       }
 
-      // 🎯 INSERTAR MEMBRESÍA PENDIENTE AUTOMÁTICAMENTE
-      if (data.user?.id) {
-        try {
-          console.log('📍 [SignUp] Creando membresía PENDIENTE para:', data.user.id);
-          
-          const { error: membershipError } = await supabase
-            .from('memberships')
-            .insert([
-              {
-                conductor: data.user.id,
-                status: 'PENDIENTE',
-                costo: 157200,
-                fecha_inicio: new Date().toISOString().split('T')[0],
-                fecha_terminada: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-                periodo: 30
-              }
-            ]);
-
-          if (membershipError) {
-            console.error('⚠️ [SignUp] Error creando membresía:', membershipError);
-            // No fallar el signup si hay error en membresía
-          } else {
-            console.log('✅ [SignUp] Membresía PENDIENTE creada exitosamente');
-          }
-        } catch (membershipException) {
-          console.error('❌ [SignUp] Excepción al crear membresía:', membershipException);
-          // No fallar el signup
-        }
-      }
+      // NOTA: se eliminó el insert automático de membresía en el signup.
+      // Era incorrecto en la BD normalizada (aplicacioncore):
+      //   1. `memberships` es una VISTA de compatibilidad SIN trigger INSTEAD OF
+      //      INSERT → el insert fallaba siempre (silencioso, solo dejaba error en log).
+      //   2. Creaba una membresía de CONDUCTOR para TODO registro, cuando la
+      //      mayoría de altas por móvil son clientes.
+      //   3. Usaba el modelo viejo (`conductor`, `costo`, `status='PENDIENTE'`).
+      // La membresía es un concepto de conductor: debe crearse en su flujo de
+      // aprobación / suscripción contra la tabla normalizada `membresia`, no aquí.
+      // La creación del perfil (persona/rol/wallet/código) ya la hace el trigger
+      // `handle_new_user` en auth.users (ver migración handle_new_user_trigger).
 
       return { data: data.user, error: null, success: true };
     } catch (error) {

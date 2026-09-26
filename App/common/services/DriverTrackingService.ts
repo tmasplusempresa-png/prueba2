@@ -64,16 +64,16 @@ export const subscribeToDriverTracking = (
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'booking_tracking',
-          filter: `booking_id=eq.${bookingId}`
+          table: 'reserva_tracking',
+          filter: `id_reserva=eq.${bookingId}`
         },
         (payload) => {
           const record = payload.new;
           const location: DriverLocation = {
             lat: record.lat,
             lng: record.lng,
-            timestamp: new Date(record.created_at).getTime(),
-            accuracy: record.accuracy
+            timestamp: new Date(record.registrado_en || record.created_at).getTime(),
+            accuracy: record.precision_m ?? undefined,
           };
           
           console.log('[DriverTracking] Supabase realtime update:', location);

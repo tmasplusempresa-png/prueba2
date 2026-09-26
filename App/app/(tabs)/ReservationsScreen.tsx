@@ -18,7 +18,10 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '@/common/store';
-import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader, refreshAuthSession } from '@/config/SupabaseConfig';
+import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
+import { formatBookingFareRange } from '@/constants/fare';
+import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 const PAGE_SIZE = 50;
@@ -133,8 +136,12 @@ const ReservationCard = React.memo(({ item, onPress }: { item: Reservation; onPr
           <Text style={styles.resMetaTxt}>{formatTime(item.booking_date)}</Text>
         </View>
         <View style={styles.resMeta}>
-          <Ionicons name={item.trip_type === 'Ida' ? 'arrow-forward' : 'repeat'} size={13} color="#00E5FF" />
-          <Text style={styles.resMetaTxt}>{item.trip_type}</Text>
+          <Ionicons
+            name={resolveTripTypeLabel(item) === 'Ida' ? 'arrow-forward' : 'repeat'}
+            size={13}
+            color="#00E5FF"
+          />
+          <Text style={styles.resMetaTxt}>{resolveTripTypeLabel(item)}</Text>
         </View>
       </View>
 
@@ -149,7 +156,7 @@ const ReservationCard = React.memo(({ item, onPress }: { item: Reservation; onPr
 
       <View style={styles.resFooter}>
         <Text style={styles.resPriceTxt}>
-          $ {(item.driver_share ?? item.price)?.toLocaleString('es-CO')} – $ {(item.estimate ?? item.price)?.toLocaleString('es-CO')}
+          {formatBookingFareRange(item)}
         </Text>
         <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
       </View>
@@ -186,7 +193,8 @@ const ReservationsScreen = () => {
   const user    = useSelector((s: RootState) => s.auth.user)    as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
-  const bottomPad = insets.bottom + 120;
+  const navBottomPad = useCustomerNavBottomPad();
+  const bottomPad = navBottomPad + 20;
 
   // profile.id = users.id (UUID interno guardado en bookings.customer)
   // user.auth_id = Supabase Auth UUID (distinto al anterior, no se usa en bookings)
@@ -205,6 +213,7 @@ const ReservationsScreen = () => {
 
   // tracks which tabs have completed at least one successful load (avoids tabStates in effect deps)
   const initializedRef = useRef<Partial<Record<TabKey, boolean>>>({});
+  const fetchInFlightRef = useRef<Partial<Record<TabKey, boolean>>>({});
 
   // ── fetch one page for a tab ────────────────────────────────────────────
   const fetchPage = useCallback(async (
@@ -214,14 +223,35 @@ const ReservationsScreen = () => {
     append: boolean,
   ) => {
     if (!userId) return;
+    if (fetchInFlightRef.current[tab]) return;
+    fetchInFlightRef.current[tab] = true;
 
     setTabStates(prev => ({
       ...prev,
       [tab]: { ...prev[tab], loading: true },
     }));
 
+    const finishError = (keepRetryable: boolean) => {
+      // keepRetryable=false → marca initialized para cortar loops (401 / onEndReached)
+      if (!keepRetryable) initializedRef.current[tab] = true;
+      setTabStates(prev => ({
+        ...prev,
+        [tab]: {
+          ...prev[tab],
+          loading: false,
+          initialized: keepRetryable ? prev[tab].initialized : true,
+          hasMore: keepRetryable ? prev[tab].hasMore : false,
+        },
+      }));
+    };
+
     try {
-      const headers = await getSupabaseAuthHeaders();
+      let headers = await getSupabaseAuthHeaders();
+      if (!hasUserAuthHeader(headers)) {
+        console.warn('[Reservas] sin JWT — se omite fetch (evita 401 anon)');
+        finishError(false);
+        return;
+      }
       const statuses = TAB_STATUSES[tab].join(',');
       const dateFrom = getDateFrom(df);
 
@@ -243,18 +273,23 @@ const ReservationsScreen = () => {
       if (dateFrom) url += `&booking_date=gte.${encodeURIComponent(dateFrom)}`;
 
       console.log('[Reservas] userId:', userId, '| tab:', tab, '| df:', df);
-      console.log('[Reservas] url:', url);
 
-      const res = await fetch(url, { headers });
+      let res = await fetch(url, { headers });
+      // JWT expired → refresh una vez y reintentar
+      if (res.status === 401) {
+        console.warn('[Reservas] 401 — intentando refreshSession');
+        const refreshed = await refreshAuthSession();
+        if (refreshed?.access_token) {
+          headers = await getSupabaseAuthHeaders();
+          res = await fetch(url, { headers });
+        }
+      }
+
       console.log('[Reservas] status:', res.status, '| ok:', res.ok);
       if (!res.ok) {
         const errBody = await res.text();
         console.warn('Reservations fetch error:', res.status, errBody);
-        // No marcamos `initialized: true` para permitir reintentos (focus / refresh).
-        setTabStates(prev => ({
-          ...prev,
-          [tab]: { ...prev[tab], loading: false },
-        }));
+        finishError(false);
         return;
       }
 
@@ -273,11 +308,9 @@ const ReservationsScreen = () => {
       }));
     } catch (e) {
       console.error('fetchPage error:', e);
-      // No marcamos `initialized: true` para permitir reintentos.
-      setTabStates(prev => ({
-        ...prev,
-        [tab]: { ...prev[tab], loading: false },
-      }));
+      finishError(false);
+    } finally {
+      fetchInFlightRef.current[tab] = false;
     }
   }, [userId]);
 
@@ -357,13 +390,12 @@ const ReservationsScreen = () => {
         <View style={styles.glowBottomLeft} />
       </View>
 
-      {/* Header */}
+      {/* Header — sin botón volver: esta pantalla es destino del tab bar */}
       <View style={[styles.header, { paddingTop: topPad }]}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
-          <Ionicons name="chevron-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Tus Reservas</Text>
-        <View style={styles.headerSpacer} />
+        <View style={styles.headerTitleWrap}>
+          <Text style={styles.headerEyebrow}>T+plus</Text>
+          <Text style={styles.headerTitle}>Tus Reservas</Text>
+        </View>
       </View>
 
       {/* Tabs */}
@@ -510,13 +542,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(5,26,38,0.82)',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
   },
-  backBtn: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center', justifyContent: 'center',
+  headerTitleWrap: { flex: 1 },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#00E5FF',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
   headerTitle: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3 },
-  headerSpacer: { width: 40 },
 
   // Tabs
   tabsScroll: { flexGrow: 0 },

@@ -10,7 +10,9 @@ import {
   Image,
   Linking,
   ActivityIndicator,
+  Platform,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons, MaterialIcons, FontAwesome, Feather } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -29,10 +31,16 @@ import {
 import { listenToSettingsChanges, selectSettings } from "@/common/reducers/settingsSlice";
 import { supabase } from "@/config/SupabaseConfig";
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
+import { useDriverNavBottomPad, useIsDriverUser } from "@/components/DriverBottomNav";
+import { collectDriverIdCandidates, preferredConductorId } from "@/common/utils/driverIds";
 
 type Props = NativeStackScreenProps<any>;
 
 const WalletDetails = ({ navigation }: Props) => {
+  const isDriverUser = useIsDriverUser();
+  const driverNavPad = useDriverNavBottomPad();
+  const insets = useSafeAreaInsets();
+  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
   const user = useSelector((state: RootState) => state.auth.user);
   const profile = useSelector((state: RootState) => state.auth.profile);
   const walletHistory = useSelector(selectWalletHistory);
@@ -44,20 +52,15 @@ const WalletDetails = ({ navigation }: Props) => {
   const dispatch = useDispatch<AppDispatch>();
   const settings = useSelector(selectSettings);
 
-  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
-  // y caemos a users.id por compatibilidad con datos legacy.
+  // memberships.conductor = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, (user as any)?.auth_id, profile?.id, user?.id, (user as any)?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, (user as any)?.auth_id, user?.id, (user as any)?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, (user as any)?.auth_id, (user as any)?.uid],
+  );
   
 
   const glowAnimRef = useRef({
@@ -355,11 +358,16 @@ const WalletDetails = ({ navigation }: Props) => {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.headerIconBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={22} color="#D9F6FF" />
-        </TouchableOpacity>
-        <Text style={styles.headerText}>Mi Billetera</Text>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
+        {!isDriverUser ? (
+          <TouchableOpacity style={styles.headerIconBtn} onPress={() => navigation.goBack()}>
+            <Ionicons name="chevron-back" size={22} color="#D9F6FF" />
+          </TouchableOpacity>
+        ) : null}
+        <View style={[styles.headerTitleWrap, isDriverUser && styles.headerTitleWrapDriver]}>
+          {isDriverUser ? <Text style={styles.headerEyebrow}>T+plus</Text> : null}
+          <Text style={isDriverUser ? styles.headerTitle : styles.headerText}>Mi Billetera</Text>
+        </View>
         <TouchableOpacity
           style={styles.headerIconBtn}
           onPress={() => Linking.openURL("https://wa.me/573118841054")}
@@ -369,7 +377,7 @@ const WalletDetails = ({ navigation }: Props) => {
       </View>
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, isDriverUser && { paddingBottom: driverNavPad + 24 }]}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.cardWrap}>
@@ -400,72 +408,48 @@ const WalletDetails = ({ navigation }: Props) => {
               </View>
             </View>
 
-            <View
-              style={[
-                styles.infoRowBox,
-                {
-                  backgroundColor: statusTone.softBg,
-                  borderColor: statusTone.border,
-                },
-              ]}
-            >
-              <Text
-                style={[styles.infoRowLabel, { color: statusTone.label || statusTone.accent }]}
-                numberOfLines={1}
-              >
-                ESTADO MEMBRESIA
-              </Text>
-              <View
-                style={[
-                  styles.statusPill,
-                  {
-                    backgroundColor: statusTone.chipBg,
-                    borderColor: statusTone.border,
-                  },
-                ]}
-              >
-                <View style={[styles.statusDot, { backgroundColor: statusTone.accent }]} />
-                <Text
-                  style={[styles.statusPillText, { color: statusTone.accent }]}
-                  numberOfLines={1}
-                >
-                  {membershipStatus}
-                </Text>
-              </View>
-            </View>
-
-            {activeMembership && (
-              <View
-                style={[
-                  styles.infoRowBox,
-                  {
-                    backgroundColor: daysTone.softBg,
-                    borderColor: daysTone.border,
-                  },
-                ]}
-              >
-                <Text style={[styles.infoRowLabel, { color: daysTone.label }]} numberOfLines={1}>
-                  DIAS RESTANTES
-                </Text>
+            <View style={styles.statusStack}>
+              <View style={styles.statusLine}>
+                <Text style={styles.statusLineLabel}>Estado membresía</Text>
                 <View
                   style={[
                     styles.statusPill,
                     {
-                      backgroundColor: daysTone.chipBg,
-                      borderColor: daysTone.border,
+                      backgroundColor: statusTone.chipBg,
+                      borderColor: statusTone.border,
                     },
                   ]}
                 >
-                  <Text style={[styles.statusPillText, { color: daysTone.accent }]}>
-                    {Math.max(daysRemaining, 0)}
+                  <View style={[styles.statusDot, { backgroundColor: statusTone.accent }]} />
+                  <Text style={[styles.statusPillText, { color: statusTone.accent }]} numberOfLines={1}>
+                    {membershipStatus}
                   </Text>
                 </View>
               </View>
-            )}
+
+              {activeMembership ? (
+                <View style={styles.statusLine}>
+                  <Text style={styles.statusLineLabel}>Días restantes</Text>
+                  <View
+                    style={[
+                      styles.daysPill,
+                      {
+                        backgroundColor: daysTone.chipBg,
+                        borderColor: daysTone.border,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.daysPillText, { color: daysTone.accent }]}>
+                      {Math.max(daysRemaining, 0)}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+            </View>
 
             {isLoadingMemberships && !activeMembership && (
               <View style={styles.loadingSection}>
-                <ActivityIndicator size="large" color="#00E5FF" />
+                <ActivityIndicator size="small" color="#00E5FF" />
                 <Text style={styles.loadingText}>Cargando membresía...</Text>
               </View>
             )}
@@ -473,31 +457,33 @@ const WalletDetails = ({ navigation }: Props) => {
             {activeMembership ? (
               <View style={styles.detailsGrid}>
                 <View style={styles.detailCell}>
-                  <Text style={styles.detailLabel}>MEMBRESIA</Text>
+                  <Text style={styles.detailLabel}>Membresía</Text>
                   <Text style={styles.detailValueAccent}>
-                    Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estandar'}
+                    Conductor {activeMembership?.status === 'ACTIVA' ? 'Premium' : 'Estándar'}
                   </Text>
                 </View>
                 <View style={styles.detailCell}>
-                  <Text style={styles.detailLabel}>VENCE</Text>
+                  <Text style={styles.detailLabel}>Vence</Text>
                   <Text style={styles.detailValue}>{expiryDate}</Text>
                 </View>
                 <View style={styles.detailCell}>
-                  <Text style={styles.detailLabel}>COSTO</Text>
+                  <Text style={styles.detailLabel}>Costo</Text>
                   <Text style={styles.detailValue}>
                     ${Number(activeMembership?.costo || 0).toLocaleString("es-CO")}
                   </Text>
                 </View>
                 <View style={styles.detailCell}>
-                  <Text style={styles.detailLabel}>INICIO</Text>
+                  <Text style={styles.detailLabel}>Inicio</Text>
                   <Text style={styles.detailValue}>{startDate}</Text>
                 </View>
               </View>
             ) : (
               <View style={styles.noMembershipSection}>
-                <Ionicons name="information-circle-outline" size={32} color="#FF6B6B" />
+                <Ionicons name="information-circle-outline" size={28} color="#FF6B6B" />
                 <Text style={styles.noMembershipText}>No tienes una membresía activa</Text>
-                <Text style={styles.noMembershipSubtext}>Debes adquirir una membresía para poder aceptar y completar servicios en T+Plus.</Text>
+                <Text style={styles.noMembershipSubtext}>
+                  Adquiere una membresía para aceptar y completar servicios.
+                </Text>
                 <TouchableOpacity
                   style={styles.ctaMini}
                   onPress={() =>
@@ -512,7 +498,7 @@ const WalletDetails = ({ navigation }: Props) => {
                     color="#FFFFFF"
                   />
                   <Text style={styles.ctaMiniText}>
-                    {PUEDE_COMPRAR_EN_APP ? "Obtener Membresía" : "Contactar soporte"}
+                    {PUEDE_COMPRAR_EN_APP ? "Obtener membresía" : "Contactar soporte"}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -524,13 +510,13 @@ const WalletDetails = ({ navigation }: Props) => {
           <View style={styles.supportBannerHighlight}>
             <View style={styles.supportBannerContent}>
               <Text style={styles.supportBannerTitle}>¡Ya eres miembro!</Text>
-              <Text style={styles.supportBannerSubtitle}>Necesitas ayuda? Contáctanos</Text>
+              <Text style={styles.supportBannerSubtitle}>¿Necesitas ayuda? Contáctanos</Text>
             </View>
             <TouchableOpacity
               style={styles.supportBannerBtn}
               onPress={() => Linking.openURL("https://wa.me/573118841054")}
             >
-              <Ionicons name="logo-whatsapp" size={24} color="#25D366" />
+              <Ionicons name="logo-whatsapp" size={22} color="#25D366" />
             </TouchableOpacity>
           </View>
         ) : (
@@ -539,8 +525,10 @@ const WalletDetails = ({ navigation }: Props) => {
               <Ionicons name="alert-circle-outline" size={18} color="#FFFFFF" />
             </View>
             <View style={styles.alertTextWrap}>
-              <Text style={styles.alertTitle}>Sin Membresía Activa</Text>
-              <Text style={styles.alertSub}>No tienes una membresía registrada. Para poder aceptar servicios, necesitas adquirir una membresía.</Text>
+              <Text style={styles.alertTitle}>Sin membresía activa</Text>
+              <Text style={styles.alertSub}>
+                Necesitas una membresía para aceptar servicios.
+              </Text>
             </View>
             <TouchableOpacity
               style={styles.renewMiniBtn}
@@ -563,8 +551,8 @@ const WalletDetails = ({ navigation }: Props) => {
               style={styles.ctaMain}
               onPress={() => Linking.openURL("https://mpago.li/12iuk56")}
             >
-              <Ionicons name="refresh-outline" size={20} color="#051A26" />
-              <Text style={styles.ctaMainText}>Renovar Membresia</Text>
+              <Ionicons name="refresh-outline" size={18} color="#051A26" />
+              <Text style={styles.ctaMainText}>Renovar membresía</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -582,14 +570,14 @@ const WalletDetails = ({ navigation }: Props) => {
             key={mode}
             style={[
               styles.packageBtn,
-              idx === 1 ? { marginTop: 10 } : null,
+              idx === 1 ? { marginTop: 8 } : null,
             ]}
             onPress={() => navigation.navigate("ChosePlan", { mode })}
           >
             {icon === "local-offer" ? (
-              <MaterialIcons name={icon} size={24} color="white" />
+              <MaterialIcons name={icon} size={20} color="#E8FCFF" />
             ) : (
-              <FontAwesome name={icon} size={24} color="white" />
+              <FontAwesome name={icon} size={20} color="#E8FCFF" />
             )}
             <Text style={styles.packageBtnText}>
               Paquete {text}
@@ -607,151 +595,115 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#051A26",
   },
-  bgLayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  walletGlowOne: {
-    position: "absolute",
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    backgroundColor: "#00E5FF",
-    top: -80,
-    right: -80,
-    opacity: 0.2,
-  },
-  walletGlowTwo: {
-    position: "absolute",
-    width: 250,
-    height: 250,
-    borderRadius: 125,
-    backgroundColor: "#00b0ff",
-    left: -80,
-    bottom: "18%",
-    opacity: 0.18,
-  },
-  walletGlowThree: {
-    position: "absolute",
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    backgroundColor: "rgba(0,229,255,0.65)",
-    left: "50%",
-    top: "45%",
-    marginLeft: -90,
-    marginTop: -90,
-    opacity: 0.1,
-  },
-  walletOrb: {
-    position: "absolute",
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    top: "20%",
-    right: -60,
-    borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.14)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  walletOrbInner: {
-    width: 155,
-    height: 155,
-    borderRadius: 77.5,
-    borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.08)",
-  },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingTop: 48,
-    paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  headerTitleWrap: {
+    flex: 1,
+    paddingHorizontal: 12,
+  },
+  headerTitleWrapDriver: {
+    flex: 1,
+    paddingHorizontal: 0,
+  },
+  headerEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#00E5FF",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#FFFFFF",
+    letterSpacing: -0.2,
   },
   headerIconBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: "rgba(10,46,61,0.7)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.28)",
+    borderColor: "rgba(0,229,255,0.22)",
     alignItems: "center",
     justifyContent: "center",
   },
   headerText: {
-    fontSize: 20,
-    fontWeight: "700",
+    fontSize: 16,
+    fontWeight: "600",
     color: "#FFFFFF",
+    letterSpacing: -0.2,
   },
   scroll: {
     flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingBottom: 28,
+    paddingTop: 12,
   },
   cardWrap: {
-    marginTop: 8,
-    marginBottom: 14,
+    marginBottom: 10,
   },
   membershipCard: {
-    borderRadius: 22,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
     width: "100%",
-    backgroundColor: "rgba(8, 40, 56, 0.92)",
+    backgroundColor: "rgba(10,46,61,0.55)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.4)",
+    borderColor: "rgba(0,229,255,0.18)",
     overflow: "hidden",
     position: "relative",
   },
   cardShine: {
     position: "absolute",
     left: 0,
-    width: 120,
-    backgroundColor: "rgba(255,255,255,0.08)",
+    width: 100,
+    backgroundColor: "rgba(255,255,255,0.07)",
   },
   cardTopRow: {
     flexDirection: "row",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 12,
   },
   cardLogoWrap: {
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: "#FFFFFF",
   },
   cardLogo: {
-    width: 40,
-    height: 40,
+    width: 30,
+    height: 30,
     resizeMode: "contain",
   },
-  cardLogoMain: {
-    color: "#FFFFFF",
-    fontSize: 30,
-    fontWeight: "800",
-    lineHeight: 34,
+  statusStack: {
+    gap: 8,
   },
-  infoRowBox: {
-    borderRadius: 14,
-    minHeight: 48,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginTop: 10,
-    borderWidth: 1,
+  statusLine: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: "rgba(0,229,255,0.05)",
   },
-  infoRowLabel: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.8,
+  statusLineLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.55)",
     flex: 1,
     marginRight: 8,
   },
@@ -759,76 +711,92 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
     borderWidth: 1,
   },
   statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 7,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 6,
   },
   statusPillText: {
-    fontSize: 14,
-    fontWeight: "800",
-    letterSpacing: 0,
+    fontSize: 12,
+    fontWeight: "700",
     textTransform: "uppercase",
-    lineHeight: 18,
+    lineHeight: 16,
+  },
+  daysPill: {
+    minWidth: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  daysPillText: {
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 16,
   },
   detailsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    marginTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(0,229,255,0.14)",
-    paddingTop: 16,
+    marginTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(0,229,255,0.12)",
+    paddingTop: 12,
+    marginHorizontal: -4,
   },
   detailCell: {
     width: "50%",
-    marginBottom: 14,
+    paddingHorizontal: 4,
+    marginBottom: 10,
   },
   detailLabel: {
     fontSize: 11,
-    color: "rgba(255,255,255,0.45)",
+    color: "rgba(255,255,255,0.42)",
     fontWeight: "600",
-    letterSpacing: 0.8,
-    marginBottom: 4,
+    marginBottom: 3,
   },
   detailValue: {
-    fontSize: 15,
+    fontSize: 13,
     color: "#FFFFFF",
-    fontWeight: "700",
+    fontWeight: "600",
+    lineHeight: 18,
   },
   detailValueAccent: {
-    fontSize: 15,
+    fontSize: 13,
     color: "#00E5FF",
     fontWeight: "700",
+    lineHeight: 18,
   },
   alertBanner: {
-    marginBottom: 12,
-    borderRadius: 16,
+    marginBottom: 10,
+    borderRadius: 12,
     padding: 12,
-    backgroundColor: "transparent",
+    backgroundColor: "rgba(10,46,61,0.4)",
     borderWidth: 1,
-    borderColor: "#FFFFFF",
+    borderColor: "rgba(255,255,255,0.18)",
     flexDirection: "row",
     alignItems: "center",
   },
   alertIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "transparent",
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     borderWidth: 1,
-    borderColor: "#FFFFFF",
+    borderColor: "rgba(255,255,255,0.35)",
     alignItems: "center",
     justifyContent: "center",
     marginRight: 10,
   },
   alertTextWrap: {
     flex: 1,
+    minWidth: 0,
   },
   alertTitle: {
     color: "#FFFFFF",
@@ -836,17 +804,18 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   alertSub: {
-    color: "rgba(255,255,255,0.65)",
-    marginTop: 1,
+    color: "rgba(255,255,255,0.55)",
+    marginTop: 2,
     fontSize: 12,
+    lineHeight: 16,
   },
   renewMiniBtn: {
-    borderRadius: 18,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#FFFFFF",
-    backgroundColor: "transparent",
-    paddingHorizontal: 12,
+    borderColor: "rgba(255,255,255,0.35)",
+    paddingHorizontal: 10,
     paddingVertical: 6,
+    marginLeft: 8,
   },
   renewMiniBtnText: {
     color: "#FFFFFF",
@@ -854,13 +823,12 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   ctaWrap: {
-    marginTop: 4,
-    marginBottom: 14,
+    marginBottom: 10,
   },
   ctaMain: {
-    borderRadius: 28,
+    borderRadius: 12,
     backgroundColor: "#00E5FF",
-    paddingVertical: 16,
+    paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
@@ -868,18 +836,18 @@ const styles = StyleSheet.create({
   ctaMainText: {
     marginLeft: 8,
     color: "#051A26",
-    fontWeight: "800",
-    fontSize: 16,
+    fontWeight: "700",
+    fontSize: 14,
   },
   packagesWrap: {
-    paddingBottom: 24,
+    paddingBottom: 16,
   },
   packageBtn: {
-    borderRadius: 14,
-    paddingVertical: 13,
-    backgroundColor: "rgba(0,229,255,0.2)",
+    borderRadius: 12,
+    paddingVertical: 12,
+    backgroundColor: "rgba(0,229,255,0.1)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.35)",
+    borderColor: "rgba(0,229,255,0.22)",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -887,93 +855,88 @@ const styles = StyleSheet.create({
   packageBtnText: {
     marginLeft: 8,
     color: "#E8FCFF",
-    fontWeight: "700",
-    fontSize: 14,
+    fontWeight: "600",
+    fontSize: 13,
   },
   loadingSection: {
-    marginTop: 16,
-    paddingVertical: 24,
+    marginTop: 12,
+    paddingVertical: 18,
     alignItems: "center",
     justifyContent: "center",
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "rgba(0,229,255,0.12)",
   },
   loadingText: {
-    marginTop: 12,
-    fontSize: 13,
-    color: "rgba(0,229,255,0.8)",
+    marginTop: 10,
+    fontSize: 12,
+    color: "rgba(0,229,255,0.75)",
     fontWeight: "500",
   },
   supportBannerHighlight: {
-    marginHorizontal: 0,
-    marginBottom: 16,
-    borderRadius: 16,
-    backgroundColor: "rgba(8, 40, 56, 0.85)",
+    marginBottom: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(10,46,61,0.55)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.35)",
-    padding: 14,
+    borderColor: "rgba(0,229,255,0.14)",
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  supportBannerLogo: {
-    width: 48,
-    height: 48,
-    resizeMode: "contain",
-  },
   supportBannerContent: {
     flex: 1,
     marginRight: 12,
+    minWidth: 0,
   },
   supportBannerTitle: {
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: "700",
     color: "#00E5FF",
     marginBottom: 2,
   },
   supportBannerSubtitle: {
     fontSize: 12,
-    color: "rgba(255,255,255,0.65)",
+    color: "rgba(255,255,255,0.5)",
   },
   supportBannerBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: "rgba(37,211,102,0.12)",
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "rgba(37,211,102,0.1)",
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: "rgba(37,211,102,0.55)",
+    borderColor: "rgba(37,211,102,0.4)",
   },
   noMembershipSection: {
-    marginTop: 16,
-    paddingVertical: 24,
+    marginTop: 12,
+    paddingVertical: 18,
     alignItems: "center",
     justifyContent: "center",
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "rgba(0,229,255,0.12)",
   },
   noMembershipText: {
-    marginTop: 16,
-    fontSize: 16,
+    marginTop: 12,
+    fontSize: 14,
     fontWeight: "700",
     color: "#FF6B6B",
     textAlign: "center",
   },
   noMembershipSubtext: {
-    marginTop: 8,
-    fontSize: 13,
-    color: "rgba(255,255,255,0.7)",
+    marginTop: 6,
+    fontSize: 12,
+    color: "rgba(255,255,255,0.55)",
     textAlign: "center",
-    paddingHorizontal: 16,
-    lineHeight: 18,
+    paddingHorizontal: 8,
+    lineHeight: 17,
   },
   ctaMini: {
-    marginTop: 16,
-    borderRadius: 18,
+    marginTop: 14,
+    borderRadius: 10,
     backgroundColor: "#FF6B6B",
-    paddingVertical: 12,
-    paddingHorizontal: 24,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
@@ -982,7 +945,7 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     color: "#FFFFFF",
     fontWeight: "700",
-    fontSize: 14,
+    fontSize: 13,
   },
 });
 

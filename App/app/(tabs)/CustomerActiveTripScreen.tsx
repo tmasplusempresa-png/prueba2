@@ -15,7 +15,7 @@ import axios from 'axios';
 import Mapbox, { MapboxStyles } from '@/config/MapboxConfig';
 import { getMapboxAccessToken } from '@/config/AppConfig';
 import { RootState } from '@/common/store';
-import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { useBookingDriverPosition } from '@/hooks/useBookingDriverPosition';
 import { useDriverSignalHealth, getPositionAgeSeconds } from '@/hooks/useDriverSignalHealth';
 import originIcon from '../../assets/images/rsz_2red_pin.png';
@@ -29,10 +29,17 @@ import {
   isActiveTripStatus,
   notifyTripStateChange,
 } from '@/common/services/ActiveTripNotificationService';
+import { submitTripRating, fetchMyRatingForTrip } from '@/common/utils/userRating';
+import { preferredConductorId } from '@/common/utils/driverIds';
 import { sendPushNotification } from '@/common/actions/NotificationService';
 import { haversineKm, formatDistanceAndEta, DistanceEtaState } from '@/common/services/DriverTrackingService';
 import { shareTrip } from '@/common/utils/tripShare';
 import { useAnimatedDriverMarker, fitPickupAndDriver, shouldRefitCamera } from '@/hooks/useAnimatedDriverMarker';
+import { useChatUnreadCount } from '@/hooks/useChatUnreadCount';
+import FloatingChatModal from '@/components/FloatingChatModal';
+import ProfilePhotoPreview from '@/components/ProfilePhotoPreview';
+import SearchingDriverLoader from '@/components/SearchingDriverLoader';
+import { formatBookingFareRange } from '@/constants/fare';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -106,11 +113,39 @@ const formatTripDuration = (totalSeconds: number | null | undefined): string => 
   return `${s}s`;
 };
 
+/**
+ * Segundos reales del viaje al cierre.
+ * `total_trip_time` no existe en la vista bookings; addActuals persiste minutos en `duration`
+ * y timestamps en trip_start_time / trip_end_time.
+ */
+const resolveBookingTripSeconds = (booking: any): number => {
+  const rawTotal = Number(booking?.total_trip_time);
+  if (Number.isFinite(rawTotal) && rawTotal > 0) return Math.round(rawTotal);
+
+  const startMs = booking?.trip_start_time
+    ? new Date(booking.trip_start_time).getTime()
+    : NaN;
+  const endMs = booking?.trip_end_time
+    ? new Date(booking.trip_end_time).getTime()
+    : NaN;
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+    return Math.round((endMs - startMs) / 1000);
+  }
+
+  const dur = Number(booking?.duration);
+  if (Number.isFinite(dur) && dur > 0) {
+    // Al cierre addActuals guarda minutos; valores grandes (>300) se tratan como segundos.
+    return dur > 300 ? Math.round(dur) : Math.round(dur * 60);
+  }
+  return 0;
+};
+
 const CustomerActiveTripScreen = () => {
   const nav = useNavigation<any>();
   const route = useRoute();
   const insets = useSafeAreaInsets();
   const user = useSelector((s: RootState) => s.auth.user) as any;
+  const profile = useSelector((s: RootState) => s.auth.profile) as any;
   
   const { bookingId, booking: initialBooking } = (route.params as any) || {};
 
@@ -155,8 +190,18 @@ const CustomerActiveTripScreen = () => {
 
   // ⭐ Calificación del conductor
   const [driverRating, setDriverRating] = useState<number>(0);
+  // Calificación propia en `calificacion` (sobrevive al polling de bookings).
+  const [myGivenRating, setMyGivenRating] = useState<number>(0);
+  const [myGivenReview, setMyGivenReview] = useState<string>('');
+  const [ratingError, setRatingError] = useState<string | null>(null);
   const [driverReview, setDriverReview] = useState<string>('');
   const [submittingRating, setSubmittingRating] = useState(false);
+  const unreadChatCount = useChatUnreadCount(
+    booking?.id || bookingId,
+    'customer',
+    !!(booking?.id || bookingId)
+  );
+  const [chatVisible, setChatVisible] = useState(false);
   const fadeAnimAlert = useRef(new Animated.Value(0)).current;
   const scaleAnimAlert = useRef(new Animated.Value(0.85)).current;
 
@@ -181,6 +226,15 @@ const CustomerActiveTripScreen = () => {
   }, [fadeAnimAlert, scaleAnimAlert]);
 
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+
+  const goHome = useCallback(() => {
+    // Evita volver al flujo de crear reserva (detalle → mapa → inicio).
+    if (typeof nav.reset === 'function') {
+      nav.reset({ index: 0, routes: [{ name: 'HomeScreen' }] });
+      return;
+    }
+    nav.navigate('HomeScreen');
+  }, [nav]);
 
   // 🗺️ Helper para abrir Google Maps
   const navigateWithGoogleMaps = useCallback((latitude: number, longitude: number, label: string) => {
@@ -286,7 +340,6 @@ const CustomerActiveTripScreen = () => {
     setCancelling(true);
     try {
       const headers = await getSupabaseAuthHeaders(true);
-      const now = new Date();
       const reason = 'Cliente canceló el viaje';
       const url = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${booking.id}`;
       const res = await fetch(url, {
@@ -294,8 +347,9 @@ const CustomerActiveTripScreen = () => {
         headers: { ...headers, Prefer: 'return=representation' },
         body: JSON.stringify({
           status: 'CANCELLED',
-          cancelled_by: 'customer',
-          cancellation_time: now.toLocaleTimeString('en-GB', { hour12: false }),
+          // Vista bookings: cancelled_by / reason (sin cancellation_time).
+          // Enum subyacente rol_persona → 'cliente' | 'conductor'.
+          cancelled_by: 'cliente',
           reason,
         }),
       });
@@ -325,64 +379,61 @@ const CustomerActiveTripScreen = () => {
     openAlertModal(setConfirmCancelVisible);
   }, [cancelling, openAlertModal]);
 
-  // ⭐ Enviar calificación del conductor
+  // ⭐ Enviar calificación del conductor (tabla calificacion)
   const handleSubmitDriverRating = useCallback(async () => {
     if (!booking?.id) return;
-    if (driverRating < 1) {
-      Alert.alert(
-        'Calificación requerida',
-        'Por favor selecciona de 1 a 5 estrellas antes de enviar.',
-      );
+    const stars = Math.round(driverRating);
+    if (stars < 1) {
+      setRatingError('Selecciona de 1 a 5 estrellas antes de enviar.');
       return;
     }
     setSubmittingRating(true);
+    setRatingError(null);
     try {
       const headers = await getSupabaseAuthHeaders(true);
-
-      const patchUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${booking.id}`;
-      const res = await fetch(patchUrl, {
-        method: 'PATCH',
-        headers: { ...headers, Prefer: 'return=representation' },
-        body: JSON.stringify({
-          driver_rating: driverRating,
-          review: driverReview?.trim() || null,
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-
-      // Recalcular promedio del conductor en users.rating
-      if (booking.driver_id) {
-        try {
-          const headersRead = await getSupabaseAuthHeaders();
-          const listUrl = `${SUPABASE_URL}/rest/v1/bookings?driver_id=eq.${booking.driver_id}&driver_rating=not.is.null&select=driver_rating`;
-          const listRes = await fetch(listUrl, { headers: headersRead });
-          if (listRes.ok) {
-            const rows: Array<{ driver_rating: number }> = await listRes.json();
-            if (rows?.length) {
-              const avg = (
-                rows.reduce((sum, r) => sum + (Number(r.driver_rating) || 0), 0) / rows.length
-              ).toFixed(1);
-              const userUrl = `${SUPABASE_URL}/rest/v1/users?id=eq.${booking.driver_id}`;
-              await fetch(userUrl, {
-                method: 'PATCH',
-                headers,
-                body: JSON.stringify({ rating: avg }),
-              });
-            }
-          }
-        } catch (avgErr) {
-          console.warn('⚠️ [RATING] No se pudo actualizar promedio del conductor:', avgErr);
-        }
+      if (!hasUserAuthHeader(headers)) {
+        setRatingError('Inicia sesión de nuevo para calificar.');
+        return;
       }
 
-      setBooking((prev: any) => prev ? { ...prev, driver_rating: driverRating, driver_review: driverReview?.trim() || null } : prev);
+      // Cliente: persona.id del perfil (no auth uid). Igual que ReservationDetailScreen.
+      const raterId =
+        preferredConductorId(user, profile) ||
+        profile?.id ||
+        booking.customer_id ||
+        booking.customer;
+      const ratedId = booking.driver || booking.driver_id;
+      if (!raterId || !ratedId) {
+        setRatingError('No se pudo identificar cliente/conductor para calificar.');
+        return;
+      }
+
+      const result = await submitTripRating({
+        reservaId: String(booking.id),
+        ratedPersonaId: String(ratedId),
+        raterPersonaId: String(raterId),
+        puntaje: stars,
+        comentario: driverReview?.trim() || null,
+        ratedRole: 'driver',
+      });
+      if (!result.ok) throw new Error(result.error || 'Error al guardar');
+
+      // Estado local independiente de bookings (el poll no trae driver_rating).
+      setMyGivenRating(stars);
+      setMyGivenReview(driverReview?.trim() || '');
+      setDriverRating(stars);
+      Alert.alert('¡Gracias!', 'Tu calificación se guardó correctamente.');
     } catch (e: any) {
       console.error('❌ [RATING] Error al enviar calificación:', e);
-      Alert.alert('Error', 'No se pudo enviar tu calificación. Inténtalo de nuevo.');
+      const msg = e?.message
+        ? `No se pudo enviar tu calificación: ${String(e.message).slice(0, 180)}`
+        : 'No se pudo enviar tu calificación. Inténtalo de nuevo.';
+      setRatingError(msg);
+      Alert.alert('Error', msg);
     } finally {
       setSubmittingRating(false);
     }
-  }, [booking?.id, booking?.driver_id, driverRating, driverReview]);
+  }, [booking?.id, booking?.driver, booking?.driver_id, booking?.customer, booking?.customer_id, driverRating, driverReview, user, profile]);
 
   // Fetch booking details
   const fetchBooking = useCallback(async () => {
@@ -504,7 +555,21 @@ const CustomerActiveTripScreen = () => {
   const trackingActive =
     booking?.status === 'ACCEPTED' ||
     booking?.status === 'ARRIVED' ||
-    booking?.status === 'STARTED';
+    booking?.status === 'STARTED' ||
+    booking?.status === 'IN_PROGRESS' ||
+    booking?.status === 'TRIP_STARTED';
+
+  const isTripToDrop =
+    booking?.status === 'STARTED' ||
+    booking?.status === 'IN_PROGRESS' ||
+    booking?.status === 'TRIP_STARTED';
+
+  const showLiveMap =
+    (booking?.status === 'ACCEPTED' ||
+      booking?.status === 'ARRIVED' ||
+      isTripToDrop) &&
+    booking?.pickup_lat != null &&
+    booking?.pickup_lng != null;
 
   const { driverPosition } = useBookingDriverPosition(
     trackingActive ? booking?.id : null
@@ -549,32 +614,54 @@ const CustomerActiveTripScreen = () => {
     prevDriverPosRef.current = { lat: driverLocation.latitude, lng: driverLocation.longitude };
   }, [driverLocation?.latitude, driverLocation?.longitude]);
 
-  // 🗺️ Mapbox Directions: refresca cada 25 s. Destino = pickup en ACCEPTED,
-  // drop en STARTED. En ARRIVED no hay ruta (el conductor está en el punto).
-  // Así el polyline también acompaña al cliente durante el viaje, no solo
-  // mientras espera al conductor.
+  // 🗺️ Mapbox Directions:
+  // - ACCEPTED: conductor → pickup
+  // - STARTED / IN_PROGRESS / TRIP_STARTED: pickup → drop (igual que el conductor)
   useEffect(() => {
-    if (!driverLocation) return;
     if (!MAPBOX_ACCESS_TOKEN) return;
 
     const status = booking?.status;
     const isAccepted = status === 'ACCEPTED';
-    const isStarted = status === 'STARTED';
-    if (!isAccepted && !isStarted) {
-      // ARRIVED u otros estados no necesitan línea — limpia la geometría previa.
+    const toDrop =
+      status === 'STARTED' ||
+      status === 'IN_PROGRESS' ||
+      status === 'TRIP_STARTED';
+
+    if (!isAccepted && !toDrop) {
       setRouteToPickup(null);
       return;
     }
 
-    const targetLat = Number(isStarted ? booking?.drop_lat : booking?.pickup_lat);
-    const targetLng = Number(isStarted ? booking?.drop_lng : booking?.pickup_lng);
-    if (isNaN(targetLat) || isNaN(targetLng)) return;
+    const pickupLat = Number(booking?.pickup_lat);
+    const pickupLng = Number(booking?.pickup_lng);
+    const dropLat = Number(booking?.drop_lat);
+    const dropLng = Number(booking?.drop_lng);
+
+    let originLng: number;
+    let originLat: number;
+    let destLng: number;
+    let destLat: number;
+
+    if (toDrop) {
+      if (isNaN(pickupLat) || isNaN(pickupLng) || isNaN(dropLat) || isNaN(dropLng)) return;
+      originLng = pickupLng;
+      originLat = pickupLat;
+      destLng = dropLng;
+      destLat = dropLat;
+    } else {
+      if (!driverLocation) return;
+      if (isNaN(pickupLat) || isNaN(pickupLng)) return;
+      originLng = driverLocation.longitude;
+      originLat = driverLocation.latitude;
+      destLng = pickupLng;
+      destLat = pickupLat;
+    }
 
     let cancelled = false;
     const fetchRoute = async () => {
       try {
-        const origin = `${driverLocation.longitude},${driverLocation.latitude}`;
-        const dest = `${targetLng},${targetLat}`;
+        const origin = `${originLng},${originLat}`;
+        const dest = `${destLng},${destLat}`;
         const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${origin};${dest}?geometries=geojson&overview=full&access_token=${MAPBOX_ACCESS_TOKEN}`;
         const res = await axios.get(url);
         if (cancelled) return;
@@ -588,11 +675,10 @@ const CustomerActiveTripScreen = () => {
         setEtaEstado('NORMAL');
       } catch (e: any) {
         console.error('Mapbox Directions error:', e?.response?.data || e?.message);
-        // Haversine fallback: si la API falla el cliente igual ve distancia y ETA
-        if (!cancelled && driverLocation) {
-          const linearKm = haversineKm(
-            driverLocation.latitude, driverLocation.longitude, targetLat, targetLng
-          );
+        if (!cancelled) {
+          const fromLat = toDrop ? pickupLat : (driverLocation?.latitude ?? pickupLat);
+          const fromLng = toDrop ? pickupLng : (driverLocation?.longitude ?? pickupLng);
+          const linearKm = haversineKm(fromLat, fromLng, destLat, destLng);
           const { distanciaTexto, etaTexto, estado } = formatDistanceAndEta(linearKm);
           setEstimatedTime(etaTexto);
           setEstimatedDistance(distanciaTexto);
@@ -602,7 +688,7 @@ const CustomerActiveTripScreen = () => {
     };
 
     fetchRoute();
-    const id = setInterval(fetchRoute, 25000);
+    const id = setInterval(fetchRoute, toDrop ? 60000 : 25000);
     return () => { cancelled = true; clearInterval(id); };
   }, [
     driverLocation,
@@ -612,13 +698,15 @@ const CustomerActiveTripScreen = () => {
     MAPBOX_ACCESS_TOKEN,
   ]);
 
-  // 🗺️ Fit camera a driver + target activo (pickup en ACCEPTED, drop en STARTED).
-  // Throttled para no llamar fitBounds en cada frame del tween (~42×/update).
+  // 🗺️ Fit camera a driver + target activo (pickup en ACCEPTED, drop en viaje).
   useEffect(() => {
     if (!animatedCoords) return;
-    const isStarted = booking?.status === 'STARTED';
-    const targetLat = Number(isStarted ? booking?.drop_lat : booking?.pickup_lat);
-    const targetLng = Number(isStarted ? booking?.drop_lng : booking?.pickup_lng);
+    const toDrop =
+      booking?.status === 'STARTED' ||
+      booking?.status === 'IN_PROGRESS' ||
+      booking?.status === 'TRIP_STARTED';
+    const targetLat = Number(toDrop ? booking?.drop_lat : booking?.pickup_lat);
+    const targetLng = Number(toDrop ? booking?.drop_lng : booking?.pickup_lng);
     if (isNaN(targetLat) || isNaN(targetLng)) return;
 
     if (!shouldRefitCamera(lastCameraFitRef.current, animatedCoords)) return;
@@ -633,13 +721,14 @@ const CustomerActiveTripScreen = () => {
   ]);
 
   // 🗺️ Fit fullscreen camera when opened or driver moves.
-  // The 400 ms setTimeout acts as a debounce: if animatedCoords keeps changing
-  // (tween in progress), the timer resets each time and only fires once it settles.
   useEffect(() => {
     if (!mapFullscreen || !fullscreenCameraRef.current) return;
-    const isStarted = booking?.status === 'STARTED';
-    const targetLat = Number(isStarted ? booking?.drop_lat : booking?.pickup_lat);
-    const targetLng = Number(isStarted ? booking?.drop_lng : booking?.pickup_lng);
+    const toDrop =
+      booking?.status === 'STARTED' ||
+      booking?.status === 'IN_PROGRESS' ||
+      booking?.status === 'TRIP_STARTED';
+    const targetLat = Number(toDrop ? booking?.drop_lat : booking?.pickup_lat);
+    const targetLng = Number(toDrop ? booking?.drop_lng : booking?.pickup_lng);
     if (isNaN(targetLat) || isNaN(targetLng)) return;
     const timer = setTimeout(() => {
       fitPickupAndDriver(
@@ -699,8 +788,8 @@ const CustomerActiveTripScreen = () => {
   }, [bookingId, fetchBooking]);
 
   // 🧾 Abrir el resumen de fin de viaje una sola vez al completarse. El
-  // conductor ya persistió distancia/tiempo/valor reales vía addActualsToBooking,
-  // así que el polling ya trae `distance`, `total_trip_time` y `price` frescos.
+  // conductor ya persistió distancia/tiempo/valor reales vía addActualsToBooking
+  // (trip_cost, distance, duration, trip_end_time).
   useEffect(() => {
     if (booking?.status === 'COMPLETE' && !tripSummaryShownRef.current) {
       tripSummaryShownRef.current = true;
@@ -711,41 +800,59 @@ const CustomerActiveTripScreen = () => {
     }
   }, [booking?.status, openAlertModal]);
 
-  // ⭐ Hidratar estado local con calificación ya guardada (si existe)
+  // ⭐ Hidratar calificación desde `calificacion` (no depender de bookings.driver_rating)
   useEffect(() => {
-    if (booking?.driver_rating && driverRating === 0) {
-      setDriverRating(Number(booking.driver_rating));
-    }
-    if (booking?.driver_review && !driverReview) {
-      setDriverReview(String(booking.driver_review));
-    }
-  }, [booking?.driver_rating, booking?.driver_review]);
+    let cancelled = false;
+    (async () => {
+      const reservaId = booking?.id || bookingId;
+      const raterId =
+        preferredConductorId(user, profile) ||
+        profile?.id ||
+        booking?.customer_id ||
+        booking?.customer;
+      if (!reservaId || !raterId) return;
+      try {
+        const mine = await fetchMyRatingForTrip(String(reservaId), String(raterId));
+        if (cancelled) return;
+        if (mine && mine.puntaje >= 1) {
+          setMyGivenRating(mine.puntaje);
+          setMyGivenReview(mine.comentario || '');
+          setDriverRating(mine.puntaje);
+          if (mine.comentario) setDriverReview(mine.comentario);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [booking?.id, bookingId, booking?.customer, booking?.customer_id, user, profile]);
 
-  // ⏲️ Contador de OTP - Calcular localmente cada segundo
+  // Contador OTP del cliente: solo con status ARRIVED + driver_arrived_time
   useEffect(() => {
-    if (!booking?.otp_timer_started_at) {
+    const status = String(booking?.status || '').toUpperCase();
+    const arrivedAt = booking?.driver_arrived_time;
+    if (status !== 'ARRIVED' || !arrivedAt || booking?.otp_verified) {
       setCountdown(null);
       return;
     }
 
     const updateCountdown = () => {
-      const startTime = new Date(booking.otp_timer_started_at).getTime();
-      const now = new Date().getTime();
-      const elapsed = (now - startTime) / 1000;
-      const remaining = Math.max(0, 180 - elapsed);
-      
-      console.log(`⏰ [COUNTDOWN] elapsed: ${elapsed.toFixed(1)}s, remaining: ${remaining.toFixed(1)}s`);
+      const startTime = new Date(arrivedAt).getTime();
+      if (!Number.isFinite(startTime)) {
+        setCountdown(null);
+        return;
+      }
+      const elapsed = (Date.now() - startTime) / 1000;
+      const remaining = Math.min(180, Math.max(0, 180 - elapsed));
       setCountdown(Math.ceil(remaining));
     };
 
-    // Update inicial
     updateCountdown();
-
-    // Update cada 100ms para suavidad
-    const interval = setInterval(updateCountdown, 100);
-
+    const interval = setInterval(updateCountdown, 250);
     return () => clearInterval(interval);
-  }, [booking?.otp_timer_started_at]);
+  }, [booking?.driver_arrived_time, booking?.otp_verified, booking?.status]);
 
 
 
@@ -766,7 +873,7 @@ const CustomerActiveTripScreen = () => {
     return (
       <View style={s.root}>
         <View style={[s.header, { paddingTop: topPad }]}>
-          <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()}>
+          <TouchableOpacity style={s.backBtn} onPress={goHome}>
             <Ionicons name="chevron-back" size={24} color="#FFF" />
           </TouchableOpacity>
           <Text style={s.headerTitle}>Mi Viaje</Text>
@@ -777,14 +884,15 @@ const CustomerActiveTripScreen = () => {
     );
   }
 
-  // Determinar si estamos en fase de espera de 3 minutos (conductor llegó, esperando código)
-  const isWaitingForCode = booking.otp_timer_started_at && !booking.otp_verified;
-  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| timer_started_at:', booking.otp_timer_started_at, '| verified:', booking.otp_verified);
+  // Solo status ARRIVED = conductor confirmó llegada (no ACCEPTED + driver_arrived_time).
+  const tripStatus = String(booking.status || '').toUpperCase();
+  const driverHasArrived = tripStatus === 'ARRIVED';
+  const isWaitingForCode = driverHasArrived && !booking.otp_verified;
+  console.log('⏰ [STATUS] isWaitingForCode:', isWaitingForCode, '| status:', tripStatus, '| arrived_at:', booking.driver_arrived_time, '| verified:', booking.otp_verified);
 
   const statusText = () => {
     if (booking.status === 'PENDING' || booking.status === 'NEW') return 'Buscando conductor...';
-    if (booking.status === 'ACCEPTED' && !booking.otp_timer_started_at) return '¡Tu viaje ha sido aceptado!';
-    if (booking.status === 'ACCEPTED' && booking.otp_timer_started_at) return 'Conductor ha llegado';
+    if (booking.status === 'ACCEPTED') return 'Viaje aceptado';
     if (booking.status === 'ARRIVED') return 'Conductor ha llegado';
     if (booking.status === 'IN_PROGRESS' || booking.status === 'STARTED' || booking.status === 'TRIP_STARTED') return 'Viaje en progreso';
     if (booking.status === 'COMPLETE') return '¡Viaje completado!';
@@ -805,13 +913,40 @@ const CustomerActiveTripScreen = () => {
     return '#00E5FF';
   };
 
+  const driverPhotoUri = (() => {
+    const candidates = [
+      booking?.driver_image,
+      driverInfo?.profile_image,
+      booking?.driver_profile_image,
+    ];
+    for (const c of candidates) {
+      const u = String(c || '').trim();
+      if (u.startsWith('http') || u.startsWith('file:') || u.startsWith('content:')) return u;
+    }
+    return null;
+  })();
+
+  const showDriverPanel =
+    !!booking.driver_name &&
+    (booking.status === 'ACCEPTED' ||
+      booking.status === 'ARRIVED' ||
+      booking.status === 'STARTED' ||
+      booking.status === 'IN_PROGRESS' ||
+      booking.status === 'TRIP_STARTED');
+
+  const carMarkerCoords = animatedCoords || driverLocation;
+
+  const openCustomerChat = () => {
+    setChatVisible(true);
+  };
+
   return (
     <View style={s.root}>
       <Image source={BG_IMAGE} style={s.bgImage} />
       <View style={s.bgOverlay} />
 
       <View style={[s.header, { paddingTop: topPad }]}>
-        <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()}>
+        <TouchableOpacity style={s.backBtn} onPress={goHome}>
           <Ionicons name="chevron-back" size={24} color="#FFF" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Mi Viaje Activo</Text>
@@ -841,9 +976,7 @@ const CustomerActiveTripScreen = () => {
         }
       >
         {/* 🗺️ Mapa con seguimiento en vivo del conductor */}
-        {(booking?.status === 'ACCEPTED' || booking?.status === 'ARRIVED' || booking?.status === 'STARTED')
-          && booking?.pickup_lat != null
-          && booking?.pickup_lng != null && (
+        {showLiveMap && (
           <View style={s.mapWrapper}>
             <Mapbox.MapView
               style={StyleSheet.absoluteFillObject}
@@ -868,6 +1001,42 @@ const CustomerActiveTripScreen = () => {
                 </View>
               </Mapbox.PointAnnotation>
 
+              {/* Halo: pickup antes del viaje; destino cuando el viaje está en curso */}
+              <Mapbox.ShapeSource
+                id="cat-active-halo"
+                shape={{
+                  type: 'Feature',
+                  properties: {},
+                  geometry: {
+                    type: 'Point',
+                    coordinates: isTripToDrop && booking?.drop_lng != null && booking?.drop_lat != null
+                      ? [Number(booking.drop_lng), Number(booking.drop_lat)]
+                      : [Number(booking.pickup_lng), Number(booking.pickup_lat)],
+                  },
+                }}
+              >
+                <Mapbox.CircleLayer
+                  id="cat-active-halo-outer"
+                  style={{
+                    circleRadius: 22,
+                    circleColor: isTripToDrop ? 'rgba(233,30,99,0.18)' : 'rgba(0,229,255,0.18)',
+                    circleStrokeWidth: 2.5,
+                    circleStrokeColor: isTripToDrop ? '#E91E63' : '#00E5FF',
+                    circlePitchAlignment: 'map',
+                  }}
+                />
+                <Mapbox.CircleLayer
+                  id="cat-active-halo-core"
+                  style={{
+                    circleRadius: 7,
+                    circleColor: isTripToDrop ? '#E91E63' : '#00E5FF',
+                    circleStrokeWidth: 2,
+                    circleStrokeColor: '#FFFFFF',
+                    circlePitchAlignment: 'map',
+                  }}
+                />
+              </Mapbox.ShapeSource>
+
               {booking?.drop_lat != null && booking?.drop_lng != null && (
                 <Mapbox.PointAnnotation
                   id="cat-drop"
@@ -880,7 +1049,7 @@ const CustomerActiveTripScreen = () => {
                 </Mapbox.PointAnnotation>
               )}
 
-              {routeToPickup && (booking?.status === 'ACCEPTED' || booking?.status === 'STARTED') && (
+              {routeToPickup && (booking?.status === 'ACCEPTED' || isTripToDrop) && (
                 <Mapbox.ShapeSource id="cat-route-source" shape={routeToPickup}>
                   <Mapbox.LineLayer
                     id="cat-route-line"
@@ -895,12 +1064,12 @@ const CustomerActiveTripScreen = () => {
                 </Mapbox.ShapeSource>
               )}
 
-              {animatedCoords && (
-                <Mapbox.PointAnnotation
+              {!!carMarkerCoords && (
+                <Mapbox.MarkerView
                   id="cat-driver"
-                  coordinate={[animatedCoords.longitude, animatedCoords.latitude]}
-                  anchor={{ x: 0.5, y: 0.5 }}
+                  coordinate={[carMarkerCoords.longitude, carMarkerCoords.latitude]}
                   allowOverlap
+                  anchor={{ x: 0.5, y: 0.5 }}
                 >
                   <View
                     style={{
@@ -913,7 +1082,7 @@ const CustomerActiveTripScreen = () => {
                   >
                     <Image source={driverCarIcon} style={{ width: 40, height: 40, resizeMode: 'contain' }} />
                   </View>
-                </Mapbox.PointAnnotation>
+                </Mapbox.MarkerView>
               )}
             </Mapbox.MapView>
 
@@ -975,76 +1144,63 @@ const CustomerActiveTripScreen = () => {
           </View>
         )}
 
-        {/* Status Card - Se re-anima cuando cambia el status */}
-        <Animatable.View
-          animation="pulse"
-          easing="ease-out"
-          duration={800}
-          iterationCount="infinite"
-          key={booking.status} // ← Force re-mount cuando cambia
-          useNativeDriver
-        >
-          <View style={[s.statusCard, { borderColor: statusColor(), borderWidth: 2 }]}>
-            <Ionicons name={statusIcon()} size={40} color={statusColor()} />
-            <Text style={s.statusText}>{statusText()}</Text>
-            <Text style={s.referenceText}>Ref: {booking.reference}</Text>
-            {tripNotificationActive ? (
-              <Text style={s.notificationHint}>🔔 Notificación activa en segundo plano. Toca para volver a esta pantalla.</Text>
-            ) : null}
-            {/* 🆕 Precio del Servicio - Dinámico según estado */}
-            <View style={s.priceInStatus}>
-              {booking.status === 'COMPLETE' ? (
-                <>
-                  <Text style={s.priceInStatusLabel}>💰 Valor Final Liquidado</Text>
-                  <Text style={s.priceInStatusAmount}>
-                    $ {(booking.price || booking.estimate || 0).toLocaleString('es-CO')}
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <Text style={s.priceInStatusLabel}>💰 Valor Estimado</Text>
-                  <Text style={s.priceInStatusAmount}>
-                    $ {(booking.driver_share || booking.price || booking.estimate || 0).toLocaleString('es-CO')} - $ {(booking.price || booking.estimate || 0).toLocaleString('es-CO')}
-                  </Text>
-                </>
-              )}
-            </View>
-          </View>
-        </Animatable.View>
-
-        {/* Cancelar viaje - solo antes de que el conductor confirme su llegada */}
-        {(() => {
-          const st = booking.status;
-          const driverHasArrived = st === 'ARRIVED' || !!booking.otp_timer_started_at;
-          const canCancel = st !== 'COMPLETE'
-            && st !== 'CANCELLED'
-            && st !== 'ACCEPTED'
-            && st !== 'STARTED'
-            && st !== 'IN_PROGRESS'
-            && st !== 'TRIP_STARTED'
-            && !booking.otp_verified
-            && !driverHasArrived;
-          if (!canCancel) return null;
-          return (
-            <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
-              <TouchableOpacity
-                style={s.cancelTripBtn}
-                activeOpacity={0.85}
-                onPress={handleCancelTrip}
-                disabled={cancelling}
-              >
-                {cancelling ? (
-                  <ActivityIndicator size="small" color="#FF5C7A" />
-                ) : (
-                  <>
-                    <Ionicons name="close-circle" size={20} color="#FF5C7A" />
-                    <Text style={s.cancelTripBtnText}>Cancelar viaje</Text>
-                  </>
+        {/* Buscando conductor: loader animado */}
+        {(booking.status === 'PENDING' || booking.status === 'NEW') ? (
+          <Animatable.View animation="fadeInUp" duration={450} useNativeDriver>
+            <SearchingDriverLoader
+              reference={booking.reference}
+              fareLabel="Valor estimado"
+              fareValue={formatBookingFareRange(booking)}
+              otp={booking.otp}
+            />
+          </Animatable.View>
+        ) : (
+          /* Status compacto + OTP + valor estimado */
+          <Animatable.View animation="fadeInUp" duration={400} key={booking.status} useNativeDriver>
+            <View style={[s.statusCardCompact, { borderColor: statusColor() }]}>
+              <View style={s.statusTopRow}>
+                <View style={[s.statusIconWrap, { backgroundColor: `${statusColor()}22`, borderColor: `${statusColor()}55` }]}>
+                  <Ionicons name={statusIcon()} size={18} color={statusColor()} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.statusTextCompact}>{statusText()}</Text>
+                  <Text style={s.referenceTextCompact}>Ref: {booking.reference}</Text>
+                </View>
+                {!!booking.otp && (
+                  <View style={s.otpInlinePill}>
+                    <MaterialCommunityIcons name="lock-check" size={14} color="#00E676" />
+                    <Text style={s.otpInlineCode}>{booking.otp}</Text>
+                  </View>
                 )}
-              </TouchableOpacity>
-            </Animatable.View>
-          );
-        })()}
+              </View>
+
+              <View style={s.fareRowCompact}>
+                <Text style={s.priceInStatusLabel}>
+                  {booking.status === 'COMPLETE' ? 'Valor final liquidado' : 'Valor estimado'}
+                </Text>
+                <Text style={s.priceInStatusAmountCompact}>
+                  {formatBookingFareRange(booking)}
+                </Text>
+              </View>
+
+              {!!booking.otp && !booking.otp_verified && booking.status !== 'COMPLETE' && booking.status !== 'PAID' && (
+                <Text style={s.otpInlineHint}>
+                  Presenta este código al conductor para verificar tu identidad e iniciar el viaje.
+                </Text>
+              )}
+              {!!booking.otp && booking.otp_verified && booking.status !== 'COMPLETE' && booking.status !== 'PAID' && (
+                <Text style={[s.otpInlineHint, { color: '#00E676' }]}>
+                  Código verificado. El viaje está iniciando.
+                </Text>
+              )}
+              {tripNotificationActive ? (
+                <Text style={s.notificationHintCompact}>
+                  Notificación activa en segundo plano. Toca para volver a esta pantalla.
+                </Text>
+              ) : null}
+            </View>
+          </Animatable.View>
+        )}
 
         {/* ⭐ Calificación del Conductor - Solo cuando el viaje está completado */}
         {booking.status === 'COMPLETE' && (
@@ -1069,12 +1225,17 @@ const CustomerActiveTripScreen = () => {
                   starSize={42}
                   color="#FFD54F"
                   emptyColor="rgba(255,255,255,0.25)"
-                  rating={driverRating}
-                  onChange={(r: number) => { if (!booking.driver_rating) setDriverRating(r); }}
+                  step="full"
+                  rating={myGivenRating >= 1 ? myGivenRating : driverRating}
+                  onChange={(r: number) => {
+                    if (myGivenRating >= 1) return;
+                    setDriverRating(Math.round(r));
+                    setRatingError(null);
+                  }}
                 />
               </View>
 
-              {!booking.driver_rating ? (
+              {myGivenRating < 1 ? (
                 <>
                   <TextInput
                     style={s.ratingInput}
@@ -1087,6 +1248,12 @@ const CustomerActiveTripScreen = () => {
                     maxLength={300}
                     editable={!submittingRating}
                   />
+
+                  {ratingError ? (
+                    <Text style={{ color: '#FF8A80', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
+                      {ratingError}
+                    </Text>
+                  ) : null}
 
                   <TouchableOpacity
                     style={[
@@ -1118,6 +1285,7 @@ const CustomerActiveTripScreen = () => {
                   <Ionicons name="checkmark-circle" size={20} color="#00E676" />
                   <Text style={s.ratingThanksText}>
                     ¡Gracias por tu calificación!
+                    {myGivenReview ? ` (${myGivenRating}/5)` : ` ${myGivenRating}/5`}
                   </Text>
                 </View>
               )}
@@ -1125,37 +1293,35 @@ const CustomerActiveTripScreen = () => {
           </Animatable.View>
         )}
 
-        {/* Route Info */}
-        <Animatable.View animation="fadeInUp" duration={450} delay={60} useNativeDriver>
-          <View style={s.card}>
-            <Text style={s.sectionTitle}>Detalles del Viaje</Text>
-            
-            <View style={s.routeBlock}>
-              <View style={s.routeItem}>
-                <View style={[s.dot, { backgroundColor: '#00E676' }]} />
-                <Text style={s.address} numberOfLines={2}>{booking.pickup_address}</Text>
+        {/* Route Info compacto */}
+        <Animatable.View animation="fadeInUp" duration={450} delay={40} useNativeDriver>
+          <View style={[s.card, s.cardCompact]}>
+            <Text style={s.sectionTitleCompact}>Detalles del Viaje</Text>
+
+            <View style={s.routeBlockCompact}>
+              <View style={s.routeItemCompact}>
+                <View style={[s.dot, s.dotStart]} />
+                <Text style={s.addressCompact} numberOfLines={1}>{booking.pickup_address}</Text>
               </View>
-              <View style={s.routeLine} />
-              <View style={s.routeItem}>
-                <View style={[s.dot, { backgroundColor: '#E91E63' }]} />
-                <Text style={s.address} numberOfLines={2}>{booking.drop_address}</Text>
+              <View style={s.routeLineCompact} />
+              <View style={s.routeItemCompact}>
+                <View style={[s.dot, s.dotEnd]} />
+                <Text style={s.addressCompact} numberOfLines={1}>{booking.drop_address}</Text>
               </View>
             </View>
 
-            <View style={s.divider} />
-
-            <View style={s.metaRow}>
-              <View style={s.metaItem}>
-                <Ionicons name="calendar-outline" size={16} color="#00E5FF" />
-                <Text style={s.metaText}>{formatDate(booking.booking_date)}</Text>
+            <View style={s.metaRowCompact}>
+              <View style={s.metaItemCompact}>
+                <Ionicons name="calendar-outline" size={13} color="#00E5FF" />
+                <Text style={s.metaTextCompact}>{formatDate(booking.booking_date)}</Text>
               </View>
-              <View style={s.metaItem}>
-                <Ionicons name="time-outline" size={16} color="#00E5FF" />
-                <Text style={s.metaText}>{formatTime(booking.booking_date)}</Text>
+              <View style={s.metaItemCompact}>
+                <Ionicons name="time-outline" size={13} color="#00E5FF" />
+                <Text style={s.metaTextCompact}>{formatTime(booking.booking_date)}</Text>
               </View>
-              <View style={s.metaItem}>
-                <Ionicons name="speedometer-outline" size={16} color="#00E5FF" />
-                <Text style={s.metaText}>{booking.distance?.toFixed(1)} km</Text>
+              <View style={s.metaItemCompact}>
+                <Ionicons name="speedometer-outline" size={13} color="#00E5FF" />
+                <Text style={s.metaTextCompact}>{booking.distance?.toFixed(1)} km</Text>
               </View>
             </View>
           </View>
@@ -1164,236 +1330,206 @@ const CustomerActiveTripScreen = () => {
         {/* Estado de Espera - Conductor ha llegado */}
         {isWaitingForCode && (
           <Animatable.View animation="fadeIn" duration={300} useNativeDriver>
-            <View style={[s.card, s.waitingCard]}>
-              <View style={s.waitingContent}>
-                <MaterialCommunityIcons name="clock-alert" size={32} color="#FFB300" />
-                <Text style={s.waitingTitle}>⏳ Conductor Esperando</Text>
-                <Text style={s.waitingSubtext}>Tu conductor ha llegado al punto de recogida</Text>
-                <Text style={s.waitingMessage}>Comparte tu código OTP con el conductor</Text>
+            <View style={[s.card, s.cardCompact, s.waitingCard]}>
+              <View style={s.waitingContentCompact}>
+                <MaterialCommunityIcons name="clock-alert" size={22} color="#FFB300" />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.waitingTitleCompact}>Conductor Esperando</Text>
+                  <Text style={s.waitingSubtextCompact}>Tu conductor ha llegado al punto de recogida. Comparte tu código OTP con el conductor</Text>
+                </View>
               </View>
             </View>
           </Animatable.View>
         )}
 
         {/* Contador de OTP - Mostrar cuando hay timer activo y tiempo restante */}
-        {countdown !== null && countdown > 0 && booking.otp_timer_started_at && (
+        {countdown !== null && countdown > 0 && tripStatus === 'ARRIVED' && !booking.otp_verified && (
           <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
-            <View style={s.countdownCard}>
-              <View style={s.countdownContent}>
-                <Ionicons name="timer-outline" size={40} color="#00E5FF" />
-                <Text style={s.countdownTime}>
+            <View style={[s.countdownCard, s.countdownCardCompact]}>
+              <View style={s.countdownContentCompact}>
+                <Ionicons name="timer-outline" size={22} color="#00E5FF" />
+                <Text style={s.countdownTimeCompact}>
                   {Math.floor(countdown / 60)}:{(countdown % 60).toString().padStart(2, '0')}
                 </Text>
-                <Text style={s.countdownLabel}>Código en...</Text>
+                <Text style={s.countdownLabelCompact}>Código en...</Text>
               </View>
             </View>
           </Animatable.View>
         )}
 
-        {/* Código OTP - Mostrar SIEMPRE que exista el código */}
-        {booking.otp && (
-          <Animatable.View animation="fadeInUp" duration={400} useNativeDriver>
-            <View style={[s.card, s.otpCodeCard]}>
-              <View style={s.otpCodeContent}>
-                <MaterialCommunityIcons name="lock-check" size={36} color="#00E676" />
-                <Text style={s.otpCodeTitle}>Tu Código de Seguridad</Text>
-                <Text style={s.otpCodeSubtext}>Comparte este código con tu conductor</Text>
-                <View style={s.otpCodeDisplay}>
-                  <Text style={s.otpCodeValue}>{booking.otp}</Text>
-                </View>
-                {booking.otp_verified
-                  ? <Text style={[s.otpCodeNote, { color: '#00E676' }]}>✅ Código verificado - Viaje iniciando</Text>
-                  : <Text style={s.otpCodeNote}>Tu conductor te pedirá este código</Text>
-                }
-              </View>
-            </View>
-          </Animatable.View>
-        )}
+        {/* Driver Info — visible mientras el viaje está activo */}
+        {showDriverPanel && (
+          <Animatable.View animation="fadeInUp" duration={450} delay={80} useNativeDriver>
+            <View style={[s.card, s.cardCompact]}>
+              <Text style={s.sectionTitleCompact}>Tu Conductor</Text>
 
-        {/* Driver Info - Mostrar cuando ACCEPTED */}
-        {booking.status === 'ACCEPTED' && booking.driver_name && (
-          <Animatable.View animation="fadeInUp" duration={450} delay={120} useNativeDriver>
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>👤 Tu Conductor</Text>
-              
-              {/* Conductor Info */}
               <View style={s.driverCard}>
+                <ProfilePhotoPreview
+                  uri={driverPhotoUri}
+                  size={40}
+                  accessibilityLabel="Ver foto del conductor"
+                />
                 <View style={s.driverInfo}>
-                  <Text style={s.driverName}>{booking.driver_name}</Text>
-                  <Text style={s.driverPlate}>📞 {cleanNumberDisplay(driverInfo?.mobile || booking.driver_contact || 'Contacto no disponible')}</Text>
+                  <Text style={s.driverName} numberOfLines={1}>{booking.driver_name}</Text>
+                  <Text style={s.driverPlate} numberOfLines={1}>
+                    {cleanNumberDisplay(driverInfo?.mobile || booking.driver_contact || 'Contacto no disponible')}
+                  </Text>
                 </View>
-                <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={s.actionBtnsRow}>
+                  <TouchableOpacity style={s.callBtn} onPress={openCustomerChat} activeOpacity={0.75}>
+                    <Ionicons name="chatbubble-ellipses" size={18} color="#00E5FF" />
+                    {unreadChatCount > 0 && (
+                      <View style={s.chatBadge}>
+                        <Text style={s.chatBadgeText}>
+                          {unreadChatCount > 99 ? '99+' : String(unreadChatCount)}
+                        </Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
                   <TouchableOpacity
                     style={s.callBtn}
                     onPress={() =>
-                      nav.navigate('Chat', {
-                        bookingId: booking.id,
-                        myRole: 'customer',
-                        myName: booking.customer_name || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Cliente',
-                        senderId: booking.customer || user?.id,
-                        otherName: booking.driver_name || 'Conductor',
-                      })
+                      driverInfo?.mobile &&
+                      Linking.openURL(`tel:${cleanNumberDisplay(driverInfo.mobile)}`)
                     }
+                    activeOpacity={0.75}
                   >
-                    <Ionicons name="chatbubble-ellipses" size={20} color="#00E5FF" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={s.callBtn}
-                    onPress={() => driverInfo?.mobile && Linking.openURL(`tel:${cleanNumberDisplay(driverInfo.mobile)}`)}
-                  >
-                    <Ionicons name="call" size={20} color="#00E5FF" />
+                    <Ionicons name="call" size={18} color="#00E5FF" />
                   </TouchableOpacity>
                 </View>
               </View>
 
-              {/* 🆕 Vehicle Info Card */}
               {(driverInfo?.vehicle_number || driverInfo?.vehicle_make || driverInfo?.vehicle_color || booking?.car_type) && (
-                <View style={{ backgroundColor: 'rgba(0,244,245,0.08)', borderRadius: 8, padding: 12, marginTop: 12, borderLeftWidth: 3, borderLeftColor: '#00E5FF' }}>
-                  <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 10 }}>🚗 Información del Vehículo</Text>
-
-                  {/* Placa */}
-                  {driverInfo?.vehicle_number && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, minWidth: 80 }}>Placa:</Text>
-                      <Text style={{ color: '#00F4F5', fontSize: 14, fontWeight: '700', letterSpacing: 1 }}>
-                        {driverInfo.vehicle_number}
-                      </Text>
-                    </View>
-                  )}
-
-                  {/* Marca */}
-                  {driverInfo?.vehicle_make && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, minWidth: 80 }}>Marca:</Text>
-                      <Text style={{ color: '#FFF', fontSize: 13 }}>
-                        {driverInfo.vehicle_make}{driverInfo.vehicle_model ? ` ${driverInfo.vehicle_model}` : ''}
-                      </Text>
-                    </View>
-                  )}
-
-                  {/* Color */}
-                  {driverInfo?.vehicle_color && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, minWidth: 80 }}>Color:</Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                        <View
-                          style={{
-                            width: 16,
-                            height: 16,
-                            borderRadius: 8,
-                            backgroundColor: getColorCode(driverInfo.vehicle_color),
-                            borderWidth: 1,
-                            borderColor: 'rgba(255,255,255,0.3)',
-                          }}
-                        />
-                        <Text style={{ color: '#FFF', fontSize: 13 }}>
-                          {driverInfo.vehicle_color}
+                <View style={s.vehicleBoxCompact}>
+                  <Text style={s.vehicleBoxTitle}>Información del Vehículo</Text>
+                  <View style={s.vehicleGrid}>
+                    {driverInfo?.vehicle_number ? (
+                      <View style={s.vehicleCell}>
+                        <Text style={s.vehicleLabel}>Placa</Text>
+                        <Text style={s.vehicleValuePlate}>{driverInfo.vehicle_number}</Text>
+                      </View>
+                    ) : null}
+                    {driverInfo?.vehicle_make ? (
+                      <View style={s.vehicleCell}>
+                        <Text style={s.vehicleLabel}>Marca</Text>
+                        <Text style={s.vehicleValue} numberOfLines={1}>
+                          {driverInfo.vehicle_make}{driverInfo.vehicle_model ? ` ${driverInfo.vehicle_model}` : ''}
                         </Text>
                       </View>
-                    </View>
-                  )}
-
-                  {/* Categoría (servicio) */}
-                  {booking?.car_type && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, minWidth: 80 }}>Categoría:</Text>
-                      <View style={{ backgroundColor: 'rgba(0,229,255,0.18)', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(0,229,255,0.45)' }}>
-                        <Text style={{ color: '#00F4F5', fontSize: 12, fontWeight: '700', textTransform: 'capitalize' }}>
-                          {String(booking.car_type)}
-                        </Text>
+                    ) : null}
+                    {driverInfo?.vehicle_color ? (
+                      <View style={s.vehicleCell}>
+                        <Text style={s.vehicleLabel}>Color</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <View
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: 6,
+                              backgroundColor: getColorCode(driverInfo.vehicle_color),
+                              borderWidth: 1,
+                              borderColor: 'rgba(255,255,255,0.3)',
+                            }}
+                          />
+                          <Text style={s.vehicleValue} numberOfLines={1}>{driverInfo.vehicle_color}</Text>
+                        </View>
                       </View>
-                    </View>
-                  )}
+                    ) : null}
+                    {booking?.car_type ? (
+                      <View style={s.vehicleCell}>
+                        <Text style={s.vehicleLabel}>Categoría</Text>
+                        <View style={s.categoryPill}>
+                          <Text style={s.categoryPillText}>{String(booking.car_type)}</Text>
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
                 </View>
               )}
 
-              {/* Botones de Navegación - Hacia el Destino */}
               {booking.status !== 'COMPLETE' && (
                 <View style={s.navigationBtns}>
                   <TouchableOpacity
-                    style={[s.navBtn, { flex: 1 }]}
+                    style={s.navBtn}
                     onPress={openGoogleMapsDropoff}
                     disabled={!booking?.drop_lat || !booking?.drop_lng}
                   >
-                    <Ionicons name="location" size={16} color="#FFF" />
+                    <Ionicons name="location" size={14} color="#00E5FF" />
                     <Text style={s.navBtnText}>Destino Maps</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[s.navBtn, { flex: 1 }]}
+                    style={s.navBtn}
                     onPress={openWazeDropoff}
                     disabled={!booking?.drop_lat || !booking?.drop_lng}
                   >
-                    <Ionicons name="pin" size={16} color="#FFF" />
+                    <Ionicons name="pin" size={14} color="#00E5FF" />
                     <Text style={s.navBtnText}>Destino Waze</Text>
                   </TouchableOpacity>
                 </View>
               )}
 
-              {/* 🆕 Información de Contacto y Pago */}
-              <View style={{ marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(0,244,245,0.2)' }}>
-                {/* Teléfono del Conductor */}
-                {driverInfo?.mobile && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-                    <Ionicons name="call-outline" size={16} color="#00E5FF" style={{ marginRight: 10 }} />
-                    <Text style={{ color: '#FFF', fontSize: 13, flex: 1 }}>☎️ {cleanNumberDisplay(driverInfo.mobile)}</Text>
-                    <TouchableOpacity 
-                      onPress={() => Linking.openURL(`tel:${cleanNumberDisplay(driverInfo.mobile)}`)}
-                      style={{ paddingHorizontal: 8 }}
-                    >
-                      <Ionicons name="call" size={18} color="#00E676" />
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                {/* Método de Pago */}
+              <View style={s.payContactBlock}>
                 {booking.payment_mode && (
-                  <View style={{ marginBottom: 12 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                      <Ionicons 
-                        name={booking.payment_mode === 'cash' ? 'cash-outline' : booking.payment_mode === 'nequi' ? 'phone-portrait-outline' : 'wallet-outline'} 
-                        size={16} 
-                        color="#00E5FF" 
-                        style={{ marginRight: 10 }} 
-                      />
-                      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>Método de Pago</Text>
+                  <View style={s.payModeRow}>
+                    <Ionicons
+                      name={
+                        booking.payment_mode === 'cash'
+                          ? 'cash-outline'
+                          : booking.payment_mode === 'nequi'
+                            ? 'phone-portrait-outline'
+                            : 'wallet-outline'
+                      }
+                      size={15}
+                      color="#00E5FF"
+                    />
+                    <View>
+                      <Text style={s.payModeLabel}>Método de Pago</Text>
+                      <Text style={s.payModeValue}>
+                        {booking.payment_mode === 'cash'
+                          ? 'Efectivo'
+                          : booking.payment_mode === 'nequi'
+                            ? 'Nequi'
+                            : 'Daviplata'}
+                      </Text>
                     </View>
-                    <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600', marginLeft: 26 }}>
-                      {booking.payment_mode === 'cash' ? '💵 Efectivo' : booking.payment_mode === 'nequi' ? '📱 Nequi' : '💳 Daviplata'}
-                    </Text>
                   </View>
                 )}
 
-                {/* Número para Transferencia (Nequi/Daviplata) */}
-                {(booking.payment_mode === 'nequi' || booking.payment_mode === 'daviplata') && (driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount) && (
-                  <View style={{ backgroundColor: 'rgba(0,244,245,0.08)', borderRadius: 8, padding: 12, borderLeftWidth: 3, borderLeftColor: '#00E5FF' }}>
-                    <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, marginBottom: 8 }}>
-                      💰 Transferir a:
-                    </Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <Text style={{ color: '#00F4F5', fontSize: 16, fontWeight: '700', letterSpacing: 2 }}>
-                        {cleanNumberDisplay(driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount || 'N/A')}
-                      </Text>
-                      <TouchableOpacity 
-                        onPress={() => {
-                          const number = driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount;
-                          if (number) {
-                            handleCopyNumber(number);
-                          }
-                        }}
-                        style={{ paddingHorizontal: 8 }}
-                      >
-                        <Ionicons name="copy-outline" size={18} color="#00E5FF" />
-                      </TouchableOpacity>
+                {(booking.payment_mode === 'nequi' || booking.payment_mode === 'daviplata') &&
+                  (driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount) && (
+                    <View style={s.transferBox}>
+                      <Text style={s.transferLabel}>Transferir a:</Text>
+                      <View style={s.transferRow}>
+                        <Text style={s.transferNumber}>
+                          {cleanNumberDisplay(
+                            driverInfo?.mobile ||
+                              booking.driver_payment_number ||
+                              driverInfo?.bankAccount ||
+                              'N/A'
+                          )}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => {
+                            const number =
+                              driverInfo?.mobile ||
+                              booking.driver_payment_number ||
+                              driverInfo?.bankAccount;
+                            if (number) handleCopyNumber(number);
+                          }}
+                          style={{ paddingHorizontal: 6 }}
+                        >
+                          <Ionicons name="copy-outline" size={16} color="#00E5FF" />
+                        </TouchableOpacity>
+                      </View>
                     </View>
-                  </View>
-                )}
+                  )}
               </View>
             </View>
           </Animatable.View>
         )}
 
-        {/* OTP Countdown - Mostrar cuando timer está activo */}
-        {booking.otp_timer_started_at && (
+        {/* OTP Countdown - solo mientras espera el código */}
+        {tripStatus === 'ARRIVED' && !booking.otp_verified && (
           <Animatable.View animation="fadeInUp" duration={450} delay={180} useNativeDriver>
             <OtpCountdownNotification 
               bookingId={bookingId}
@@ -1403,84 +1539,39 @@ const CustomerActiveTripScreen = () => {
           </Animatable.View>
         )}
 
-        {/* Verification Status */}
-        {booking.otp_verified && (
-          <Animatable.View animation="fadeInUp" duration={450} useNativeDriver>
-            <View style={[s.card, s.verifiedCard]}>
-              <Ionicons name="checkmark-circle" size={32} color="#00E676" />
-              <Text style={s.verifiedText}>✅ Viaje Verificado</Text>
-              <Text style={s.verifiedSub}>Tu viaje será iniciado próximamente</Text>
-            </View>
-          </Animatable.View>
-        )}
-
-        {/* 🆕 Información de Viaje - Durante TRIP_STARTED */}
-        {(booking.status === 'IN_PROGRESS' || booking.status === 'STARTED' || booking.status === 'TRIP_STARTED') ? (
-          <Animatable.View animation="fadeInUp" duration={450} useNativeDriver>
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>📋 Información de tu Viaje</Text>
-
-              {/* Teléfono del Conductor */}
-              {driverInfo?.mobile && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
-                  <Ionicons name="call-outline" size={16} color="#00E5FF" style={{ marginRight: 10 }} />
-                  <Text style={{ color: 'rgba(255,255,255,0.8)', fontSize: 13, flex: 1 }}>☎️ Conductor: {cleanNumberDisplay(driverInfo.mobile)}</Text>
-                  <TouchableOpacity 
-                    onPress={() => Linking.openURL(`tel:${cleanNumberDisplay(driverInfo.mobile)}`)}
-                    style={{ paddingHorizontal: 8 }}
-                  >
-                    <Ionicons name="call" size={18} color="#00E676" />
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* Divider */}
-              <View style={{ height: 1, backgroundColor: 'rgba(0,244,245,0.2)', marginBottom: 14 }} />
-
-              {/* Método de Pago */}
-              {booking.payment_mode && (
-                <View style={{ marginBottom: 14 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Ionicons 
-                      name={booking.payment_mode === 'cash' ? 'cash-outline' : booking.payment_mode === 'nequi' ? 'phone-portrait-outline' : 'wallet-outline'} 
-                      size={16} 
-                      color="#00E5FF" 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }}>
-                      {booking.payment_mode === 'cash' ? '💵 Pago en Efectivo' : booking.payment_mode === 'nequi' ? '📱 Pago por Nequi' : '💳 Pago por Daviplata'}
-                    </Text>
-                  </View>
-                </View>
-              )}
-
-              {/* Número para Transferencia (Nequi/Daviplata) */}
-              {(booking.payment_mode === 'nequi' || booking.payment_mode === 'daviplata') && (driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount) && (
-                <View style={{ backgroundColor: 'rgba(0,244,245,0.08)', borderRadius: 8, padding: 12, borderLeftWidth: 3, borderLeftColor: '#00E5FF' }}>
-                  <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 8 }}>
-                    💰 Transferir a este número:
-                  </Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Text style={{ color: '#00F4F5', fontSize: 16, fontWeight: '700', letterSpacing: 2 }}>
-                      {driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount}
-                    </Text>
-                    <TouchableOpacity 
-                      onPress={() => {
-                        const number = driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount;
-                        if (number) {
-                          handleCopyNumber(number);
-                        }
-                      }}
-                      style={{ paddingHorizontal: 8 }}
-                    >
-                      <Ionicons name="copy-outline" size={18} color="#00E5FF" />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              )}
-            </View>
-          </Animatable.View>
-        ) : null}
+        {/* Cancelar viaje — al final del scroll, solo antes de llegada del conductor */}
+        {(() => {
+          const st = booking.status;
+          const arrived = st === 'ARRIVED';
+          const canCancel = st !== 'COMPLETE'
+            && st !== 'CANCELLED'
+            && st !== 'ACCEPTED'
+            && st !== 'STARTED'
+            && st !== 'IN_PROGRESS'
+            && st !== 'TRIP_STARTED'
+            && !booking.otp_verified
+            && !arrived;
+          if (!canCancel) return null;
+          return (
+            <Animatable.View animation="fadeInUp" duration={400} useNativeDriver style={{ marginTop: 8, marginBottom: 24 }}>
+              <TouchableOpacity
+                style={s.cancelTripBtn}
+                activeOpacity={0.85}
+                onPress={handleCancelTrip}
+                disabled={cancelling}
+              >
+                {cancelling ? (
+                  <ActivityIndicator size="small" color="#FF5C7A" />
+                ) : (
+                  <>
+                    <Ionicons name="close-circle" size={20} color="#FF5C7A" />
+                    <Text style={s.cancelTripBtnText}>Cancelar viaje</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </Animatable.View>
+          );
+        })()}
       </ScrollView>
 
       {/* Modal: mapa fullscreen con 3D */}
@@ -1515,6 +1606,41 @@ const CustomerActiveTripScreen = () => {
                 </View>
               </Mapbox.PointAnnotation>
 
+              <Mapbox.ShapeSource
+                id="fs-active-halo"
+                shape={{
+                  type: 'Feature',
+                  properties: {},
+                  geometry: {
+                    type: 'Point',
+                    coordinates: isTripToDrop && booking?.drop_lng != null && booking?.drop_lat != null
+                      ? [Number(booking.drop_lng), Number(booking.drop_lat)]
+                      : [Number(booking.pickup_lng), Number(booking.pickup_lat)],
+                  },
+                }}
+              >
+                <Mapbox.CircleLayer
+                  id="fs-active-halo-outer"
+                  style={{
+                    circleRadius: 22,
+                    circleColor: isTripToDrop ? 'rgba(233,30,99,0.18)' : 'rgba(0,229,255,0.18)',
+                    circleStrokeWidth: 2.5,
+                    circleStrokeColor: isTripToDrop ? '#E91E63' : '#00E5FF',
+                    circlePitchAlignment: 'map',
+                  }}
+                />
+                <Mapbox.CircleLayer
+                  id="fs-active-halo-core"
+                  style={{
+                    circleRadius: 7,
+                    circleColor: isTripToDrop ? '#E91E63' : '#00E5FF',
+                    circleStrokeWidth: 2,
+                    circleStrokeColor: '#FFFFFF',
+                    circlePitchAlignment: 'map',
+                  }}
+                />
+              </Mapbox.ShapeSource>
+
               {booking?.drop_lat != null && booking?.drop_lng != null && (
                 <Mapbox.PointAnnotation
                   id="fs-drop"
@@ -1527,7 +1653,7 @@ const CustomerActiveTripScreen = () => {
                 </Mapbox.PointAnnotation>
               )}
 
-              {routeToPickup && (booking?.status === 'ACCEPTED' || booking?.status === 'STARTED') && (
+              {routeToPickup && (booking?.status === 'ACCEPTED' || isTripToDrop) && (
                 <Mapbox.ShapeSource id="fs-route-source" shape={routeToPickup}>
                   <Mapbox.LineLayer
                     id="fs-route-line"
@@ -1536,12 +1662,12 @@ const CustomerActiveTripScreen = () => {
                 </Mapbox.ShapeSource>
               )}
 
-              {animatedCoords && (
-                <Mapbox.PointAnnotation
+              {!!carMarkerCoords && (
+                <Mapbox.MarkerView
                   id="fs-driver"
-                  coordinate={[animatedCoords.longitude, animatedCoords.latitude]}
-                  anchor={{ x: 0.5, y: 0.5 }}
+                  coordinate={[carMarkerCoords.longitude, carMarkerCoords.latitude]}
                   allowOverlap
+                  anchor={{ x: 0.5, y: 0.5 }}
                 >
                   <View
                     style={{
@@ -1554,7 +1680,7 @@ const CustomerActiveTripScreen = () => {
                   >
                     <Image source={driverCarIcon} style={{ width: 40, height: 40, resizeMode: 'contain' }} />
                   </View>
-                </Mapbox.PointAnnotation>
+                </Mapbox.MarkerView>
               )}
             </Mapbox.MapView>
 
@@ -1657,7 +1783,7 @@ const CustomerActiveTripScreen = () => {
 
             <Text style={s.tripSummaryTotalLabel}>Valor final del servicio</Text>
             <Text style={s.tripSummaryTotalAmount}>
-              $ {(booking?.price || booking?.estimate || 0).toLocaleString('es-CO')}
+              {formatBookingFareRange(booking)}
             </Text>
 
             <View style={s.tripSummaryRow}>
@@ -1671,7 +1797,7 @@ const CustomerActiveTripScreen = () => {
               <View style={s.tripSummaryDivider} />
               <View style={s.tripSummaryItem}>
                 <Ionicons name="time" size={20} color="#0079FF" />
-                <Text style={s.tripSummaryValue}>{formatTripDuration(booking?.total_trip_time)}</Text>
+                <Text style={s.tripSummaryValue}>{formatTripDuration(resolveBookingTripSeconds(booking))}</Text>
                 <Text style={s.tripSummaryItemLabel}>Tiempo</Text>
               </View>
             </View>
@@ -1852,6 +1978,21 @@ const CustomerActiveTripScreen = () => {
           </Animated.View>
         </View>
       </Modal>
+
+      <FloatingChatModal
+        visible={chatVisible}
+        onClose={() => setChatVisible(false)}
+        bookingId={booking.id}
+        myRole="customer"
+        myName={
+          booking.customer_name ||
+          [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+          'Cliente'
+        }
+        senderId={booking.customer || booking.customer_id || user?.id}
+        otherName={booking.driver_name || 'Conductor'}
+        otherPhoto={driverPhotoUri}
+      />
     </View>
   );
 };
@@ -1939,130 +2080,174 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(0,229,255,0.2)',
   },
+  statusCardCompact: {
+    borderRadius: 14,
+    marginBottom: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(10,46,61,0.72)',
+    borderWidth: 1.5,
+  },
+  statusTopRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  statusIconWrap: {
+    width: 34, height: 34, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1,
+  },
   statusText: { fontSize: 18, fontWeight: '700', color: '#FFF', marginTop: 12 },
+  statusTextCompact: { fontSize: 14, fontWeight: '700', color: '#FFF' },
   referenceText: { fontSize: 12, color: '#00E5FF', marginTop: 6 },
+  referenceTextCompact: { fontSize: 11, color: '#00E5FF', marginTop: 2, fontWeight: '600' },
+  otpInlinePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(0,230,118,0.12)', borderWidth: 1,
+    borderColor: 'rgba(0,230,118,0.45)', borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+  },
+  otpInlineCode: { color: '#00E676', fontSize: 16, fontWeight: '800', letterSpacing: 1.5 },
+  otpInlineHint: { marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.55)', lineHeight: 15 },
+  fareRowCompact: {
+    marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(0,229,255,0.15)',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+  },
+  notificationHintCompact: { marginTop: 8, fontSize: 10, color: 'rgba(255,255,255,0.45)' },
   priceInStatus: {
-    alignItems: 'center',
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,229,255,0.2)',
-    width: '100%',
+    alignItems: 'center', marginTop: 16, paddingTop: 16,
+    borderTopWidth: 1, borderTopColor: 'rgba(0,229,255,0.2)', width: '100%',
   },
   priceInStatusLabel: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.7)',
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontSize: 11, color: 'rgba(255,255,255,0.65)', fontWeight: '600',
+    textTransform: 'uppercase', letterSpacing: 0.4,
   },
   priceInStatusAmount: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#00E5FF',
-    marginTop: 4,
-    letterSpacing: 0.5,
-    textAlign: 'center',
+    fontSize: 22, fontWeight: '800', color: '#00E5FF', marginTop: 4,
+    letterSpacing: 0.5, textAlign: 'center',
+  },
+  priceInStatusAmountCompact: {
+    fontSize: 15, fontWeight: '800', color: '#00E5FF', letterSpacing: 0.2,
+    flexShrink: 1, textAlign: 'right',
   },
   card: {
-    padding: 16,
-    borderRadius: 18,
-    marginBottom: 14,
-    backgroundColor: 'rgba(10,46,61,0.5)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.12)',
+    padding: 16, borderRadius: 18, marginBottom: 14,
+    backgroundColor: 'rgba(10,46,61,0.5)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)',
   },
+  cardCompact: { padding: 12, borderRadius: 14, marginBottom: 10 },
   sectionTitle: { fontSize: 13, fontWeight: '700', color: '#00E5FF', textTransform: 'uppercase', marginBottom: 12 },
+  sectionTitleCompact: {
+    fontSize: 11, fontWeight: '700', color: '#00E5FF', textTransform: 'uppercase',
+    marginBottom: 8, letterSpacing: 0.4,
+  },
   routeBlock: { marginBottom: 10 },
+  routeBlockCompact: { marginBottom: 8 },
   routeItem: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
+  routeItemCompact: { flexDirection: 'row', alignItems: 'center', marginVertical: 3 },
   dot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
+  dotStart: { backgroundColor: '#FFFFFF', borderWidth: 2, borderColor: '#00E5FF' },
+  dotEnd: { backgroundColor: '#E91E63', borderWidth: 2, borderColor: '#00E5FF' },
   address: { fontSize: 14, color: '#FFF', flex: 1 },
+  addressCompact: { fontSize: 12, color: '#FFF', flex: 1 },
   routeLine: { height: 20, width: 2, backgroundColor: 'rgba(0,229,255,0.3)', marginLeft: 4, marginVertical: 2 },
+  routeLineCompact: { height: 10, width: 2, backgroundColor: 'rgba(0,229,255,0.3)', marginLeft: 4, marginVertical: 1 },
   divider: { height: 1, backgroundColor: 'rgba(0,229,255,0.1)', marginVertical: 10 },
   metaRow: { flexDirection: 'row', justifyContent: 'space-around' },
+  metaRowCompact: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
   metaItem: { alignItems: 'center', gap: 6 },
+  metaItemCompact: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   metaText: { fontSize: 12, color: '#00E5FF' },
+  metaTextCompact: { fontSize: 11, color: '#00E5FF', fontWeight: '600' },
   driverCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,229,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.2)',
+    flexDirection: 'row', alignItems: 'center', padding: 10, borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.08)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)', gap: 10,
+  },
+  driverAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(0,229,255,0.12)' },
+  driverAvatarFallback: {
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.12)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
   },
   driverInfo: { flex: 1 },
-  driverName: { fontSize: 16, fontWeight: '700', color: '#FFF' },
-  driverPlate: { fontSize: 13, color: '#00E5FF', marginTop: 2 },
+  driverName: { fontSize: 15, fontWeight: '700', color: '#FFF' },
+  driverPlate: { fontSize: 12, color: '#00E5FF', marginTop: 2 },
   driverContact: { fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 2 },
+  actionBtnsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   callBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,229,255,0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.3)',
+    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.15)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
+    position: 'relative',
   },
+  chatBadge: {
+    position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8,
+    paddingHorizontal: 3, backgroundColor: '#E53935', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: '#051A26',
+  },
+  chatBadgeText: { color: '#FFF', fontSize: 9, fontWeight: '800', lineHeight: 11 },
+  vehicleBoxCompact: {
+    backgroundColor: 'rgba(0,244,245,0.08)', borderRadius: 8, padding: 10, marginTop: 10,
+    borderLeftWidth: 3, borderLeftColor: '#00E5FF',
+  },
+  vehicleBoxTitle: { color: 'rgba(255,255,255,0.7)', fontSize: 11, marginBottom: 8, fontWeight: '600' },
+  vehicleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  vehicleCell: { width: '47%', minWidth: 120 },
+  vehicleLabel: { color: 'rgba(255,255,255,0.5)', fontSize: 10, marginBottom: 2 },
+  vehicleValue: { color: '#FFF', fontSize: 12, fontWeight: '600' },
+  vehicleValuePlate: { color: '#00F4F5', fontSize: 13, fontWeight: '800', letterSpacing: 1 },
+  categoryPill: {
+    alignSelf: 'flex-start', backgroundColor: 'rgba(0,229,255,0.18)',
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.45)',
+  },
+  categoryPillText: { color: '#00F4F5', fontSize: 11, fontWeight: '700', textTransform: 'capitalize' },
+  payContactBlock: {
+    marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(0,244,245,0.15)', gap: 10,
+  },
+  payContactRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  payContactPhone: { color: '#FFF', fontSize: 13, flex: 1 },
+  payModeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  payModeLabel: { color: 'rgba(255,255,255,0.65)', fontSize: 11 },
+  payModeValue: { color: '#FFF', fontSize: 13, fontWeight: '600' },
+  transferBox: {
+    backgroundColor: 'rgba(0,244,245,0.08)', borderRadius: 8, padding: 10,
+    borderLeftWidth: 3, borderLeftColor: '#00E5FF',
+  },
+  transferLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 6 },
+  transferRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  transferNumber: { color: '#00F4F5', fontSize: 15, fontWeight: '700', letterSpacing: 1.5 },
   navigationBtns: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,229,255,0.1)',
+    flexDirection: 'row', gap: 10, marginTop: 12, paddingTop: 12,
+    borderTopWidth: 1, borderTopColor: 'rgba(0,229,255,0.1)',
   },
   navBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: 'rgba(0,229,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.25)',
-    gap: 6,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 10, borderRadius: 10, backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.25)', gap: 6,
   },
-  navBtnText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#FFF',
-    letterSpacing: 0.3,
-  },
+  navBtnText: { fontSize: 12, fontWeight: '600', color: '#FFF', letterSpacing: 0.3 },
   verifiedCard: { alignItems: 'center', paddingVertical: 20 },
   verifiedText: { fontSize: 16, fontWeight: '700', color: '#00E676', marginTop: 12 },
   verifiedSub: { fontSize: 13, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
   waitingCard: {
     backgroundColor: 'rgba(255, 179, 0, 0.08)',
     borderColor: 'rgba(255, 179, 0, 0.3)',
-    borderWidth: 2,
+    borderWidth: 1.5,
   },
-  waitingContent: {
-    alignItems: 'center',
-    paddingVertical: 8,
-  },
+  waitingContent: { alignItems: 'center', paddingVertical: 8 },
+  waitingContentCompact: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   waitingTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#FFB300',
-    marginTop: 12,
-    marginBottom: 6,
+    fontSize: 18, fontWeight: '700', color: '#FFB300', marginTop: 12, marginBottom: 6,
   },
+  waitingTitleCompact: { fontSize: 13, fontWeight: '700', color: '#FFB300', marginBottom: 2 },
   waitingSubtext: {
-    fontSize: 13,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-    marginBottom: 8,
+    fontSize: 13, color: 'rgba(255, 255, 255, 0.7)', textAlign: 'center', marginBottom: 8,
   },
+  waitingSubtextCompact: { fontSize: 11, color: 'rgba(255,255,255,0.65)', lineHeight: 15 },
   waitingMessage: {
-    fontSize: 12,
-    color: 'rgba(255, 179, 0, 0.8)',
-    textAlign: 'center',
-    fontWeight: '600',
-    letterSpacing: 0.3,
+    fontSize: 12, color: 'rgba(255, 179, 0, 0.8)', textAlign: 'center',
+    fontWeight: '600', letterSpacing: 0.3,
   },
+  countdownCardCompact: { paddingVertical: 10 },
+  countdownContentCompact: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+  },
+  countdownTimeCompact: { fontSize: 22, fontWeight: '800', color: '#00E5FF' },
+  countdownLabelCompact: { fontSize: 12, color: 'rgba(255,255,255,0.6)', fontWeight: '600' },
   ratingCard: {
     alignItems: 'center',
     paddingVertical: 18,

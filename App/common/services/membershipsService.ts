@@ -4,7 +4,7 @@
  */
 
 import Constants from 'expo-constants';
-import { supabase, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
+import { supabase, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 
 const extra = Constants.expoConfig?.extra || {};
 const SUPABASE_URL = extra.SUPABASE_URL as string;
@@ -35,13 +35,17 @@ export const getMembershipsViaREST = async (conductorId: string): Promise<Member
       return [];
     }
 
+    const authHeaders = await getSupabaseAuthHeaders(true);
+    if (!hasUserAuthHeader(authHeaders)) {
+      console.warn('⚠️ [REST] sin JWT de usuario — se omite fetch de memberships');
+      return [];
+    }
+
     // 🔗 URL de REST: /rest/v1/memberships?conductor=eq.{id}&order=created_at.desc
     const url = `${SUPABASE_URL}/rest/v1/memberships?conductor=eq.${conductorId}&order=created_at.desc`;
 
     console.log('📡 GET:', url.substring(0, 100) + '...');
 
-    // Usa el JWT del usuario autenticado para que RLS (conductor = auth.uid()) permita ver sus filas.
-    const authHeaders = await getSupabaseAuthHeaders(true);
     const response = await fetch(url, {
       method: 'GET',
       headers: {
@@ -108,6 +112,12 @@ export const getMembershipsViaSDK = async (conductorId: string): Promise<Members
  */
 export const getMemberships = async (conductorId: string): Promise<MembershipData[]> => {
   console.log('🔄 Obteniendo memberships para:', conductorId);
+
+  const authHeaders = await getSupabaseAuthHeaders(true);
+  if (!hasUserAuthHeader(authHeaders)) {
+    console.warn('⚠️ getMemberships: sin JWT — se omite (evita spam SDK/anon)');
+    return [];
+  }
 
   // Intentar REST primero (más confiable sin RLS)
   let data = await getMembershipsViaREST(conductorId);

@@ -33,7 +33,23 @@ const authSlice = createSlice({
     login: (state, action: PayloadAction<SupabaseUser | null>) => {
       if (action.payload) {
         state.isAuthenticated = true;
-        state.user = action.payload;
+        // Si ya tenemos el user mergeado con persona.id (setProfile), no lo
+        // pises con el User crudo de Auth (mismo auth uid).
+        const incoming = action.payload as any;
+        const current = state.user as any;
+        const incomingAuthId = String(incoming.id || '');
+        const currentAuthId = String(current?.auth_id || current?.id || '');
+        const profileAuthId = state.profile?.auth_id
+          ? String(state.profile.auth_id)
+          : '';
+        const alreadyMerged =
+          Boolean(state.profile?.id) &&
+          (profileAuthId === incomingAuthId || currentAuthId === incomingAuthId) &&
+          current?.id &&
+          String(current.id) === String(state.profile.id);
+        if (!alreadyMerged) {
+          state.user = action.payload;
+        }
         state.error = { flag: false, msg: null };
       } else {
         state.error = { flag: true, msg: "Autenticación fallida." };
@@ -113,6 +129,10 @@ const authSlice = createSlice({
     updateUserProfile: (state, action: PayloadAction<Partial<UserProfile>>) => {
       if (state.profile) {
         state.profile = { ...state.profile, ...action.payload };
+      }
+      if (state.user && action.payload.driver_active_status !== undefined) {
+        (state.user as any).driver_active_status = action.payload.driver_active_status;
+        (state.user as any).driverActiveStatus = action.payload.driver_active_status;
       }
     },
     loadSession: (state, action: PayloadAction<SupabaseUser | null>) => {

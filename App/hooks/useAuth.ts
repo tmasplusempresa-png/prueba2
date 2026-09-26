@@ -151,62 +151,12 @@ export const useAuth = () => {
         userId: data.user.id,
       });
 
-      // Solo creamos/actualizamos la fila en `users` cuando el alta es real
-      // (si alreadyExists=true, el auth_id pertenece al usuario existente y
-      // no debemos sobreescribir sus datos).
-      if (!alreadyExists) {
-        const userRecord = {
-          auth_id: data.user.id,
-          email: sanitizedEmail,
-          first_name: payload.firstName,
-          last_name: payload.lastName,
-          mobile: payload.phone,
-          user_type: payload.usertype || 'customer',
-          document_type: payload.documentType || null,
-          document_number: payload.documentNumber || null,
-          is_active: true,
-          updated_at: new Date().toISOString(),
-        };
-
-        const usersTable = supabase.from('users' as any) as any;
-
-        const { data: existingUser, error: selectError } = await usersTable
-          .select('id')
-          .eq('auth_id', data.user.id)
-          .limit(1)
-          .maybeSingle();
-
-        if (selectError) {
-          console.warn('Advertencia al verificar usuario existente en users:', selectError.message);
-        }
-
-        if (existingUser) {
-          const { error: updateError } = await usersTable
-            .update({
-              email: userRecord.email,
-              first_name: userRecord.first_name,
-              last_name: userRecord.last_name,
-              mobile: userRecord.mobile,
-              user_type: userRecord.user_type,
-              document_type: userRecord.document_type,
-              document_number: userRecord.document_number,
-              is_active: userRecord.is_active,
-              updated_at: userRecord.updated_at,
-            })
-            .eq('auth_id', data.user.id);
-
-          if (updateError) {
-            console.warn('Advertencia al actualizar usuario en users:', updateError.message);
-          }
-        } else {
-          const { error: insertError } = await usersTable
-            .insert([userRecord]);
-
-          if (insertError) {
-            console.warn('Advertencia al insertar en users:', insertError.message);
-          }
-        }
-      }
+      // El perfil (persona + rol + perfil + wallet) lo crea el trigger
+      // `handle_new_user` en auth.users (server-side, SECURITY DEFINER), leyendo el
+      // user_metadata que ya envió el signUp (first_name, last_name, phone,
+      // document_number, document_type, user_type). NO se inserta desde el cliente:
+      // en el registro no hay sesión (rol anon) y la vista `users` no acepta ese
+      // insert. Ver migracion_13_handle_new_user.sql.
 
       return {
         user: data.user,

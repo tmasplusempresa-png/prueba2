@@ -11,7 +11,8 @@ const SupabaseConfig = {
   anonKey: extra.SUPABASE_ANON_KEY as string,
 };
 
-import { Database } from './database.types';
+// Tipos generados del esquema CONSOLIDADO (aplicacioncore).
+import { Database } from './database.new.types';
 
 // ==================== INTERFACES TYPESCRIPT ====================
 interface SupabaseClientOptions {
@@ -59,36 +60,234 @@ const isInvalidRefreshTokenError = (error: any): boolean => {
   return msg.includes('Invalid Refresh Token') || msg.includes('Refresh Token Not Found');
 };
 
-// Storage envuelto: descarta sesiones malformadas o cuyo access_token expiró
-// hace más de 14 días (entonces el refresh_token también suele estar invalidado
-// en el servidor). Evita que el SDK intente refrescar tokens muertos al iniciar.
+const getProjectRefFromUrl = (url: string): string | null => {
+  try {
+    const host = new URL(url).hostname;
+    const ref = host.split('.')[0];
+    return ref || null;
+  } catch {
+    return null;
+  }
+};
+
+const getJwtProjectRef = (jwt: string): string | null => {
+  try {
+    const payload = JSON.parse(atob(jwt.split('.')[1]));
+    if (typeof payload?.ref === 'string') return payload.ref;
+    const iss = typeof payload?.iss === 'string' ? payload.iss : '';
+    const fromIss = iss.match(/https?:\/\/([a-z0-9]+)\.supabase\.co/i);
+    return fromIss?.[1] || null;
+  } catch {
+    return null;
+  }
+};
+
+const getJwtClaims = (
+  jwt: string,
+): { exp: number | null; iat: number | null } => {
+  try {
+    const payload = JSON.parse(atob(jwt.split('.')[1]));
+    return {
+      exp: typeof payload?.exp === 'number' ? payload.exp : null,
+      iat: typeof payload?.iat === 'number' ? payload.iat : null,
+    };
+  } catch {
+    return { exp: null, iat: null };
+  }
+};
+
+const getJwtExp = (jwt: string): number | null => getJwtClaims(jwt).exp;
+
+/**
+ * Alinea expires_at al JWT. Si el reloj del dispositivo está adelantado
+ * (jwt.exp aparece en el pasado tras un refresh), usa lifetime iat→exp
+ * desde "ahora" para que autoRefresh no entre en bucle ni demote a anon.
+ *
+ * IMPORTANTE: eso NO alarga la vida real del JWT en el servidor.
+ * Usamos `_tokenAge.obtainedAtMs` + lifetime para refrescar a tiempo.
+ */
+const normalizeSessionExpires = <T extends { access_token?: string; expires_at?: number }>(
+  session: T | null,
+): T | null => {
+  if (!session?.access_token) return session;
+  const { exp: jwtExp, iat: jwtIat } = getJwtClaims(session.access_token);
+  if (!jwtExp) return session;
+
+  const now = Math.floor(Date.now() / 1000);
+  let nextExp = jwtExp;
+
+  if (jwtExp < now - 30) {
+    const lifetime =
+      typeof jwtIat === 'number' && jwtExp > jwtIat
+        ? Math.max(300, jwtExp - jwtIat)
+        : 3600;
+    nextExp = now + lifetime;
+  }
+
+  if (session.expires_at === nextExp) return session;
+  return { ...session, expires_at: nextExp };
+};
+
+/** Edad real del access_token (objeto: evita TDZ/Fast Refresh con lets sueltos). */
+const _tokenAge = {
+  obtainedAtMs: 0,
+  lifeMs: 55 * 60 * 1000,
+  lastAccessToken: null as string | null,
+};
+let _refreshInFlight: Promise<Session | null> | null = null;
+
+const noteAccessToken = (session: Session | null) => {
+  const token = session?.access_token || null;
+  if (!token || token === _tokenAge.lastAccessToken) return;
+  _tokenAge.lastAccessToken = token;
+  const { exp, iat } = getJwtClaims(token);
+  if (typeof exp === 'number' && typeof iat === 'number' && exp > iat) {
+    _tokenAge.lifeMs = Math.max(5 * 60 * 1000, (exp - iat) * 1000);
+  } else {
+    _tokenAge.lifeMs = 55 * 60 * 1000;
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  // jwt.exp en el pasado (clock skew o token muerto): forzar refresh por edad ya.
+  if (typeof exp === 'number' && exp < nowSec - 30) {
+    _tokenAge.obtainedAtMs = Date.now() - _tokenAge.lifeMs;
+  } else {
+    _tokenAge.obtainedAtMs = Date.now();
+  }
+};
+
+const CURRENT_PROJECT_REF = getProjectRefFromUrl(SupabaseConfig.url || '');
+
+// Caché en memoria actualizada por onAuthStateChange.
+// Evita thunderstorms de getSession() (cada una puede disparar refresh
+// concurrente → rotación de refresh_token → SIGNED_OUT espurio).
+let _memorySession: Session | null = null;
+const SESSION_CACHE_SKEW_SEC = 45;
+let _loggedClockSkew = false;
+
+const setMemorySession = (session: Session | null) => {
+  const rawExp = session?.access_token ? getJwtExp(session.access_token) : null;
+  const normalized = normalizeSessionExpires(session);
+  if (
+    !_loggedClockSkew &&
+    typeof rawExp === 'number' &&
+    normalized &&
+    typeof normalized.expires_at === 'number' &&
+    rawExp !== normalized.expires_at
+  ) {
+    _loggedClockSkew = true;
+    const now = Math.floor(Date.now() / 1000);
+    console.warn(
+      '[auth] reloj del dispositivo parece desfasado vs JWT — se corrige expires_at',
+      `jwt.exp=${rawExp - now}s`,
+      `expires_at_corregido=${normalized.expires_at - now}s`,
+      '(ajusta fecha/hora automática del emulador)',
+    );
+  }
+  _memorySession = normalized;
+  noteAccessToken(normalized);
+};
+
+/** Sesión en memoria si el access_token aún tiene margen; no llama a getSession. */
+export const getMemorySession = (): Session | null => {
+  const s = _memorySession;
+  if (!s?.access_token) return null;
+  // Usar expires_at ya normalizado (puede ser "ahora+lifetime" ante clock skew).
+  if (typeof s.expires_at === 'number') {
+    const now = Math.floor(Date.now() / 1000);
+    if (s.expires_at - now <= SESSION_CACHE_SKEW_SEC) return null;
+  }
+  return s;
+};
+
+// Storage envuelto: descarta solo sesiones de OTRO proyecto o caducadas >14 días.
+// Nunca borra por JSON parse flaky (escritura concurrente del SDK).
+// IMPORTANTE: devolver null desde getItem con key de sesión hace que GoTrue
+// emita SIGNED_OUT — por eso logueamos cada null "activo".
 const REFRESH_GRACE_SECONDS = 14 * 24 * 60 * 60;
 const sessionStorageAdapter = {
   getItem: async (key: string): Promise<string | null> => {
     try {
       const value = await AsyncStorage.getItem(key);
-      if (!value) return null;
+      if (!value) {
+        if (key === SESSION_STORAGE_KEY) {
+          // Normal al arranque sin login; no spamear.
+        }
+        return null;
+      }
       if (key !== SESSION_STORAGE_KEY) return value;
 
-      const parsed = JSON.parse(value);
-      const expiresAt: number | undefined = parsed?.expires_at;
-      if (typeof expiresAt === 'number') {
-        const nowSec = Math.floor(Date.now() / 1000);
-        if (nowSec - expiresAt > REFRESH_GRACE_SECONDS) {
-          console.warn('[SupabaseStorage] Sesión guardada caducó hace mucho, descartando.');
+      let parsed: any;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        // No devolver null: eso dispara SIGNED_OUT. Dejar el valor crudo.
+        console.warn('[SupabaseStorage] JSON ilegible — se devuelve crudo (sin borrar)');
+        return value;
+      }
+
+      const accessToken: string | undefined = parsed?.access_token;
+      if (accessToken && CURRENT_PROJECT_REF) {
+        const tokenRef = getJwtProjectRef(accessToken);
+        if (tokenRef && tokenRef !== CURRENT_PROJECT_REF) {
+          console.warn(
+            '[SupabaseStorage] getItem→null: otro proyecto (' + tokenRef + ' ≠ ' + CURRENT_PROJECT_REF + ')',
+          );
           await AsyncStorage.removeItem(key);
           return null;
         }
       }
+
+      // Preferir expires_at normalizado (compensa reloj adelantado del emulador).
+      const normalized = normalizeSessionExpires(parsed);
+      const expiresAt: number | undefined =
+        typeof normalized?.expires_at === 'number'
+          ? normalized.expires_at
+          : parsed?.expires_at;
+      if (typeof expiresAt === 'number') {
+        const nowSec = Math.floor(Date.now() / 1000);
+        // Solo descartar si el JWT "aparente" + lifetime corregido lleva >14d
+        // (sesión realmente muerta). No usar jwt.exp crudo con clock skew.
+        if (nowSec - expiresAt > REFRESH_GRACE_SECONDS) {
+          console.warn('[SupabaseStorage] getItem→null: sesión caducada >14d');
+          await AsyncStorage.removeItem(key);
+          return null;
+        }
+      }
+
+      if (
+        normalized &&
+        typeof normalized.expires_at === 'number' &&
+        parsed.expires_at !== normalized.expires_at
+      ) {
+        const fixedStr = JSON.stringify(normalized);
+        AsyncStorage.setItem(key, fixedStr).catch(() => {});
+        return fixedStr;
+      }
+
       return value;
     } catch (err) {
-      console.warn('[SupabaseStorage] Sesión guardada inválida, descartando:', (err as any)?.message);
-      try { await AsyncStorage.removeItem(key); } catch {}
+      console.warn('[SupabaseStorage] getItem exception (devuelve null):', (err as any)?.message);
       return null;
     }
   },
-  setItem: (key: string, value: string) => AsyncStorage.setItem(key, value),
-  removeItem: (key: string) => AsyncStorage.removeItem(key),
+  setItem: async (key: string, value: string) => {
+    if (key !== SESSION_STORAGE_KEY) {
+      return AsyncStorage.setItem(key, value);
+    }
+    try {
+      const parsed = JSON.parse(value);
+      const normalized = normalizeSessionExpires(parsed);
+      return AsyncStorage.setItem(key, JSON.stringify(normalized ?? parsed));
+    } catch {
+      return AsyncStorage.setItem(key, value);
+    }
+  },
+  removeItem: async (key: string) => {
+    if (key === SESSION_STORAGE_KEY) {
+      console.warn('[SupabaseStorage] removeItem sesión', new Error().stack?.split('\n').slice(1, 4).join(' | '));
+    }
+    return AsyncStorage.removeItem(key);
+  },
 };
 
 // ==================== CONFIGURACION OPTIMIZADA DEL CLIENTE ====================
@@ -144,25 +343,132 @@ export const isPasswordRecoveryInProgress = (): boolean => _passwordRecoveryInPr
 export const SUPABASE_URL = SupabaseConfig.url;
 export const SUPABASE_ANON_KEY = SupabaseConfig.anonKey;
 
+let _clearSessionInFlight: Promise<void> | null = null;
+let _lastClearedAt = 0;
+
+export const clearStoredSession = async (reason = 'explicit'): Promise<void> => {
+  // Evita storms: muchos getSession en paralelo + refresh token rotation
+  // pueden disparar "Invalid Refresh Token" falso y borrar una sesión buena.
+  if (_clearSessionInFlight) return _clearSessionInFlight;
+  const now = Date.now();
+  if (now - _lastClearedAt < 3000) return;
+
+  console.warn('[clearStoredSession] razón:', reason);
+
+  _clearSessionInFlight = (async () => {
+    try {
+      setMemorySession(null);
+      await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (error) {
+      console.warn('Error clearing stored auth session:', error);
+    }
+
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch (error) {
+      console.warn('Error clearing Supabase auth state:', error);
+    } finally {
+      _lastClearedAt = Date.now();
+      _clearSessionInFlight = null;
+    }
+  })();
+
+  return _clearSessionInFlight;
+};
+
+export const getSafeSession = async (): Promise<Session | null> => {
+  try {
+    const cached = getMemorySession();
+    if (cached) return cached;
+
+    const { data: { session }, error } = await supabase.auth.getSession();
+
+    if (error) {
+      // No borrar sesión aquí: un refresh concurrente puede reportar
+      // Invalid Refresh Token de forma espuria. El SDK emite SIGNED_OUT solo
+      // cuando la sesión realmente murió.
+      console.warn('[getSafeSession] error (sin clear):', error.message);
+      return _memorySession;
+    }
+
+    const normalized = normalizeSessionExpires(session);
+    if (normalized) setMemorySession(normalized);
+    return normalized;
+  } catch (error) {
+    console.warn('Error inesperado obteniendo sesion segura:', error);
+    return _memorySession;
+  }
+};
+
+/**
+ * Refresca la sesión (mutex). Necesario cuando expires_at local está
+ * "parcheado" por clock skew pero el JWT real ya venció en el servidor.
+ */
+export const refreshAuthSession = async (): Promise<Session | null> => {
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = (async () => {
+    try {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.warn('[auth] refreshSession failed:', error.message);
+        return null;
+      }
+      const normalized = normalizeSessionExpires(data.session);
+      setMemorySession(normalized);
+      // Tras refresh exitoso, marcar edad fresca aunque jwt.exp luzca 'pasado' (clock skew).
+      if (normalized?.access_token) {
+        _tokenAge.obtainedAtMs = Date.now();
+        _tokenAge.lastAccessToken = normalized.access_token;
+      }
+      return normalized;
+    } catch (e: any) {
+      console.warn('[auth] refreshSession exception:', e?.message || e);
+      return null;
+    } finally {
+      _refreshInFlight = null;
+    }
+  })();
+  return _refreshInFlight;
+};
+
+const tokenNeedsRefreshByAge = (): boolean => {
+  if (!_tokenAge.lastAccessToken || !_tokenAge.obtainedAtMs) return false; // sin token anotado: no forzar
+  // Renovar ~90s antes del fin de vida real del JWT
+  return Date.now() - _tokenAge.obtainedAtMs >= _tokenAge.lifeMs - 90_000;
+};
+
 /**
  * Build auth headers for direct Supabase REST API calls.
- * Reads JWT from AsyncStorage, validates expiry, falls back to anon key.
+ * Si hay access_token de sesión, se envía siempre (el servidor valida).
+ * Refresca por edad real del token (no solo por expires_at parcheado).
  */
 export const getSupabaseAuthHeaders = async (includeContentType = false) => {
   let token = SUPABASE_ANON_KEY;
   try {
-    const raw = await AsyncStorage.getItem('tmasplus_auth_session');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const jwt = parsed?.access_token;
-      if (jwt && jwt.length > 40) {
-        try {
-          const payload = JSON.parse(atob(jwt.split('.')[1]));
-          if (payload.exp && payload.exp * 1000 > Date.now()) {
-            token = jwt;
+    if (tokenNeedsRefreshByAge()) {
+      const refreshed = await refreshAuthSession();
+      if (refreshed?.access_token) {
+        token = refreshed.access_token;
+      }
+    }
+
+    if (token === SUPABASE_ANON_KEY) {
+      const cached = getMemorySession();
+      if (cached?.access_token && cached.access_token.length > 40) {
+        token = cached.access_token;
+      } else {
+        const refreshedMiss = await refreshAuthSession();
+        if (refreshedMiss?.access_token) {
+          token = refreshedMiss.access_token;
+        } else {
+          const { data: { session } } = await supabase.auth.getSession();
+          const normalized = normalizeSessionExpires(session);
+          if (normalized?.access_token) {
+            setMemorySession(normalized);
+            token = normalized.access_token;
+          } else if (_memorySession?.access_token) {
+            token = _memorySession.access_token;
           }
-        } catch {
-          token = jwt;
         }
       }
     }
@@ -177,43 +483,11 @@ export const getSupabaseAuthHeaders = async (includeContentType = false) => {
   return headers;
 };
 
-export const clearStoredSession = async (): Promise<void> => {
-  try {
-    await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch (error) {
-    console.warn('Error clearing stored auth session:', error);
-  }
-
-  try {
-    // Reset Supabase auth state in memory too, para evitar que el cliente siga usando una sesión inválida.
-    await supabase.auth.signOut();
-  } catch (error) {
-    // El refresh token puede no existir o ser inválido, así que ignoramos el error.
-    console.warn('Error clearing Supabase auth state:', error);
-  }
-};
-
-export const getSafeSession = async (): Promise<Session | null> => {
-  try {
-    const { data: { session }, error } = await supabase.auth.getSession();
-
-    if (error) {
-      if (isInvalidRefreshTokenError(error)) {
-        await clearStoredSession();
-        return null;
-      }
-      return null;
-    }
-
-    return session;
-  } catch (error) {
-    if (isInvalidRefreshTokenError(error)) {
-      await clearStoredSession();
-      return null;
-    }
-    console.warn('Error inesperado obteniendo sesion segura:', error);
-    return null;
-  }
+/** true si el Bearer es un JWT de usuario (no la anon key). */
+export const hasUserAuthHeader = (headers: Record<string, string>): boolean => {
+  const auth = headers.Authorization || '';
+  const token = auth.replace(/^Bearer\s+/i, '');
+  return Boolean(token && token !== SUPABASE_ANON_KEY && token.length > 40);
 };
 
 // ==================== FUNCIONES DE AUTENTICACION MEJORADAS ====================
@@ -223,19 +497,18 @@ export const Auth = {
    */
   getCurrentUser: async (): Promise<User | null> => {
     try {
+      // Preferir sesión local/caché: getUser() pega a red y, en refresh concurrente,
+      // puede fallar y antes disparaba clearStoredSession → SIGNED_OUT espurio.
+      const session = await getSafeSession();
+      if (session?.user) return session.user;
+
       const { data: { user }, error } = await supabase.auth.getUser();
       if (error) {
-        if (isInvalidRefreshTokenError(error)) {
-          await clearStoredSession();
-        }
+        console.warn('[getCurrentUser] getUser error (sin clear):', error.message);
         return null;
       }
       return user;
     } catch (error) {
-      if (isInvalidRefreshTokenError(error)) {
-        await clearStoredSession();
-        return null;
-      }
       console.warn('Error inesperado obteniendo usuario:', error);
       return null;
     }
@@ -263,23 +536,34 @@ export const Auth = {
   /**
    * Obtiene el perfil completo del usuario desde la tabla users
    */
-  getUserProfile: async (): Promise<Database['public']['Tables']['users']['Row'] | null> => {
+  getUserProfile: async (): Promise<Database['public']['Tables']['persona']['Row'] | null> => {
     try {
-      const user = await Auth.getCurrentUser();
-      if (!user) return null;
+      const session = (await getSafeSession()) || _memorySession;
+      if (!session?.access_token || !session.user) return null;
 
+      // 1) RPC consolidado (suele ser SECURITY DEFINER) — evita GRANT de anon en persona
+      try {
+        const { data: rpcData, error: rpcError } = await supabase.rpc('get_perfil_movil' as any);
+        if (!rpcError && rpcData) {
+          return rpcData as any;
+        }
+      } catch {
+        // RPC no disponible — fallback
+      }
+
+      // 2) Vista users (requiere JWT authenticated; no llamar como anon)
       const { data, error } = await supabase
-        .from('users')
+        .from('users' as any)
         .select('*')
-        .eq('auth_id', user.id)
-        .single();
+        .eq('auth_id', session.user.id)
+        .maybeSingle();
 
       if (error) {
         console.error('Error obteniendo perfil de usuario:', error.message);
         return null;
       }
 
-      return data;
+      return data as any;
     } catch (error) {
       console.error('Error inesperado obteniendo perfil:', error);
       return null;
@@ -316,15 +600,20 @@ export const Health = {
     };
 
     try {
-      // Test 1: Verificar conexion basica
+      // Test 1: Verificar conexion basica.
+      // Se consulta un catálogo público (categoria_vehiculo) legible por anon.
+      // IMPORTANTE: con RLS, un error de permiso/JWT igual significa que el
+      // servidor RESPONDIÓ (está accesible). Solo un fallo de red (throw →
+      // catch de abajo) cuenta como desconexión. Así, no estar logueado no
+      // marca "FALLIDO".
       const { error: pingError } = await supabase
-        .from('users')
-        .select('count', { count: 'exact', head: true })
+        .from('categoria_vehiculo')
+        .select('id', { count: 'exact', head: true })
         .limit(1);
-      
+
       if (pingError) {
-        status.error = `Test basico falló: ${pingError.message}`;
-        return status;
+        // El servidor contestó aunque restrinja filas por RLS → sigue conectado.
+        console.warn('[testConnection] ping restringido (server accesible):', pingError.message || (pingError as any).code || pingError);
       }
 
       // Test 2: Verificar autenticacion funciona
@@ -332,7 +621,8 @@ export const Health = {
       
       if (authError) {
         if (isInvalidRefreshTokenError(authError)) {
-          await clearStoredSession();
+          // No borrar sesión desde el ping de salud — solo reportar.
+          console.warn('[testConnection] refresh token inválido (sin clear):', authError.message);
           status.isConnected = true;
           return status;
         }
@@ -358,22 +648,50 @@ export const Health = {
     };
 
     try {
-      // Verificar que las tablas principales de T+Plus existan
-      const tablesToCheck = ['users', 'cars', 'bookings', 'car_types'];
+      // Sin JWT: solo catálogo público. Con JWT: vistas/tablas de negocio.
+      // Nunca pingear `persona`/`users` como anon (vista users → persona → 42501).
+      const { data: { session } } = await supabase.auth.getSession();
+      const tablesToCheck = session?.access_token
+        ? ['users', 'vehiculo', 'reserva', 'categoria_vehiculo']
+        : ['categoria_vehiculo'];
       let successCount = 0;
 
       for (const table of tablesToCheck) {
         try {
           const { error } = await supabase
             .from(table as any)
-            .select('count', { count: 'exact', head: true })
+            .select('id', { count: 'exact', head: true })
             .limit(1);
-          
+
           if (!error) {
             successCount++;
+            continue;
+          }
+          const code = String((error as any)?.code || '');
+          const msg = String(error.message || '');
+          const existsButRestricted =
+            code === '42501' ||
+            code === 'PGRST301' ||
+            msg.toLowerCase().includes('permission') ||
+            msg.toLowerCase().includes('row-level security') ||
+            msg.toLowerCase().includes('rls');
+          const missing =
+            code === 'PGRST205' ||
+            msg.toLowerCase().includes('does not exist') ||
+            msg.toLowerCase().includes('schema cache');
+
+          if (existsButRestricted) {
+            // Tabla/vista existe; RLS o GRANT bloquean — no es fallo de schema.
+            successCount++;
+          } else if (missing) {
+            console.warn(`[checkDatabaseHealth] tabla ausente: ${table}`, code || msg);
+          } else {
+            // Otros errores (p.ej. columna) — la relación existe
+            successCount++;
+            console.warn(`[checkDatabaseHealth] ${table}:`, code || msg);
           }
         } catch {
-          // Tabla no accesible
+          // Red / throw inesperado
         }
       }
 
@@ -403,7 +721,9 @@ export const Health = {
 
     if (!SupabaseConfig.anonKey) {
       errors.push('SUPABASE_ANON_KEY no configurada');
-    } else if (SupabaseConfig.anonKey.length < 100) {
+    } else if (!SupabaseConfig.anonKey.startsWith('sb_publishable_') && SupabaseConfig.anonKey.length < 100) {
+      // Las nuevas publishable keys (sb_publishable_...) son cortas y válidas; solo
+      // advertir si NO es una de ellas y además parece un JWT truncado.
       warnings.push('SUPABASE_ANON_KEY parece ser muy corta');
     }
 
@@ -459,7 +779,7 @@ export const DevUtils = {
         if (connectionStatus.isConnected) {
           const dbHealth = await Health.checkDatabaseHealth();
           console.log('Database Health:', dbHealth.isHealthy ? 'SALUDABLE' : 'CON PROBLEMAS');
-          console.log('Tables Available:', `${dbHealth.tablesCount}/4`);
+          console.log('Tables Available:', `${dbHealth.tablesCount} ok`);
         }
       } catch (error) {
         console.error('Connection Test Failed:', error);
@@ -517,53 +837,57 @@ export const DevUtils = {
 } as const;
 
 // ==================== LISTENERS DE AUTENTICACION MEJORADOS ====================
+let _lastTokenRefreshLogAt = 0;
+const TOKEN_REFRESH_LOG_COOLDOWN_MS = 60_000;
+
 export const setupAuthListeners = (): { unsubscribe: () => void } => {
-  const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+  // Callback síncrono: cualquier await aquí bloquea el lock interno de GoTrue.
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    // Mantener caché sincronizada (también en TOKEN_REFRESHED).
+    setMemorySession(session ?? null);
+
     if (process.env.NODE_ENV === 'development') {
-      console.log('Auth State Change:', event, session?.user?.id || 'No user');
+      if (event === 'TOKEN_REFRESHED') {
+        const now = Date.now();
+        if (now - _lastTokenRefreshLogAt >= TOKEN_REFRESH_LOG_COOLDOWN_MS) {
+          _lastTokenRefreshLogAt = now;
+          const nowSec = Math.floor(now / 1000);
+          const rawExp =
+            typeof session?.expires_at === 'number' ? session.expires_at - nowSec : null;
+          const jwtExp = session?.access_token ? getJwtExp(session.access_token) : null;
+          const jwtLeft = typeof jwtExp === 'number' ? jwtExp - nowSec : '?';
+          console.log(
+            '[auth:setupListeners]',
+            event,
+            session?.user?.id || 'No user',
+            `expires_at=${rawExp}s`,
+            `jwt.exp=${jwtLeft}s`,
+          );
+        }
+      } else {
+        console.log('[auth:setupListeners]', event, session?.user?.id || 'No user');
+      }
     }
 
     switch (event) {
       case 'SIGNED_IN':
         console.log('Usuario autenticado:', session?.user?.email);
-
-        // IMPORTANTE: nunca usar `await` sobre llamadas a Supabase dentro de un
-        // callback de onAuthStateChange. El evento se emite mientras setSession/
-        // exchangeCodeForSession mantienen el lock de auth; si el callback espera
-        // otra llamada de auth (p.ej. getUserProfile), se produce un DEADLOCK y la
-        // promesa de setSession nunca resuelve. Diferimos con setTimeout(0) para
-        // liberar el lock primero.
-        if (session?.user) {
-          setTimeout(async () => {
-            try {
-              const profile = await Auth.getUserProfile();
-              if (!profile) {
-                console.log('Perfil de usuario no encontrado, podria requerir creacion');
-              }
-            } catch (error) {
-              console.error('Error verificando perfil:', error);
-            }
-          }, 0);
-        }
+        // Perfil lo carga app/_layout (loadProfile). No getSession aquí.
         break;
-        
+
       case 'SIGNED_OUT':
         console.log('Usuario cerro sesion (o refresh token inválido)');
-        try {
-          await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
-        } catch (storageError) {
-          console.warn('Error clearing stored auth session in listener:', storageError);
-        }
+        // El SDK ya llamó storage.removeItem; no borrar de nuevo aquí.
+        setMemorySession(null);
         break;
 
       case 'TOKEN_REFRESHED':
-        console.log('Token renovado exitosamente');
         break;
 
       case 'USER_UPDATED':
         console.log('Usuario actualizado');
         break;
-        
+
       case 'PASSWORD_RECOVERY':
         console.log('Recuperacion de contraseña iniciada');
         break;
@@ -582,14 +906,14 @@ export const Realtime = {
    */
   subscribeToBookings: (userId: string, callback: (payload: any) => void) => {
     return supabase
-      .channel('bookings-changes')
+      .channel('reserva-changes')
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
-          table: 'bookings',
-          filter: `customer_id=eq.${userId}`
+          table: 'reserva',
+          filter: `id_cliente=eq.${userId}`
         },
         callback
       )
@@ -601,14 +925,14 @@ export const Realtime = {
    */
   subscribeToTracking: (bookingId: string, callback: (payload: any) => void) => {
     return supabase
-      .channel(`booking_tracking-${bookingId}`)
+      .channel(`reserva_tracking-${bookingId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'booking_tracking',
-          filter: `booking_id=eq.${bookingId}`
+          table: 'reserva_tracking',
+          filter: `id_reserva=eq.${bookingId}`
         },
         callback
       )
@@ -620,14 +944,14 @@ export const Realtime = {
    */
   subscribeToNotifications: (userId: string, callback: (payload: any) => void) => {
     return supabase
-      .channel('notifications-changes')
+      .channel('notificacion-changes')
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${userId}`
+          table: 'notificacion',
+          filter: `id_persona=eq.${userId}`
         },
         callback
       )

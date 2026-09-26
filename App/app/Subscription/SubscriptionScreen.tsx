@@ -5,24 +5,27 @@ import { useNavigation } from "@react-navigation/native";
 import { differenceInDays } from "date-fns";
 import { RootState, AppDispatch } from "@/common/store";
 import { fetchMemberships, selectMembershipLoading } from "@/common/reducers/membershipSlice";
+import { preferredConductorId } from "@/common/utils/driverIds";
 
 const SubscriptionScreen = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigation = useNavigation();
   const user = useSelector((state: RootState) => state.auth.user);
+  const profile = useSelector((state: RootState) => (state as any).auth.profile);
   const memberships = useSelector((state: RootState) => state.memberships.memberships);
   const isLoading = useSelector(selectMembershipLoading);
   const [hasFetched, setHasFetched] = useState(false);
+  const conductorId = preferredConductorId(user, profile);
 
   // Filtrar membresía activa
   const activeMembership = memberships.find((membership) => membership.status === "ACTIVA");
 
   useEffect(() => {
-    if (user?.id && !hasFetched) {
-      console.log("Cargando membresías para el usuario:", user.id);
-      dispatch(fetchMemberships(user.id)).then(() => setHasFetched(true));
+    if (conductorId && !hasFetched) {
+      console.log("Cargando membresías para el conductor:", conductorId);
+      dispatch(fetchMemberships(conductorId)).then(() => setHasFetched(true));
     }
-  }, [dispatch, user?.id, hasFetched]);
+  }, [dispatch, conductorId, hasFetched]);
 
   useEffect(() => {
     if (hasFetched && !isLoading) {

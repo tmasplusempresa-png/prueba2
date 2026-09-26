@@ -42,7 +42,7 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
     const fetchLatest = async () => {
       const { data, error: fetchError } = await supabase
         .from('booking_tracking' as any)
-        .select('lat, lng, accuracy, created_at')
+        .select('lat, lng, created_at')
         .eq('booking_id', bookingId)
         .order('created_at', { ascending: false })
         .limit(1);
@@ -57,7 +57,6 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
         setDriverPosition({
           lat: Number(row.lat),
           lng: Number(row.lng),
-          accuracy: row.accuracy ?? undefined,
           createdAt: row.created_at,
         });
       }
@@ -66,6 +65,10 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
     };
 
     fetchLatest();
+
+    // Polling de respaldo: Realtime a veces no re-suscribe tras remount y el
+    // carrito no aparece hasta reentrar. Refresco cada 4 s cubre ese hueco.
+    const pollId = setInterval(fetchLatest, 4000);
 
     // ── 2. Suscripción Realtime ────────────────────────────────────────────────
     // Nombre único por suscripción: si la pantalla se remonta (navegación,
@@ -79,8 +82,8 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'booking_tracking',
-          filter: `booking_id=eq.${bookingId}`,
+          table: 'reserva_tracking',
+          filter: `id_reserva=eq.${bookingId}`,
         },
         (payload) => {
           if (cancelled) return;
@@ -89,8 +92,8 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
             setDriverPosition({
               lat: Number(row.lat),
               lng: Number(row.lng),
-              accuracy: row.accuracy ?? undefined,
-              createdAt: row.created_at,
+              accuracy: row.precision_m ?? undefined,
+              createdAt: row.registrado_en || row.created_at,
             });
             setIsLoading(false);
           }
@@ -106,6 +109,7 @@ export function useBookingDriverPosition(bookingId: string | null | undefined): 
     // ── 3. Cleanup ─────────────────────────────────────────────────────────────
     return () => {
       cancelled = true;
+      clearInterval(pollId);
       supabase.removeChannel(channel);
     };
   }, [bookingId]);

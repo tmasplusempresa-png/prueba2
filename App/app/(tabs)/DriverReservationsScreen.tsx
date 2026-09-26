@@ -1,25 +1,91 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
-  ActivityIndicator, RefreshControl, Platform, Dimensions,
+  ActivityIndicator, RefreshControl, Platform, Dimensions, Modal, ScrollView,
 } from 'react-native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import MapView, { Circle, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { RootState } from '@/common/store';
+import { selectDriverOnline } from '@/components/DriverBottomNav';
+import { invokeDriverGoActivate, invokeDriverGoDeactivate } from '@/common/utils/driverGoBridge';
+import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
+import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
+import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
+import { formatBookingFareRange, getBookingFareRange } from '@/constants/fare';
+import { API_KEY } from '@/config/AppConfig';
+import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
+import { useActiveTripBanner } from '@/hooks/useActiveTripBanner';
+import { ActiveTripBannerCard } from '@/components/ActiveTripFloatingBanner';
+import {
+  recordServiceNotice,
+  listServiceNotices,
+  getTakenReservationGhosts,
+  upsertTakenReservationGhost,
+  formatCountdown,
+  type TakenReservationGhost,
+} from '@/common/services/driverServiceNotices';
 
 const IMMEDIATE_RANGE_KM = 3;
+const ROUTE_LINE_BLUE = '#00E5FF';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
+
+type LatLng = { latitude: number; longitude: number };
+
+/** Radio en metros para que las puntas midan ~10px en el mapa del modal (190px). */
+const detailTipRadiusMeters = (coords: LatLng[], mapHeightPx = 190): number => {
+  let minLat = coords[0].latitude;
+  let maxLat = coords[0].latitude;
+  for (let i = 1; i < coords.length; i++) {
+    const lat = coords[i].latitude;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  const latSpan = Math.max((maxLat - minLat) * 1.55, 0.01);
+  const metersPerPx = (latSpan * 111_320) / mapHeightPx;
+  return Math.min(Math.max(metersPerPx * 5, 12), 70);
+};
+
+const decodePolyline = (encoded: string): LatLng[] => {
+  const coordinates: LatLng[] = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+  while (index < encoded.length) {
+    let b: number;
+    let shift = 0;
+    let result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    const dlat = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
+    lat += dlat;
+    shift = 0;
+    result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    const dlng = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
+    lng += dlng;
+    coordinates.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+  }
+  return coordinates;
+};
 
 const sendPushNotification = async (token: string, title: string, body: string) => {
   if (!token) return;
@@ -64,6 +130,12 @@ type Reservation = {
 
 type DriverReservationsScreenProps = {
   embedded?: boolean;
+  initialTab?: 'reservations' | 'immediate' | 'active';
+  /** Abre el modal "Detalle del servicio" (mismo que al pulsar Ver) sin navegar a otra pantalla */
+  pendingDetailBooking?: any | null;
+  onPendingDetailConsumed?: () => void;
+  /** Cuenta de servicios disponibles (para campanita / punto verde del mapa) */
+  onAvailableServicesChange?: (counts: { immediate: number; reservation: number }) => void;
 };
 
 const formatDate = (ts: string) => {
@@ -85,9 +157,12 @@ const formatTime = (ts: string) => {
     const ampm = h >= 12 ? 'p. m.' : 'a. m.';
     if (h > 12) h -= 12;
     if (h === 0) h = 12;
-    return `${h}:${m}:00 ${ampm}`;
+    return `${h}:${m} ${ampm}`;
   } catch { return ts || ''; }
 };
+
+const moneyFmt = (n: number) =>
+  Math.round(n || 0).toLocaleString('es-CO');
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -141,28 +216,44 @@ const getDistanceKm = (
   return earthRadiusKm * c;
 };
 
-const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreenProps) => {
+const stripRecorridoTag = (obs: string) =>
+  String(obs || '').replace(/^\[recorrido:[^\]]+\]\s*/i, '').trim();
+
+const formatTripKmSuffix = (distance: unknown) => {
+  const tripKm = parseFloat(String(distance ?? 0));
+  return Number.isFinite(tripKm) && tripKm > 0 ? ` · ${tripKm.toFixed(1)} km` : '';
+};
+
+const DriverReservationsScreen = ({
+  embedded = false,
+  initialTab: initialTabProp,
+  pendingDetailBooking = null,
+  onPendingDetailConsumed,
+  onAvailableServicesChange,
+}: DriverReservationsScreenProps) => {
   const nav = useNavigation<any>();
+  const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const dispatch = useAppDispatch();
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
+  const driverOnline = useSelector(selectDriverOnline);
   const memberships = useSelector((s: RootState) => s.memberships.memberships);
+  const {
+    bookings: activeTrips,
+    activeReservation,
+    isDriver: activeTripIsDriver,
+  } = useActiveTripBanner();
 
-  // FK: memberships.conductor → auth.users(id). Probamos auth_id primero
-  // y caemos a users.id por compatibilidad con datos legacy.
+  // memberships.conductor = persona.id (users.id), no auth uid.
   const driverIdCandidates = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          [profile?.auth_id, user?.auth_id, profile?.id, user?.id, user?.uid]
-            .map((v) => (v ? String(v) : ''))
-            .filter(Boolean),
-        ),
-      ),
+    () => collectDriverIdCandidates(user, profile),
     [profile?.auth_id, profile?.id, user?.auth_id, user?.id, user?.uid],
   );
-  const driverConductorId = driverIdCandidates[0];
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
+  );
   const activeMembership = memberships.find(
     (m: any) =>
       m.status === 'ACTIVA' &&
@@ -180,13 +271,39 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
   }, [dispatch, driverConductorId]);
 
   const [reservations, setReservations] = useState<Reservation[]>([]);
+  const [takenGhosts, setTakenGhosts] = useState<TakenReservationGhost[]>([]);
+  const [nowTick, setNowTick] = useState(Date.now());
+  const lastPendingReservationsRef = useRef<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [accepting, setAccepting] = useState<string | null>(null);
+  const [detailItem, setDetailItem] = useState<any | null>(null);
+  const [detailRouteCoords, setDetailRouteCoords] = useState<LatLng[]>([]);
+  const [detailEndpoints, setDetailEndpoints] = useState<{ start: LatLng; end: LatLng } | null>(null);
+  const [detailRouteLoading, setDetailRouteLoading] = useState(false);
+  const [detailTipRadius, setDetailTipRadius] = useState(18);
+  const [customerPhotos, setCustomerPhotos] = useState<Record<string, string>>({});
+  const detailMapRef = useRef<MapView | null>(null);
   const [activeCarType, setActiveCarType] = useState<string | null>(null);
 
-  /* ── Tab selector: Reservas vs Inmediatos ── */
-  const [activeTab, setActiveTab] = useState<'reservations' | 'immediate'>('immediate');
+  /* ── Tab selector: Reservas / Inmediatos / En curso ── */
+  const routeInitialTab = route.params?.initialTab as 'reservations' | 'immediate' | 'active' | undefined;
+  const [activeTab, setActiveTab] = useState<'reservations' | 'immediate' | 'active'>(
+    () => initialTabProp || routeInitialTab || 'reservations',
+  );
+  useEffect(() => {
+    const tab = initialTabProp || routeInitialTab;
+    if (tab) setActiveTab(tab);
+  }, [initialTabProp, routeInitialTab]);
+
+  const wasOnlineRef = useRef(driverOnline);
+  useEffect(() => {
+    if (embedded && driverOnline && !wasOnlineRef.current) {
+      setActiveTab('immediate');
+    }
+    wasOnlineRef.current = driverOnline;
+  }, [driverOnline, embedded]);
+
   const [immediateServices, setImmediateServices] = useState<Reservation[]>([]);
   const [searchingImmediate, setSearchingImmediate] = useState(false);
   const rangeKm = IMMEDIATE_RANGE_KM;
@@ -223,6 +340,15 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
   /* ── IDs ya vistos para notificar solo nuevos ── */
   const seenReservationIdsRef = useRef<Set<string> | null>(null);
   const seenImmediateIdsRef = useRef<Set<string> | null>(null);
+  const availableCountsRef = useRef({ immediate: 0, reservation: 0 });
+  const onAvailableServicesChangeRef = useRef(onAvailableServicesChange);
+  onAvailableServicesChangeRef.current = onAvailableServicesChange;
+
+  const emitAvailableCounts = useCallback((partial: { immediate?: number; reservation?: number }) => {
+    if (typeof partial.immediate === 'number') availableCountsRef.current.immediate = partial.immediate;
+    if (typeof partial.reservation === 'number') availableCountsRef.current.reservation = partial.reservation;
+    onAvailableServicesChangeRef.current?.({ ...availableCountsRef.current });
+  }, []);
   /* ── IDs de cancelaciones ya notificadas (evita repetir en ciclos sucesivos) ── */
   const notifiedCancelledIdsRef = useRef<Set<string>>(new Set());
 
@@ -302,11 +428,29 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       // Fallback: features.carType (formato legacy del móvil).
       // Este orden permite que la corrección hecha en web se refleje al conductor
       // sin backfill de BD; si en el futuro se elimina features.carType, seguirá OK.
-      const url = `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}&is_active=eq.true&select=service_type,features,is_active&limit=1`;
-      const res = await fetch(url, { headers });
-      if (res.ok) {
-        const data = await res.json();
-        const row = Array.isArray(data) ? data[0] : null;
+      const select = 'service_type,features,is_active';
+      const activeUrl =
+        `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}` +
+        `&is_active=eq.true&select=${select}&limit=1`;
+      let res = await fetch(activeUrl, { headers });
+      let data = res.ok ? await res.json() : [];
+      let row = Array.isArray(data) ? data[0] : null;
+
+      // Al crear vehículo se guarda is_active=false hasta activarlo en Mis Vehículos.
+      // Si no hay activo, usar el más reciente para no dejar el feed vacío sin categoría.
+      if (!row) {
+        const anyUrl =
+          `${SUPABASE_URL}/rest/v1/cars?driver_id=eq.${encodeURIComponent(driverId)}` +
+          `&select=${select}&order=created_at.desc&limit=1`;
+        res = await fetch(anyUrl, { headers });
+        data = res.ok ? await res.json() : [];
+        row = Array.isArray(data) ? data[0] : null;
+        if (row) {
+          console.warn('[carType] Sin vehículo is_active=true; usando el más reciente.');
+        }
+      }
+
+      if (row) {
         const fromServiceType = row?.service_type;
         const fromFeatures = row?.features?.carType;
         const raw = (fromServiceType && String(fromServiceType).trim())
@@ -333,8 +477,8 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
   const fetchReservations = useCallback(async () => {
     try {
       const headers = await getSupabaseAuthHeaders();
-      // Filtro explícito: SOLO reservas programadas
-      const url = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.reservation&status=eq.PENDING&order=booking_date.asc`;
+      // Programadas: en aplicacioncore booking_type = 'scheduled' (legacy: 'reservation')
+      const url = `${SUPABASE_URL}/rest/v1/bookings?booking_type=in.(scheduled,reservation)&status=eq.PENDING&order=booking_date.asc`;
       console.log('[RESERVAS] Trayendo reservas con filtro:', url);
       const res = await fetch(url, { headers });
       console.log(`📡 [RESERVAS] Response status: ${res.status}`);
@@ -342,6 +486,7 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         const errText = await res.text();
         console.warn('❌ [RESERVAS] Fetch status:', res.status, errText);
         setReservations([]);
+        emitAvailableCounts({ reservation: 0 });
         return;
       }
       const data = await res.json();
@@ -364,29 +509,97 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       }
       const currentIds = new Set<string>(list.map((it: any) => String(it.id)));
       const previous = seenReservationIdsRef.current;
-      if (previous) {
-        for (const it of list) {
-          if (!previous.has(String(it.id))) {
-            const pickup = it.pickup_address || 'punto desconocido';
-            const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
-            notifyNewBooking(
-              '📅 Nueva reserva programada',
-              `Recogida: ${pickup}${when}`,
-              { bookingId: it.id, bookingType: 'reservation' },
-            ).catch(() => {});
+      const isFirstScan = previous === null;
+      for (const it of list) {
+        const id = String(it.id);
+        const isNew = isFirstScan || !previous!.has(id);
+        if (!isNew) continue;
+        const pickup = it.pickup_address || 'punto desconocido';
+        const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
+        const distTxt = formatTripKmSuffix(it.distance);
+        // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
+        if (!isFirstScan) {
+          notifyNewBooking(
+            '📅 Nueva reserva programada',
+            `Recogida: ${pickup}${when}${distTxt}`,
+            { bookingId: it.id, bookingType: 'reservation' },
+          ).catch(() => {});
+        }
+        recordServiceNotice({
+          bookingId: id,
+          bookingType: 'reservation',
+          title: 'Nueva reserva programada',
+          body: `Recogida: ${pickup}${when}${distTxt}`,
+          pickup: it.pickup_address,
+          drop: it.drop_address,
+          reference: it.reference,
+          bookingSnapshot: it,
+        }).catch(() => {});
+      }
+
+      // Reservas que desaparecieron del PENDING → si otro las tomó, fantasma 3 min
+      const prevList = lastPendingReservationsRef.current;
+      const candidateIds = new Set<string>(prevList.map((p) => String(p.id)));
+      try {
+        const notices = await listServiceNotices();
+        for (const n of notices) {
+          if (n.bookingType === 'reservation') candidateIds.add(n.bookingId);
+        }
+      } catch {
+        // ignore
+      }
+      for (const id of candidateIds) {
+        if (currentIds.has(id)) continue;
+        try {
+          const detailUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${encodeURIComponent(id)}&select=*&limit=1`;
+          const dRes = await fetch(detailUrl, { headers });
+          if (!dRes.ok) continue;
+          const rows = await dRes.json();
+          const row = Array.isArray(rows) ? rows[0] : null;
+          if (!row) continue;
+          const st = String(row.status || '').toUpperCase();
+          const taken =
+            st === 'ACCEPTED' ||
+            st === 'ARRIVED' ||
+            st === 'STARTED' ||
+            st === 'IN_PROGRESS' ||
+            st === 'TRIP_STARTED' ||
+            Boolean(String(row.driver || row.driver_id || '').trim());
+          if (taken) {
+            await upsertTakenReservationGhost(row);
           }
+        } catch {
+          // ignore per-id
         }
       }
-      seenReservationIdsRef.current = currentIds;
 
+      const ghosts = await getTakenReservationGhosts();
+      setTakenGhosts(ghosts);
+      lastPendingReservationsRef.current = list;
+      seenReservationIdsRef.current = currentIds;
       setReservations(list);
+      emitAvailableCounts({ reservation: list.length });
     } catch (e) {
       console.error('❌ Fetch reservations error:', e);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [activeCarType]);
+  }, [activeCarType, emitAvailableCounts]);
+
+  // Cargar fantasmas al montar + ticker de cuenta regresiva
+  useEffect(() => {
+    getTakenReservationGhosts().then(setTakenGhosts).catch(() => {});
+    const tick = setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      setTakenGhosts((prev) => {
+        const alive = prev.filter((g) => g.expiresAt > now);
+        return alive.length === prev.length ? prev : alive;
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, []);
 
   /* ── Buscar servicios inmediatos disponibles ── */
   const searchImmediateServices = useCallback(async () => {
@@ -394,9 +607,15 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       setSearchingImmediate(true);
       const headers = await getSupabaseAuthHeaders();
       
-      // Traer inmediatos recientes y filtrar en cliente para evitar perder filas
-      // cuando driver/driver_id vienen null, vacíos o con formatos distintos.
-      const urlImmediates = `${SUPABASE_URL}/rest/v1/bookings?booking_type=eq.immediate&limit=1000&select=*&order=created_at.desc`;
+      // Solo disponibles (PENDING/NEW) — si pedimos todos, los COMPLETE llenan el limit
+      // y un PENDING reciente puede no entrar o quedar oculto al filtrar.
+      const urlImmediates =
+        `${SUPABASE_URL}/rest/v1/bookings` +
+        `?booking_type=eq.immediate` +
+        `&status=in.(PENDING,NEW)` +
+        `&order=created_at.desc` +
+        `&limit=100` +
+        `&select=*`;
       
       console.log('🟢 [INMEDIATOS] Query:', urlImmediates);
       
@@ -404,16 +623,25 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       console.log(`📡 [INMEDIATOS] Response status: ${res.status}`);
       
       const allData = res.ok ? await res.json() : [];
+      if (!res.ok) {
+        console.warn('❌ [INMEDIATOS] body:', await res.text().catch(() => ''));
+      }
       console.log(`📊 [INMEDIATOS] RAW data count: ${Array.isArray(allData) ? allData.length : 'NOT ARRAY'}`);
       
-      // Log EXACTAMENTE qué status tienen los primeros 15 items
       if (Array.isArray(allData) && allData.length > 0) {
-        console.log('🔍 [INMEDIATOS] Primeros 15 items:', allData.slice(0, 15).map((x: any) => ({ ref: x.reference, status: x.status, id: x.id })));
+        console.log('🔍 [INMEDIATOS] items:', allData.slice(0, 15).map((x: any) => ({
+          ref: x.reference,
+          status: x.status,
+          car_type: x.car_type,
+          driver: x.driver || x.driver_id || null,
+          pickup: x.pickup_address?.slice?.(0, 40),
+        })));
       }
       
       if (!Array.isArray(allData)) {
         console.log('⚠️ ERROR: allData no es array:', typeof allData);
         setImmediateServices([]);
+        emitAvailableCounts({ immediate: 0 });
         return;
       }
       
@@ -422,8 +650,14 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       if (!driverCarType) {
         console.log('[INMEDIATOS] Sin vehículo activo: no se muestran servicios.');
         setImmediateServices([]);
+        emitAvailableCounts({ immediate: 0 });
         return;
       }
+
+      let droppedAssigned = 0;
+      let droppedCarType = 0;
+      let droppedDistance = 0;
+      let droppedNoCoords = 0;
 
       const filtered = allData.filter((item: any) => {
         const status = String(item?.status || '').toUpperCase();
@@ -431,15 +665,27 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         if (!isAvailableStatus) return false;
 
         const hasAssignedDriver = Boolean(String(item?.driver || '').trim()) || Boolean(String(item?.driver_id || '').trim());
-        if (hasAssignedDriver) return false;
+        if (hasAssignedDriver) {
+          droppedAssigned += 1;
+          return false;
+        }
 
         const bookingCarType = normalizeCarType(item?.car_type || item?.carType);
-        if (bookingCarType !== driverCarType) return false;
+        if (bookingCarType !== driverCarType) {
+          droppedCarType += 1;
+          return false;
+        }
 
-        // Filtro estricto: si no podemos verificar la distancia, NO mostramos.
-        // Los inmediatos solo deben aparecer si el pickup está a <= 3km.
         const pickupCoords = extractLatLng(item);
-        if (!pickupCoords || !driverCoords) return false;
+        // Sin GPS del conductor aún: no descartar por distancia (re-filtra al llegar coords).
+        if (!driverCoords) {
+          if (!pickupCoords) droppedNoCoords += 1;
+          return true;
+        }
+        if (!pickupCoords) {
+          droppedNoCoords += 1;
+          return false;
+        }
 
         const distanceKm = getDistanceKm(
           driverCoords.lat,
@@ -449,33 +695,55 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         );
 
         item.distance_to_pickup_km = distanceKm;
-        return distanceKm <= rangeKm;
+        if (distanceKm > rangeKm) {
+          droppedDistance += 1;
+          return false;
+        }
+        return true;
       });
       
-      const newCount = filtered.filter((item: any) => item.status === 'NEW').length;
-      const pendingCount = filtered.filter((item: any) => item.status === 'PENDING').length;
+      const newCount = filtered.filter((item: any) => String(item.status).toUpperCase() === 'NEW').length;
+      const pendingCount = filtered.filter((item: any) => String(item.status).toUpperCase() === 'PENDING').length;
       
-      console.log(`✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}, rangeKm: ${rangeKm}, driverCoords: ${driverCoords ? `${driverCoords.lat},${driverCoords.lng}` : 'N/A'}`);
+      console.log(
+        `✅ [INMEDIATOS] Tras filtrar: NEW: ${newCount}, PENDING: ${pendingCount}, Total: ${filtered.length}` +
+        `, rangeKm: ${rangeKm}, driverCarType: ${driverCarType}` +
+        `, driverCoords: ${driverCoords ? `${driverCoords.lat},${driverCoords.lng}` : 'N/A'}` +
+        `, dropped={assigned:${droppedAssigned}, carType:${droppedCarType}, noCoords:${droppedNoCoords}, distance:${droppedDistance}}`,
+      );
 
-      // Notificar nuevos inmediatos (que no estaban en la lista anterior)
+      // Notificar / registrar inmediatos (primera carga también llena el modal de campanita)
       const currentIds = new Set<string>(filtered.map((it: any) => String(it.id)));
       const previous = seenImmediateIdsRef.current;
-      if (previous) {
-        for (const it of filtered as any[]) {
-          if (!previous.has(String(it.id))) {
-            const pickup = it.pickup_address || 'punto desconocido';
-            const distTxt = typeof it.distance_to_pickup_km === 'number'
-              ? ` · ${it.distance_to_pickup_km.toFixed(1)} km`
-              : '';
-            notifyNewBooking(
-              '⚡ Nuevo servicio inmediato',
-              `Recogida: ${pickup}${distTxt}`,
-              { bookingId: it.id, bookingType: 'immediate' },
-            ).catch(() => {});
-          }
+      const isFirstScan = previous === null;
+      for (const it of filtered as any[]) {
+        const id = String(it.id);
+        const isNew = isFirstScan || !previous!.has(id);
+        if (!isNew) continue;
+        const pickup = it.pickup_address || 'punto desconocido';
+        // Km del viaje (estimate), no distancia conductor→recogida
+        const distTxt = formatTripKmSuffix(it.distance);
+        if (!isFirstScan) {
+          notifyNewBooking(
+            '⚡ Nuevo servicio inmediato',
+            `Recogida: ${pickup}${distTxt}`,
+            { bookingId: it.id, bookingType: 'immediate' },
+          ).catch(() => {});
         }
+        recordServiceNotice({
+          bookingId: id,
+          bookingType: 'immediate',
+          title: 'Nuevo servicio inmediato',
+          body: `Recogida: ${pickup}${distTxt}`,
+          pickup: it.pickup_address,
+          drop: it.drop_address,
+          reference: it.reference,
+          bookingSnapshot: it,
+        }).catch(() => {});
+      }
 
-        // Detectar servicios que desaparecieron porque el cliente canceló
+      // Detectar servicios que desaparecieron porque el cliente canceló
+      if (previous) {
         for (const prevId of previous) {
           if (!currentIds.has(prevId) && !notifiedCancelledIdsRef.current.has(prevId)) {
             const disappeared = allData.find((b: any) => String(b.id) === prevId);
@@ -499,13 +767,15 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       seenImmediateIdsRef.current = currentIds;
 
       setImmediateServices(filtered);
+      emitAvailableCounts({ immediate: filtered.length });
     } catch (e) {
       console.error('❌ Search immediate services error:', e);
       setImmediateServices([]);
+      emitAvailableCounts({ immediate: 0 });
     } finally {
       setSearchingImmediate(false);
     }
-  }, [driverCoords, rangeKm, activeCarType]);
+  }, [driverCoords, rangeKm, activeCarType, emitAvailableCounts]);
 
   useEffect(() => {
     fetchReservations();
@@ -514,12 +784,18 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
     return () => clearInterval(interval);
   }, [fetchReservations]);
 
-  /* ── Auto-refresh inmediatos cada 10 segundos (siempre, no solo en su tab) ── */
+  /* ── Auto-refresh inmediatos cada 10 segundos (solo con GO activo) ── */
   useEffect(() => {
+    if (!driverOnline) {
+      setImmediateServices([]);
+      emitAvailableCounts({ immediate: 0 });
+      setSearchingImmediate(false);
+      return;
+    }
     searchImmediateServices();
     const interval = setInterval(searchImmediateServices, 10000);
     return () => clearInterval(interval);
-  }, [searchImmediateServices]);
+  }, [driverOnline, searchImmediateServices, emitAvailableCounts]);
 
   const handleAccept = async (reservation: Reservation) => {
     const isImmmediate = reservation.booking_type === 'immediate';
@@ -550,7 +826,7 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       showAlert(
         'warning',
         'Categoría no coincide',
-        `Este ${isImmmediate ? 'servicio' : 'reserva'} es para la categoría "${reservation.car_type}". Tu vehículo activo es de la categoría "${activeCarType}".`,
+        `Este ${isImmmediate ? 'servicio' : 'reserva'} es para la categoría "${toCanonicalCarType(reservation.car_type) || reservation.car_type}". Tu vehículo activo es de la categoría "${activeCarTypeLabel || activeCarType}".`,
       );
       return;
     }
@@ -579,8 +855,9 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
       return;
     }
 
-    const observationText = reservation.observations && String(reservation.observations).trim()
-      ? `\n\nObservación del cliente: ${String(reservation.observations).trim()}`
+    const cleanObs = stripRecorridoTag(String(reservation.observations || ''));
+    const observationText = cleanObs
+      ? `\n\nObservación del cliente: ${cleanObs}`
       : '';
 
     showAlert('confirm',
@@ -620,6 +897,21 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         if (isImmediate) {
           searchImmediateServices();
         } else {
+          // Mantener visible 3 min como “tomada” (solo reservas)
+          try {
+            const fullUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${encodeURIComponent(reservation.id)}&select=*&limit=1`;
+            const fullRes = await fetch(fullUrl, { headers });
+            if (fullRes.ok) {
+              const rows = await fullRes.json();
+              const row = Array.isArray(rows) ? rows[0] : null;
+              if (row) {
+                const ghosts = await upsertTakenReservationGhost(row);
+                setTakenGhosts(ghosts);
+              }
+            }
+          } catch {
+            // ignore
+          }
           fetchReservations();
         }
         return;
@@ -647,21 +939,21 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         user?.vehicleNumber ||
         null;
 
-      // Update booking to ACCEPTED with driver info
+      // Solo columnas reales de public.bookings (aplicacioncore).
+      // No enviar: driver_token, customer_token, driver_status, customer_status.
+      // NO setear driver_arrived_time aquí — eso es solo al "Confirmar llegada".
       const updateBody = {
         status: 'ACCEPTED',
         driver: driverId,
         driver_id: driverId,
         driver_name: driverName,
         driver_contact: user?.mobile || '',
-        driver_token: user?.pushToken || user?.push_token || '',
         plate_number: resolvedPlate,
         vehicle_number: resolvedPlate,
         vehicle_make: car.make || car.vehicle_make || null,
         vehicle_model: car.model || car.vehicle_model || null,
         vehicle_color: car.color || car.vehicle_color || null,
         car_model: car.model || car.vehicle_model || null,
-        driver_arrived_time: new Date().toISOString(),
       };
 
       const updateUrl = `${SUPABASE_URL}/rest/v1/bookings?id=eq.${reservation.id}`; // Sin filtro de status en URL
@@ -777,108 +1069,214 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
     return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
   };
 
+  const resolveCustomerPhoto = useCallback((item: any) => {
+    const id = String(item?.customer_id || item?.customer || '').trim();
+    if (id && customerPhotos[id]) return customerPhotos[id];
+    const direct = String(item?.customer_image || item?.profile_image || '').trim();
+    if (direct.startsWith('http')) return direct;
+    return null;
+  }, [customerPhotos]);
+
+  // Enrich customer profile photos for visible cards
+  useEffect(() => {
+    let cancelled = false;
+    const list = activeTab === 'immediate' ? immediateServices : reservations;
+    const ids = Array.from(
+      new Set(
+        list
+          .map((it: any) => String(it?.customer_id || it?.customer || '').trim())
+          .filter(Boolean)
+          .filter((id) => !customerPhotos[id]),
+      ),
+    ).slice(0, 20);
+    if (ids.length === 0) return;
+
+    (async () => {
+      try {
+        const headers = await getSupabaseAuthHeaders();
+        const next: Record<string, string> = {};
+        await Promise.all(
+          ids.map(async (id) => {
+            try {
+              const url =
+                `${SUPABASE_URL}/rest/v1/users` +
+                `?or=(id.eq.${encodeURIComponent(id)},auth_id.eq.${encodeURIComponent(id)})` +
+                `&select=id,auth_id,profile_image&limit=1`;
+              const res = await fetch(url, { headers });
+              if (!res.ok) return;
+              const rows = await res.json();
+              const u = Array.isArray(rows) ? rows[0] : null;
+              const photo = String(u?.profile_image || '').trim();
+              if (photo.startsWith('http')) {
+                next[id] = photo;
+                if (u?.id) next[String(u.id)] = photo;
+                if (u?.auth_id) next[String(u.auth_id)] = photo;
+              }
+            } catch {}
+          }),
+        );
+        if (!cancelled && Object.keys(next).length > 0) {
+          setCustomerPhotos((prev) => ({ ...prev, ...next }));
+        }
+      } catch {}
+    })();
+
+    return () => { cancelled = true; };
+  }, [activeTab, immediateServices, reservations]);
+
+  const openServiceDetail = useCallback(async (item: any) => {
+    setDetailItem(item);
+    setDetailRouteCoords([]);
+    setDetailEndpoints(null);
+    const oLat = Number(item?.pickup_lat ?? item?.pickup?.lat);
+    const oLng = Number(item?.pickup_lng ?? item?.pickup?.lng);
+    const dLat = Number(item?.drop_lat ?? item?.drop?.lat);
+    const dLng = Number(item?.drop_lng ?? item?.drop?.lng);
+    if (!Number.isFinite(oLat) || !Number.isFinite(oLng) || !Number.isFinite(dLat) || !Number.isFinite(dLng)) {
+      return;
+    }
+    const start = { latitude: oLat, longitude: oLng };
+    const end = { latitude: dLat, longitude: dLng };
+    setDetailRouteLoading(true);
+
+    const applyRoute = (coords: LatLng[]) => {
+      if (coords.length < 2) return;
+      setDetailRouteCoords(coords);
+      setDetailEndpoints({
+        start: coords[0],
+        end: coords[coords.length - 1],
+      });
+      setDetailTipRadius(detailTipRadiusMeters(coords));
+      setTimeout(() => {
+        detailMapRef.current?.fitToCoordinates(coords, {
+          edgePadding: { top: 28, right: 28, bottom: 28, left: 28 },
+          animated: false,
+        });
+      }, 250);
+    };
+
+    try {
+      if (API_KEY) {
+        const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${oLat},${oLng}&destination=${dLat},${dLng}&key=${API_KEY}&language=es`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.routes?.[0]?.overview_polyline?.points) {
+          applyRoute(decodePolyline(data.routes[0].overview_polyline.points));
+          return;
+        }
+      }
+      applyRoute([start, end]);
+    } catch {
+      applyRoute([start, end]);
+    } finally {
+      setDetailRouteLoading(false);
+    }
+  }, []);
+
+  const closeServiceDetail = () => {
+    setDetailItem(null);
+    setDetailRouteCoords([]);
+    setDetailEndpoints(null);
+  };
+
+  // Abrir el mismo "Detalle del servicio" que el botón Ver (p. ej. desde campanita)
+  useEffect(() => {
+    if (!pendingDetailBooking) return;
+    const booking = pendingDetailBooking;
+    const type = String(booking?.booking_type || booking?.__noticeType || '').toLowerCase();
+    const tab: 'reservations' | 'immediate' | 'active' = type.includes('reserv')
+      ? 'reservations'
+      : 'immediate';
+    setActiveTab(tab);
+    openServiceDetail(booking);
+    onPendingDetailConsumed?.();
+  }, [pendingDetailBooking, openServiceDetail, onPendingDetailConsumed]);
+
+  const activeCarTypeLabel = useMemo(
+    () => (activeCarType ? toCanonicalCarType(activeCarType) || activeCarType : null),
+    [activeCarType],
+  );
+
   const renderItem = ({ item, index }: { item: any; index: number }) => {
     try {
-    console.log(`🎨 [RENDER] item #${index}: ref=${item?.reference}, status=${item?.status}, keys=${Object.keys(item || {}).length}`);
+    const fare = getBookingFareRange(item);
+    const photo = resolveCustomerPhoto(item);
+    const tripLabel = resolveTripTypeLabel(item);
+    const distKm = parseFloat(String(item.distance || 0));
+    const durationMin = Number(item.duration || 0);
+    const isTaken = !!item.__taken;
+    const msLeft = isTaken ? Math.max(0, Number(item.__expiresAt || 0) - nowTick) : 0;
+
     return (
-    <Animatable.View animation="fadeInUp" duration={450} delay={index * 60} useNativeDriver>
-      <View style={s.card}>
-        <View style={s.cardGlow} />
+    <Animatable.View animation="fadeInUp" duration={400} delay={index * 40} useNativeDriver>
+      <View style={[s.card, isTaken && s.cardTaken]}>
+        <View style={s.cardTop}>
+          <View style={s.cardMain}>
+            <View style={s.clientRow}>
+              {photo ? (
+                <Image source={{ uri: photo }} style={[s.avatarImg, isTaken && { opacity: 0.55 }]} />
+              ) : (
+                <View style={[s.avatarFallback, isTaken && { opacity: 0.55 }]}>
+                  <Ionicons name="person" size={14} color="#00E5FF" />
+                </View>
+              )}
+              <View style={s.clientMeta}>
+                <Text style={s.clientName} numberOfLines={1}>{item.customer_name || 'Cliente'}</Text>
+                <Text style={s.tripTypeTxt} numberOfLines={1}>{tripLabel}</Text>
+              </View>
+            </View>
 
-        {/* Reference & Booking Type Badge */}
-        <View style={s.cardHeader}>
-          <View style={s.refBadge}>
-            <Text style={s.refTxt}>{item.reference}</Text>
+            <View style={s.routeBlock}>
+              <View style={s.routeRow}>
+                <View style={s.dotStart} />
+                <Text style={s.routeAddr} numberOfLines={1}>{item.pickup_address || 'Origen'}</Text>
+              </View>
+              <View style={s.routeLine} />
+              <View style={s.routeRow}>
+                <View style={s.dotEnd} />
+                <Text style={s.routeAddr} numberOfLines={1}>{item.drop_address || 'Destino'}</Text>
+              </View>
+            </View>
+
+            {isTaken ? (
+              <View style={s.takenBanner}>
+                <Ionicons name="lock-closed" size={12} color="#FF8A80" />
+                <Text style={s.takenBannerTxt} numberOfLines={1}>
+                  Ya la tomó otro conductor · {formatCountdown(msLeft)}
+                </Text>
+              </View>
+            ) : (
+              <View style={s.metricsRow}>
+                <View style={s.pricePill}>
+                  <Text style={s.pricePillTxt}>$ {moneyFmt(fare.min)}</Text>
+                  {!fare.isComplete && fare.max !== fare.min ? (
+                    <>
+                      <Text style={s.pricePillSep}>–</Text>
+                      <Text style={s.pricePillTxt}>$ {moneyFmt(fare.max)}</Text>
+                    </>
+                  ) : null}
+                </View>
+                <Text style={s.metricTxt}>{distKm.toFixed(1)} km</Text>
+                <Text style={s.metricDot}>·</Text>
+                <Text style={s.metricTxt}>{durationMin || 0} min</Text>
+                {item.booking_date ? (
+                  <>
+                    <Text style={s.metricDot}>·</Text>
+                    <Text style={s.metricTxt}>{formatTime(item.booking_date)}</Text>
+                  </>
+                ) : null}
+              </View>
+            )}
           </View>
-          <View style={[s.typeBadge, item.booking_type === 'immediate' && s.typeBadgeImmediate]}>
-            <Ionicons name={item.booking_type === 'immediate' ? 'flash' : 'calendar'} size={14} color="#051A26" />
-            <Text style={s.typeTxt}>{item.booking_type === 'immediate' ? 'Inmediato' : 'Reserva'}</Text>
-          </View>
-          {item.trip_type ? (
-          <View style={[s.typeBadge, item.trip_type === 'Ida y Vuelta' && s.typeBadgeRound]}>
-            <Ionicons name={item.trip_type === 'Ida' ? 'arrow-forward-circle' : 'repeat'} size={14} color="#051A26" />
-            <Text style={s.typeTxt}>{item.trip_type}</Text>
-          </View>
-          ) : null}
+
+          <TouchableOpacity
+            style={[s.verBtn, isTaken && s.verBtnTaken]}
+            onPress={() => openServiceDetail(item)}
+            activeOpacity={0.85}
+          >
+            <Text style={[s.verBtnTxt, isTaken && s.verBtnTxtTaken]}>Ver</Text>
+          </TouchableOpacity>
         </View>
-
-        {/* Client info */}
-        <View style={s.clientRow}>
-          <Ionicons name="person" size={16} color="#00E5FF" />
-          <Text style={s.clientName}>{item.customer_name || 'Cliente'}</Text>
-        </View>
-
-        {/* Route */}
-        <View style={s.routeBlock}>
-          <View style={s.routeRow}>
-            <View style={s.dotGreen} />
-            <Text style={s.routeAddr} numberOfLines={1}>{item.pickup_address || 'Origen'}</Text>
-          </View>
-          <View style={s.routeLine} />
-          <View style={s.routeRow}>
-            <View style={s.dotRed} />
-            <Text style={s.routeAddr} numberOfLines={1}>{item.drop_address || 'Destino'}</Text>
-          </View>
-        </View>
-
-        {/* Date & Time */}
-        {item.booking_date ? (
-        <View style={s.dateTimeRow}>
-          <View style={s.dtItem}>
-            <Ionicons name="calendar-outline" size={14} color="#00E5FF" />
-            <Text style={s.dtTxt}>{formatDate(item.booking_date)}</Text>
-          </View>
-          <View style={s.dtItem}>
-            <Ionicons name="time-outline" size={14} color="#00E5FF" />
-            <Text style={s.dtTxt}>{formatTime(item.booking_date)}</Text>
-          </View>
-        </View>
-        ) : null}
-
-        {/* Observations (nota del cliente) */}
-        {item.observations && String(item.observations).trim() ? (
-        <View style={s.obsBlock}>
-          <View style={s.obsHeader}>
-            <Ionicons name="chatbubble-ellipses-outline" size={14} color="#00E5FF" />
-            <Text style={s.obsLabel}>Observación del cliente</Text>
-          </View>
-          <Text style={s.obsText}>{String(item.observations).trim()}</Text>
-        </View>
-        ) : null}
-
-        {/* Stats */}
-        <View style={s.statsRow}>
-          <View style={s.stat}>
-            <Text style={s.statLabel}>Valor</Text>
-            <Text style={s.statValue}>$ {fmtMoney(item.driver_share)}</Text>
-            <Text style={s.statValue}>$ {fmtMoney(item.estimate || item.price)}</Text>
-          </View>
-          <View style={s.stat}>
-            <Text style={s.statLabel}>Dist.</Text>
-            <Text style={s.statValue}>{parseFloat(String(item.distance || 0)).toFixed(2)} km</Text>
-          </View>
-          <View style={s.stat}>
-            <Text style={s.statLabel}>Tiempo</Text>
-            <Text style={s.statValue}>{item.duration || 0} min</Text>
-          </View>
-        </View>
-
-        {/* Accept button */}
-        <TouchableOpacity
-          style={[s.acceptBtn, accepting === item.id && { opacity: 0.6 }]}
-          onPress={() => handleAccept(item)}
-          disabled={accepting === item.id}
-          activeOpacity={0.85}
-        >
-          {accepting === item.id ? (
-            <ActivityIndicator color="#051A26" size="small" />
-          ) : (
-            <>
-              <Ionicons name="checkmark-circle" size={20} color="#051A26" />
-              <Text style={s.acceptTxt}>{item.booking_type === 'immediate' ? 'Aceptar Servicio' : 'Aceptar Reserva'}</Text>
-            </>
-          )}
-        </TouchableOpacity>
       </View>
     </Animatable.View>
     );
@@ -901,15 +1299,46 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         color="rgba(0,229,255,0.3)"
       />
       <Text style={s.emptyTitle}>
-        {activeCarType ? 'No hay reservas disponibles' : 'Activa un vehículo'}
+        {activeCarTypeLabel ? 'No hay reservas disponibles' : 'Activa un vehículo'}
       </Text>
       <Text style={s.emptySub}>
-        {activeCarType
-          ? `Solo se muestran reservas de tu categoría activa (${activeCarType}).`
+        {activeCarTypeLabel
+          ? `Solo se muestran reservas de tu categoría activa (${activeCarTypeLabel}).`
           : 'Debes activar un vehículo en "Mis Vehículos" para ver reservas de tu categoría.'}
       </Text>
     </View>
   );
+
+  const pinnedActiveTrip =
+    activeTripIsDriver && activeTab === 'reservations' ? activeReservation : null;
+
+  const listData =
+    activeTab === 'reservations'
+      ? [
+          ...reservations.map((r) => ({ ...r, __taken: false as const, __expiresAt: 0 })),
+          ...takenGhosts
+            .filter((g) => {
+              if (g.expiresAt <= nowTick) return false;
+              const bt = String((g.booking as any)?.booking_type || '').toLowerCase();
+              // Solo reservas permanecen 3 min; inmediatos no entran aquí
+              return !bt || bt.includes('reserv');
+            })
+            .map((g) => ({
+              ...(g.booking as any),
+              __taken: true as const,
+              __expiresAt: g.expiresAt,
+            })),
+        ]
+      : activeTab === 'immediate'
+        ? immediateServices
+        : [];
+
+  const headerTitle =
+    activeTab === 'reservations'
+      ? 'Reservas Disponibles'
+      : activeTab === 'immediate'
+        ? 'Servicios Inmediatos'
+        : 'Viajes en curso';
 
   return (
     <View style={[s.root, embedded && s.rootEmbedded]}>
@@ -918,34 +1347,52 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         <View style={s.bgOverlay} />
       </View>
 
-      <View style={[s.header, embedded && s.headerEmbedded, { paddingTop: topPad }]}> 
-        {embedded ? (
-          <View style={s.headerSpacer} />
-        ) : (
+      <View style={[s.header, embedded && s.headerEmbedded, { paddingTop: topPad }]}>
+        {!embedded ? (
           <TouchableOpacity style={s.backBtn} onPress={() => nav.goBack()} activeOpacity={0.75}>
             <Ionicons name="chevron-back" size={24} color="#FFF" />
           </TouchableOpacity>
-        )}
-        <Text style={s.headerTitle}>
-          {activeTab === 'reservations' ? 'Reservas Disponibles' : 'Servicios Inmediatos'}
-        </Text>
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          {activeTab === 'immediate' && (
-            <TouchableOpacity 
-              style={[s.refreshBtn, searchingImmediate && { opacity: 0.6 }]}
-              onPress={searchImmediateServices}
-              disabled={searchingImmediate}
-              activeOpacity={0.75}
+        ) : null}
+        <View style={[s.headerTitleWrap, embedded && s.headerTitleWrapEmbedded]}>
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            {...(!embedded ? { adjustsFontSizeToFit: true, minimumFontScale: 0.85 } : {})}
+            style={[s.headerTitle, embedded && s.headerTitleEmbedded]}
+          >
+            {headerTitle}
+          </Text>
+        </View>
+        <View style={s.headerActions}>
+          {embedded && driverOnline && (
+            <TouchableOpacity
+              style={s.disconnectSwitch}
+              activeOpacity={0.85}
+              onPress={() => invokeDriverGoDeactivate()}
             >
-              {searchingImmediate ? (
-                <ActivityIndicator color="#00E5FF" size="small" />
-              ) : (
-                <Text style={{ fontSize: 12, fontWeight: '700', color: '#00E5FF' }}>GO</Text>
-              )}
+              <Text {...FIXED_TEXT_PROPS} style={s.disconnectSwitchLabel}>Desconectar</Text>
+              <View style={s.disconnectSwitchKnob}>
+                <Image
+                  source={require('@/assets/images/logo-Preview-Photoroom.png')}
+                  style={s.disconnectSwitchLogo}
+                  resizeMode="contain"
+                />
+              </View>
             </TouchableOpacity>
           )}
-          <TouchableOpacity 
-            style={s.refreshBtn} 
+          {activeTab === 'immediate' && !driverOnline && (
+            <TouchableOpacity
+              style={s.goToggleBtn}
+              onPress={() => invokeDriverGoActivate()}
+              activeOpacity={0.75}
+            >
+              <Text {...FIXED_TEXT_PROPS} style={s.goToggleText}>GO</Text>
+            </TouchableOpacity>
+          )}
+          {(activeTab === 'reservations' || (activeTab === 'immediate' && driverOnline)) && (
+          <TouchableOpacity
+            style={s.refreshBtn}
             onPress={() => {
               setRefreshing(true);
               if (activeTab === 'reservations') {
@@ -953,37 +1400,81 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
               } else {
                 searchImmediateServices();
               }
-            }} 
+            }}
             activeOpacity={0.75}
           >
             <Ionicons name="refresh" size={20} color="#00E5FF" />
           </TouchableOpacity>
+          )}
         </View>
       </View>
 
-      {/* Tab selector */}
-      <View style={s.tabContainer}>
-        <TouchableOpacity 
+      {/* Tab selector compacto */}
+      <View style={[s.tabContainer, embedded && s.tabContainerEmbedded]}>
+        <TouchableOpacity
           style={[s.tab, activeTab === 'reservations' && s.tabActive]}
           onPress={() => {
             setActiveTab('reservations');
             setRefreshing(false);
           }}
         >
-          <Ionicons name="calendar-outline" size={16} color={activeTab === 'reservations' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
-          <Text style={[s.tabTxt, activeTab === 'reservations' && s.tabTxtActive]}>Reservas</Text>
+          <Ionicons name="calendar-outline" size={14} color={activeTab === 'reservations' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'reservations' && s.tabTxtActive]}
+          >
+            Reservas
+          </Text>
+          {reservations.length > 0 ? (
+            <View style={[s.tabBadge, reservations.length > 99 && s.tabBadgeWide]}>
+              <Text {...FIXED_TEXT_PROPS} style={s.tabBadgeTxt} numberOfLines={1}>
+                {reservations.length}
+              </Text>
+            </View>
+          ) : null}
         </TouchableOpacity>
-        
-        <TouchableOpacity 
+
+        <TouchableOpacity
           style={[s.tab, activeTab === 'immediate' && s.tabActive]}
           onPress={() => {
             setActiveTab('immediate');
-            searchImmediateServices();
+            if (driverOnline) {
+              searchImmediateServices();
+            }
           }}
         >
-          <Ionicons name="flash-outline" size={16} color={activeTab === 'immediate' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
-          <Text style={[s.tabTxt, activeTab === 'immediate' && s.tabTxtActive]}>
-            Inmediatos ({rangeKm}km)
+          <Ionicons name="flash-outline" size={14} color={activeTab === 'immediate' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'immediate' && s.tabTxtActive]}
+          >
+            Inmediatos
+          </Text>
+          {immediateServices.length > 0 ? (
+            <View style={[s.tabBadge, immediateServices.length > 99 && s.tabBadgeWide]}>
+              <Text {...FIXED_TEXT_PROPS} style={s.tabBadgeTxt} numberOfLines={1}>
+                {immediateServices.length}
+              </Text>
+            </View>
+          ) : null}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[s.tab, activeTab === 'active' && s.tabActive]}
+          onPress={() => {
+            setActiveTab('active');
+            setRefreshing(false);
+          }}
+        >
+          <Ionicons name="navigate-circle-outline" size={14} color={activeTab === 'active' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+          <Text
+            {...FIXED_TEXT_PROPS}
+            numberOfLines={1}
+            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'active' && s.tabTxtActive]}
+          >
+            En curso{activeTrips.length > 0 ? ` (${activeTrips.length})` : ''}
           </Text>
         </TouchableOpacity>
       </View>
@@ -993,34 +1484,86 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
           <ActivityIndicator size="large" color="#00E5FF" />
           <Text style={s.loadingTxt}>Cargando reservas...</Text>
         </View>
+      ) : activeTab === 'active' ? (
+        <FlatList
+          data={activeTripIsDriver ? activeTrips : []}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+            <ActiveTripBannerCard
+              booking={item}
+              isDriver
+              stackNavigation={nav}
+              compact
+            />
+          )}
+          contentContainerStyle={[s.list, { paddingBottom: embedded ? 18 : insets.bottom + 30 }]}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <View style={s.emptyWrap}>
+              <Ionicons name="navigate-circle-outline" size={52} color="rgba(0,229,255,0.3)" />
+              <Text style={s.emptyTitle}>Sin viajes en curso</Text>
+              <Text style={s.emptySub}>
+                Aquí verás tus inmediatos y reservas activas.
+              </Text>
+            </View>
+          }
+        />
       ) : (
         <FlatList
-          data={activeTab === 'reservations' ? reservations : immediateServices}
+          data={listData}
           keyExtractor={item => item.id}
           renderItem={renderItem}
           contentContainerStyle={[s.list, { paddingBottom: embedded ? 18 : insets.bottom + 30 }]}
           showsVerticalScrollIndicator={false}
+          ListHeaderComponent={
+            pinnedActiveTrip ? (
+              <ActiveTripBannerCard
+                booking={pinnedActiveTrip}
+                isDriver
+                stackNavigation={nav}
+                compact
+              />
+            ) : null
+          }
           ListEmptyComponent={
-            activeTab === 'reservations' ? EmptyState : (
+            pinnedActiveTrip ? (
+              <View style={s.emptyWrapPinned}>
+                <Text style={s.emptySubPinned}>
+                  No hay más reservas disponibles.
+                </Text>
+              </View>
+            ) : activeTab === 'reservations' ? EmptyState : (
               <View style={s.emptyWrap}>
                 <Ionicons
-                  name={!activeCarType ? 'car-outline' : locationDenied ? 'location-outline' : 'flash-outline'}
+                  name={
+                    !driverOnline
+                      ? 'flash-outline'
+                      : !activeCarType
+                        ? 'car-outline'
+                        : locationDenied
+                          ? 'location-outline'
+                          : 'flash-outline'
+                  }
                   size={60}
                   color="rgba(0,229,255,0.3)"
                 />
                 <Text style={s.emptyTitle}>
-                  {!activeCarType
-                    ? 'Activa un vehículo'
-                    : locationDenied
-                      ? 'Activa la ubicación'
-                      : 'No hay servicios inmediatos cerca'}
+                  {!driverOnline
+                    ? 'Inicia GO para buscar'
+                    : !activeCarTypeLabel
+                      ? 'Activa un vehículo'
+                      : locationDenied
+                        ? 'Activa la ubicación'
+                        : 'No hay servicios inmediatos cerca'}
                 </Text>
                 <Text style={s.emptySub}>
-                  {!activeCarType
-                    ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
-                    : locationDenied
-                      ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
-                      : `Solo servicios a menos de ${rangeKm} km y de tu categoría (${activeCarType}).`}
+                  {!driverOnline
+                    ? 'Conductor desconectado, activa GO para buscar servicios inmediatos.'
+                    : !activeCarTypeLabel
+                      ? 'Debes activar un vehículo en "Mis Vehículos" para ver servicios de tu categoría.'
+                      : locationDenied
+                        ? 'Necesitamos tu ubicación para mostrarte servicios a menos de 3 km.'
+                        : `Solo servicios nuevos a menos de ${rangeKm} km y de tu categoría (${activeCarTypeLabel}).`}
                 </Text>
               </View>
             )
@@ -1051,6 +1594,237 @@ const DriverReservationsScreen = ({ embedded = false }: DriverReservationsScreen
         buttons={alertButtons}
         onDismiss={() => setAlertVisible(false)}
       />
+
+      <Modal
+        visible={!!detailItem}
+        transparent
+        animationType="fade"
+        onRequestClose={closeServiceDetail}
+      >
+        <View style={s.modalOverlay}>
+          <View style={[s.modalSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+            <View style={s.modalHandle} />
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle}>Detalle del servicio</Text>
+              <TouchableOpacity style={s.modalClose} onPress={closeServiceDetail} activeOpacity={0.8}>
+                <Ionicons name="close" size={18} color="#FFF" />
+              </TouchableOpacity>
+            </View>
+
+            {detailItem ? (
+              <ScrollView
+                style={s.modalScroll}
+                contentContainerStyle={s.modalScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={s.modalBadges}>
+                  <View style={[s.modalBadge, detailItem.booking_type === 'immediate' && s.modalBadgeImm]}>
+                    <Ionicons
+                      name={detailItem.booking_type === 'immediate' ? 'flash' : 'calendar'}
+                      size={12}
+                      color="#051A26"
+                    />
+                    <Text style={s.modalBadgeTxt}>
+                      {detailItem.booking_type === 'immediate' ? 'Inmediato' : 'Reserva'}
+                    </Text>
+                  </View>
+                  {!!detailItem.reference && (
+                    <View style={s.modalBadgeCode}>
+                      <Text style={s.modalBadgeCodeTxt}>{detailItem.reference}</Text>
+                    </View>
+                  )}
+                  {!!resolveTripTypeLabel(detailItem) && (
+                    <View style={s.modalBadgeTrip}>
+                      <Text style={s.modalBadgeTripTxt}>{resolveTripTypeLabel(detailItem)}</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={s.modalClientRow}>
+                  {resolveCustomerPhoto(detailItem) ? (
+                    <Image source={{ uri: resolveCustomerPhoto(detailItem)! }} style={s.modalAvatar} />
+                  ) : (
+                    <View style={s.modalAvatarFallback}>
+                      <Ionicons name="person" size={20} color="#00E5FF" />
+                    </View>
+                  )}
+                  <Text style={s.modalClientName}>{detailItem.customer_name || 'Cliente'}</Text>
+                </View>
+
+                <View style={s.modalMapWrap}>
+                  {detailRouteLoading ? (
+                    <View style={s.modalMapLoading}>
+                      <ActivityIndicator color="#00E5FF" />
+                    </View>
+                  ) : detailRouteCoords.length > 1 && detailEndpoints ? (
+                    <MapView
+                      ref={detailMapRef}
+                      style={StyleSheet.absoluteFillObject}
+                      provider={PROVIDER_GOOGLE}
+                      customMapStyle={GOOGLE_MAPS_DARK_STYLE}
+                      scrollEnabled={false}
+                      zoomEnabled={false}
+                      pitchEnabled={false}
+                      rotateEnabled={false}
+                      toolbarEnabled={false}
+                      onMapReady={() => {
+                        detailMapRef.current?.fitToCoordinates(detailRouteCoords, {
+                          edgePadding: { top: 28, right: 28, bottom: 28, left: 28 },
+                          animated: false,
+                        });
+                      }}
+                      initialRegion={{
+                        latitude: (detailEndpoints.start.latitude + detailEndpoints.end.latitude) / 2,
+                        longitude: (detailEndpoints.start.longitude + detailEndpoints.end.longitude) / 2,
+                        latitudeDelta: Math.max(
+                          Math.abs(detailEndpoints.start.latitude - detailEndpoints.end.latitude) * 1.6,
+                          0.018,
+                        ),
+                        longitudeDelta: Math.max(
+                          Math.abs(detailEndpoints.start.longitude - detailEndpoints.end.longitude) * 1.6,
+                          0.018,
+                        ),
+                      }}
+                    >
+                      <Polyline
+                        coordinates={detailRouteCoords}
+                        strokeColor={ROUTE_LINE_BLUE}
+                        strokeWidth={7}
+                        lineJoin="round"
+                        lineCap="round"
+                        zIndex={1}
+                      />
+                      <Polyline
+                        coordinates={detailRouteCoords}
+                        strokeColor="#00E676"
+                        strokeWidth={4}
+                        lineJoin="round"
+                        lineCap="round"
+                        zIndex={2}
+                      />
+                      {/* Circles geográficos: centrados exactos en las puntas (sin offset de Marker View) */}
+                      <Circle
+                        center={detailEndpoints.start}
+                        radius={detailTipRadius}
+                        fillColor="#FFFFFF"
+                        strokeColor="#00E5FF"
+                        strokeWidth={2}
+                        zIndex={6}
+                      />
+                      <Circle
+                        center={detailEndpoints.end}
+                        radius={detailTipRadius}
+                        fillColor="#E91E63"
+                        strokeColor="#00E5FF"
+                        strokeWidth={2}
+                        zIndex={7}
+                      />
+                    </MapView>
+                  ) : (
+                    <View style={s.modalMapLoading}>
+                      <Ionicons name="map-outline" size={28} color="rgba(0,229,255,0.4)" />
+                    </View>
+                  )}
+                </View>
+
+                <View style={s.modalRouteBlock}>
+                  <View style={s.routeRow}>
+                    <View style={s.dotStart} />
+                    <Text style={s.modalRouteAddr}>{detailItem.pickup_address || 'Origen'}</Text>
+                  </View>
+                  <View style={s.routeLineTall} />
+                  <View style={s.routeRow}>
+                    <View style={s.dotEnd} />
+                    <Text style={s.modalRouteAddr}>{detailItem.drop_address || 'Destino'}</Text>
+                  </View>
+                </View>
+
+                {detailItem.booking_date ? (
+                  <View style={s.modalMetaRow}>
+                    <Ionicons name="calendar-outline" size={14} color="#00E5FF" />
+                    <Text style={s.modalMetaTxt}>{formatDate(detailItem.booking_date)}</Text>
+                    <Text style={s.metricDot}>·</Text>
+                    <Ionicons name="time-outline" size={14} color="#00E5FF" />
+                    <Text style={s.modalMetaTxt}>{formatTime(detailItem.booking_date)}</Text>
+                  </View>
+                ) : null}
+
+                {stripRecorridoTag(String(detailItem.observations || '')) ? (
+                  <View style={s.obsBlock}>
+                    <View style={s.obsHeader}>
+                      <Ionicons name="chatbubble-ellipses-outline" size={13} color="#00E5FF" />
+                      <Text style={s.obsLabel}>Observación del cliente</Text>
+                    </View>
+                    <Text style={s.obsText}>{stripRecorridoTag(String(detailItem.observations || ''))}</Text>
+                  </View>
+                ) : null}
+
+                <View style={s.modalStatsRow}>
+                  <View style={s.modalStat}>
+                    <Text style={s.statLabel}>Valor</Text>
+                    <Text style={s.modalStatValue} numberOfLines={1}>
+                      {formatBookingFareRange(detailItem)}
+                    </Text>
+                  </View>
+                  <View style={s.modalStat}>
+                    <Text style={s.statLabel}>Km</Text>
+                    <Text style={s.modalStatValue}>
+                      {parseFloat(String(detailItem.distance || 0)).toFixed(1)}
+                    </Text>
+                  </View>
+                  <View style={s.modalStat}>
+                    <Text style={s.statLabel}>Tiempo</Text>
+                    <Text style={s.modalStatValue}>{detailItem.duration || 0} min</Text>
+                  </View>
+                </View>
+              </ScrollView>
+            ) : null}
+
+            <View style={s.modalActions}>
+              {detailItem?.__taken ? (
+                <View style={s.takenDetailBox}>
+                  <Ionicons name="information-circle" size={18} color="#FF8A80" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.takenDetailTitle}>Ya la tomó otro conductor</Text>
+                  </View>
+                  <TouchableOpacity onPress={closeServiceDetail} style={s.takenCloseBtn}>
+                    <Text style={s.takenCloseTxt}>Cerrar</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <>
+                  <TouchableOpacity
+                    style={s.soltarBtn}
+                    onPress={closeServiceDetail}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={s.soltarBtnTxt}>Rechazar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[s.acceptBtnModal, accepting === detailItem?.id && { opacity: 0.6 }]}
+                    onPress={() => {
+                      if (!detailItem) return;
+                      const item = detailItem;
+                      closeServiceDetail();
+                      handleAccept(item);
+                    }}
+                    disabled={!!detailItem && accepting === detailItem.id}
+                    activeOpacity={0.85}
+                  >
+                    {detailItem && accepting === detailItem.id ? (
+                      <ActivityIndicator color="#051A26" size="small" />
+                    ) : (
+                      <Text style={s.acceptTxt}>
+                        {detailItem?.booking_type === 'immediate' ? 'Aceptar Servicio' : 'Aceptar Reserva'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -1060,8 +1834,7 @@ export default DriverReservationsScreen;
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#051A26' },
   rootEmbedded: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,229,255,0.2)',
+    borderTopWidth: 0,
   },
   bgImage: { ...StyleSheet.absoluteFillObject, opacity: 0.3 },
   bgOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(5,26,38,0.78)' },
@@ -1073,73 +1846,238 @@ const s = StyleSheet.create({
   },
   headerEmbedded: {
     paddingBottom: 10,
+    paddingHorizontal: 14,
+    borderBottomWidth: 0,
+    borderTopWidth: 0,
+    backgroundColor: '#051A26',
   },
-  headerSpacer: {
-    width: 40,
-    height: 40,
+  headerTitleWrap: {
+    flex: 1,
+    paddingHorizontal: 8,
+    minWidth: 0,
+  },
+  headerTitleWrapEmbedded: {
+    paddingHorizontal: 0,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
+  },
+  disconnectSwitch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: 118,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.3)',
+    paddingLeft: 10,
+    paddingRight: 2,
+  },
+  disconnectSwitchLabel: {
+    color: '#00E5FF',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.1,
+  },
+  disconnectSwitchKnob: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  disconnectSwitchLogo: {
+    width: 18,
+    height: 18,
   },
   backBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
+  headerTitleEmbedded: { fontSize: 16 },
   refreshBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
   },
-  list: { paddingHorizontal: 18, paddingTop: 14 },
+  goToggleBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00E5FF',
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  goToggleBtnActive: {
+    backgroundColor: '#00E5FF',
+  },
+  goToggleLogo: {
+    width: 22,
+    height: 22,
+  },
+  goToggleText: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#051A26',
+    letterSpacing: 0.4,
+  },
+  list: { paddingHorizontal: 14, paddingTop: 10 },
   loadingWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
   loadingTxt: { fontSize: 14, color: 'rgba(255,255,255,0.5)' },
   emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100, gap: 10 },
+  emptyWrapPinned: { paddingTop: 8, paddingBottom: 12, alignItems: 'center' },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: 'rgba(255,255,255,0.7)' },
   emptySub: { fontSize: 13, color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 40 },
+  emptySubPinned: { fontSize: 12, color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 20 },
   card: {
-    overflow: 'hidden', borderRadius: 20, padding: 18, marginBottom: 16,
-    backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.14)',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+    backgroundColor: 'rgba(10,46,61,0.72)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.18)',
   },
-  cardGlow: {
-    position: 'absolute', top: -40, right: -40, width: 140, height: 140,
-    borderRadius: 70, backgroundColor: 'rgba(0,229,255,0.06)',
+  cardTaken: {
+    borderColor: 'rgba(255,138,128,0.35)',
+    backgroundColor: 'rgba(40,20,24,0.72)',
+    opacity: 0.95,
   },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
-  refBadge: {
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
+  takenBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,82,82,0.12)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,138,128,0.35)',
+  },
+  takenBannerTxt: {
+    flex: 1,
+    color: '#FF8A80',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  verBtnTaken: {
+    backgroundColor: 'rgba(255,138,128,0.12)',
+    borderColor: 'rgba(255,138,128,0.4)',
+  },
+  verBtnTxtTaken: { color: '#FF8A80' },
+  takenDetailBox: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255,82,82,0.12)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,138,128,0.35)',
+  },
+  takenDetailTitle: { color: '#FF8A80', fontSize: 13, fontWeight: '800' },
+  takenDetailSub: { color: 'rgba(255,255,255,0.65)', fontSize: 11, marginTop: 2, fontWeight: '600' },
+  takenCloseBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  takenCloseTxt: { color: '#FFF', fontSize: 12, fontWeight: '700' },
+  cardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  cardMain: { flex: 1, minWidth: 0 },
+  clientRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 5 },
+  avatarImg: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: 'rgba(0,229,255,0.12)',
   },
-  refTxt: { fontSize: 12, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.5 },
-  typeBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
-    backgroundColor: '#00E5FF',
+  avatarFallback: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
   },
-  typeBadgeRound: { backgroundColor: '#FFD600' },
-  typeBadgeImmediate: { backgroundColor: '#FF9500' },
-  typeTxt: { fontSize: 11, fontWeight: '700', color: '#051A26' },
-  clientRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
-  clientName: { fontSize: 15, fontWeight: '600', color: '#FFF' },
-  routeBlock: { marginBottom: 12, paddingLeft: 4 },
-  routeRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  dotGreen: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#00E676' },
-  dotRed: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#FF5252' },
-  routeLine: { width: 1, height: 16, backgroundColor: 'rgba(255,255,255,0.15)', marginLeft: 4.5 },
-  routeAddr: { flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.75)' },
-  dateTimeRow: { flexDirection: 'row', gap: 16, marginBottom: 12 },
-  dtItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  dtTxt: { fontSize: 12, color: 'rgba(255,255,255,0.6)' },
-  statsRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
-  stat: {
-    flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 10,
-    backgroundColor: 'rgba(5,26,38,0.6)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.08)',
+  clientMeta: { flex: 1, minWidth: 0 },
+  clientName: { fontSize: 12, fontWeight: '700', color: '#FFF', lineHeight: 15 },
+  tripTypeTxt: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.45)', marginTop: 0 },
+  routeBlock: { marginBottom: 5, paddingLeft: 1, gap: 2 },
+  routeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  dotStart: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#00E5FF',
   },
-  statLabel: { fontSize: 9, fontWeight: '600', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', marginBottom: 2 },
-  statValue: { fontSize: 11, fontWeight: '700', color: '#FFF' },
-  acceptBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    paddingVertical: 14, borderRadius: 16, backgroundColor: '#00E5FF',
+  dotEnd: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: '#E91E63', borderWidth: 1.5, borderColor: '#00E5FF',
   },
-  acceptTxt: { fontSize: 15, fontWeight: '700', color: '#051A26' },
+  routeLine: { width: 1, height: 6, backgroundColor: 'rgba(255,255,255,0.15)', marginLeft: 2.5 },
+  routeLineTall: { width: 1, height: 14, backgroundColor: 'rgba(255,255,255,0.15)', marginLeft: 3.5, marginVertical: 2 },
+  routeAddr: { flex: 1, fontSize: 10, color: 'rgba(255,255,255,0.72)', lineHeight: 13 },
+  metricsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  pricePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.35)',
+  },
+  pricePillTxt: { fontSize: 9, fontWeight: '700', color: '#00E5FF' },
+  pricePillSep: { fontSize: 9, fontWeight: '600', color: 'rgba(0,229,255,0.55)' },
+  metricTxt: { fontSize: 9, fontWeight: '600', color: 'rgba(255,255,255,0.65)' },
+  metricDot: { fontSize: 9, color: 'rgba(255,255,255,0.3)' },
+  verBtn: {
+    alignSelf: 'center',
+    minWidth: 46,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,229,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  verBtnTxt: { fontSize: 11, fontWeight: '800', color: '#00E5FF' },
+  acceptTxt: { fontSize: 13, fontWeight: '700', color: '#051A26' },
   obsBlock: {
-    marginBottom: 14, padding: 12, borderRadius: 12,
+    marginTop: 10, marginBottom: 4, padding: 10, borderRadius: 12,
     backgroundColor: 'rgba(0,229,255,0.06)',
     borderWidth: 1, borderColor: 'rgba(0,229,255,0.18)',
   },
@@ -1148,25 +2086,197 @@ const s = StyleSheet.create({
     fontSize: 10, fontWeight: '700', color: '#00E5FF',
     textTransform: 'uppercase', letterSpacing: 0.5,
   },
-  obsText: { fontSize: 13, color: 'rgba(255,255,255,0.85)', lineHeight: 18 },
+  obsText: { fontSize: 12, color: 'rgba(255,255,255,0.85)', lineHeight: 17 },
+  statLabel: { fontSize: 9, fontWeight: '600', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', marginBottom: 2 },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    maxHeight: '88%',
+    backgroundColor: '#051A26',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.18)',
+    paddingTop: 8,
+  },
+  modalHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    marginBottom: 8,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: '#FFF' },
+  modalClose: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  modalScroll: { maxHeight: Dimensions.get('window').height * 0.62 },
+  modalScrollContent: { paddingHorizontal: 16, paddingBottom: 12 },
+  modalBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
+  modalBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#00E5FF',
+  },
+  modalBadgeImm: { backgroundColor: '#FF9500' },
+  modalBadgeTxt: { fontSize: 10, fontWeight: '700', color: '#051A26' },
+  modalBadgeCode: {
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+    backgroundColor: 'rgba(0,229,255,0.12)',
+  },
+  modalBadgeCodeTxt: { fontSize: 10, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.4 },
+  modalBadgeTrip: {
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  modalBadgeTripTxt: { fontSize: 10, fontWeight: '700', color: 'rgba(255,255,255,0.75)' },
+  modalClientRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
+  modalAvatar: { width: 42, height: 42, borderRadius: 21 },
+  modalAvatarFallback: {
+    width: 42, height: 42, borderRadius: 21,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.12)',
+    borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)',
+  },
+  modalClientName: { flex: 1, fontSize: 15, fontWeight: '700', color: '#FFF' },
+  modalMapWrap: {
+    height: 190,
+    borderRadius: 14,
+    overflow: 'hidden',
+    marginBottom: 12,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.2)',
+  },
+  modalMapLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  modalRouteBlock: { marginBottom: 10 },
+  modalRouteAddr: { flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.8)', lineHeight: 17 },
+  modalMetaRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10, flexWrap: 'wrap',
+  },
+  modalMetaTxt: { fontSize: 11, color: 'rgba(255,255,255,0.65)', fontWeight: '600' },
+  modalStatsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  modalStat: {
+    flex: 1, alignItems: 'center', paddingVertical: 8, paddingHorizontal: 4, borderRadius: 10,
+    backgroundColor: 'rgba(5,26,38,0.6)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.08)',
+  },
+  modalStatValue: { fontSize: 11, fontWeight: '700', color: '#FFF' },
+  destMarkerSm: {
+    width: 22,
+    height: 22,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  soltarBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,82,82,0.12)',
+    borderWidth: 1.5,
+    borderColor: '#FF5252',
+  },
+  soltarBtnTxt: { fontSize: 14, fontWeight: '800', color: '#FF5252' },
+  acceptBtnModal: {
+    flex: 1.35,
+    minHeight: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00E5FF',
+  },
 
   // Tab styles
   tabContainer: {
-    flexDirection: 'row', gap: 10,
-    paddingHorizontal: 16, paddingVertical: 12,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     backgroundColor: 'rgba(5,26,38,0.6)',
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  tabContainerEmbedded: {
+    backgroundColor: '#051A26',
+    borderBottomWidth: 0,
+    borderTopWidth: 0,
   },
   tab: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 10, paddingHorizontal: 12,
-    borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.05)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    minWidth: 0,
+    position: 'relative',
+    overflow: 'visible',
   },
   tabActive: {
     backgroundColor: 'rgba(0,229,255,0.12)',
     borderColor: 'rgba(0,229,255,0.3)',
   },
-  tabTxt: { fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.5)' },
+  tabTxt: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
+    flexShrink: 1,
+  },
+  tabTxtEmbedded: { fontSize: 10, flexShrink: 1 },
   tabTxtActive: { color: '#00E5FF', fontWeight: '700' },
+  tabBadge: {
+    position: 'absolute',
+    top: -5,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#00E676',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: '#051A26',
+    zIndex: 2,
+  },
+  tabBadgeWide: {
+    minWidth: 26,
+    paddingHorizontal: 5,
+    borderRadius: 10,
+  },
+  tabBadgeTxt: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+    lineHeight: 12,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1.5,
+  },
 });

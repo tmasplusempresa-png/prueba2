@@ -23,13 +23,16 @@ import Icon from "react-native-vector-icons/Ionicons";
 import { useColorScheme } from "react-native";
 import { AntDesign } from '@expo/vector-icons';
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
+import { preferredConductorId } from "@/common/utils/driverIds";
 const NoMembershipScreen = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigation = useNavigation();
   const route = useRoute();
   const { mode } = route.params; // Obtener el modo de los parámetros de la ruta
   const user = useSelector((state: RootState) => state.auth.user);
+  const profile = useSelector((state: RootState) => (state as any).auth.profile);
   const isLoading = useSelector(selectMembershipLoading);
+  const conductorId = preferredConductorId(user, profile);
 
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [selectedKm, setSelectedKm] = useState<string | null>(null);
@@ -37,10 +40,10 @@ const NoMembershipScreen = () => {
   const colorScheme = useColorScheme();
   const styles = colorScheme === "dark" ? darkStyles : lightStyles;
   useEffect(() => {
-    if (user?.uid) {
-      dispatch(fetchMemberships(user.uid));
+    if (conductorId) {
+      dispatch(fetchMemberships(conductorId));
     }
-  }, [dispatch, user?.uid]);
+  }, [dispatch, conductorId]);
 
   const handleSelectPlan = (plan: string, kilometers: string) => {
     setSelectedPlan(plan);
