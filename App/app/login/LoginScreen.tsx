@@ -570,13 +570,16 @@ const LoginScreen = ({ navigation }: Props) => {
     }));
   }, [sanitizeInput, updateField]);
 
+  // En tiempo real NO se recortan ni colapsan espacios: así se pueden escribir primer y
+  // segundo nombre/apellido con normalidad. Solo se quitan caracteres peligrosos. El
+  // trim/colapso definitivo ocurre al enviar (sanitizeInput 'text' en el submit).
   const handleFirstNameChange = useCallback((text: string) => {
-    updateField('firstName', sanitizeInput(text, 'text'));
-  }, [sanitizeInput, updateField]);
+    updateField('firstName', text.replace(/[<>{}[\]\\]/g, ''));
+  }, [updateField]);
 
   const handleLastNameChange = useCallback((text: string) => {
-    updateField('lastName', sanitizeInput(text, 'text'));
-  }, [sanitizeInput, updateField]);
+    updateField('lastName', text.replace(/[<>{}[\]\\]/g, ''));
+  }, [updateField]);
 
   const handlePasswordReset = useCallback(async () => {
     const email = normalizeEmail(form.email);
