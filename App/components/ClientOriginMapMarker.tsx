@@ -1,6 +1,8 @@
 /**
  * `<Marker image>` dibuja el bitmap sin redimensionar: el tamaño en pantalla sale de las
  * variantes de densidad (base 32px, @2x 64px, @3x 96px → 32dp). Mantener las tres al editar.
+ * Vía EAS Update, una variante idéntica byte a byte a un PNG embebido en el build se resuelve
+ * al recurso nativo viejo en Android (mismo hash), así que cada variante nueva debe tener contenido propio.
  */
 /** PNG marcador origen cliente — generado desde location-user-start.svg */
 export const CLIENT_ORIGIN_MARKER_IMAGE = require('@/assets/images/icon-map-vector/location-user-start.png');
