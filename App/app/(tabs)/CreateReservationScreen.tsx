@@ -1463,11 +1463,7 @@ const CreateReservationScreen = () => {
         driver_share: driverPrice || 0,
         min_fare_snapshot: vehicleRates?.[carType]?.min_fare || 0,
         payment_mode:
-          paymentMode === 'cash'
-            ? 'cash'
-            : paymentMode === 'nequi' || paymentMode === 'daviplata'
-              ? 'transfer'
-              : 'cash',
+          paymentMode === 'nequi' || paymentMode === 'daviplata' ? paymentMode : 'cash',
         prepaid: false,
         observations: encodeTripTypeObservation(tripLabel, observations),
         waypoints: [{ trip_type: tripLabel }],

@@ -38,8 +38,10 @@ import { useAnimatedDriverMarker, fitPickupAndDriver, shouldRefitCamera } from '
 import { useChatUnreadCount } from '@/hooks/useChatUnreadCount';
 import FloatingChatModal from '@/components/FloatingChatModal';
 import ProfilePhotoPreview from '@/components/ProfilePhotoPreview';
+import CustomAlert, { AlertType } from '@/components/CustomAlert';
 import SearchingDriverLoader from '@/components/SearchingDriverLoader';
 import { formatBookingFareRange } from '@/constants/fare';
+import { getPaymentModeLabel, getPaymentModeIonicon, isTransferPayment } from '@/common/utils/paymentMode';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -196,6 +198,16 @@ const CustomerActiveTripScreen = () => {
   const [ratingError, setRatingError] = useState<string | null>(null);
   const [driverReview, setDriverReview] = useState<string>('');
   const [submittingRating, setSubmittingRating] = useState(false);
+  const [ratingAlert, setRatingAlert] = useState<{
+    visible: boolean;
+    type: AlertType;
+    title: string;
+    message: string;
+  }>({ visible: false, type: 'success', title: '', message: '' });
+  const closeRatingAlert = useCallback(
+    () => setRatingAlert((prev) => ({ ...prev, visible: false })),
+    []
+  );
   const unreadChatCount = useChatUnreadCount(
     booking?.id || bookingId,
     'customer',
@@ -422,14 +434,19 @@ const CustomerActiveTripScreen = () => {
       setMyGivenRating(stars);
       setMyGivenReview(driverReview?.trim() || '');
       setDriverRating(stars);
-      Alert.alert('¡Gracias!', 'Tu calificación se guardó correctamente.');
+      setRatingAlert({
+        visible: true,
+        type: 'success',
+        title: '¡Gracias!',
+        message: 'Tu calificación se guardó correctamente.',
+      });
     } catch (e: any) {
       console.error('❌ [RATING] Error al enviar calificación:', e);
       const msg = e?.message
         ? `No se pudo enviar tu calificación: ${String(e.message).slice(0, 180)}`
         : 'No se pudo enviar tu calificación. Inténtalo de nuevo.';
       setRatingError(msg);
-      Alert.alert('Error', msg);
+      setRatingAlert({ visible: true, type: 'error', title: 'Error', message: msg });
     } finally {
       setSubmittingRating(false);
     }
@@ -1472,30 +1489,20 @@ const CustomerActiveTripScreen = () => {
                 {booking.payment_mode && (
                   <View style={s.payModeRow}>
                     <Ionicons
-                      name={
-                        booking.payment_mode === 'cash'
-                          ? 'cash-outline'
-                          : booking.payment_mode === 'nequi'
-                            ? 'phone-portrait-outline'
-                            : 'wallet-outline'
-                      }
+                      name={getPaymentModeIonicon(booking.payment_mode) as any}
                       size={15}
                       color="#00E5FF"
                     />
                     <View>
                       <Text style={s.payModeLabel}>Método de Pago</Text>
                       <Text style={s.payModeValue}>
-                        {booking.payment_mode === 'cash'
-                          ? 'Efectivo'
-                          : booking.payment_mode === 'nequi'
-                            ? 'Nequi'
-                            : 'Daviplata'}
+                        {getPaymentModeLabel(booking.payment_mode)}
                       </Text>
                     </View>
                   </View>
                 )}
 
-                {(booking.payment_mode === 'nequi' || booking.payment_mode === 'daviplata') &&
+                {isTransferPayment(booking.payment_mode) &&
                   (driverInfo?.mobile || booking.driver_payment_number || driverInfo?.bankAccount) && (
                     <View style={s.transferBox}>
                       <Text style={s.transferLabel}>Transferir a:</Text>
@@ -1992,6 +1999,14 @@ const CustomerActiveTripScreen = () => {
         senderId={booking.customer || booking.customer_id || user?.id}
         otherName={booking.driver_name || 'Conductor'}
         otherPhoto={driverPhotoUri}
+      />
+
+      <CustomAlert
+        visible={ratingAlert.visible}
+        type={ratingAlert.type}
+        title={ratingAlert.title}
+        message={ratingAlert.message}
+        onDismiss={closeRatingAlert}
       />
     </View>
   );

@@ -3,6 +3,7 @@ import React from "react";
 import moment from "moment/min/moment-with-locales";
 import { roundPrice } from "@/hooks/roundPrice";
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "@/constants/fare";
+import { getPaymentModeLabel } from "@/common/utils/paymentMode";
 import {
   View,
   Text,
@@ -104,15 +105,7 @@ const BookingsView: React.FC<BookingsViewProps> = ({
                 {moment(booking.tripdate).format("lll")}
               </Text>
               <Text style={[styles.customerName,{ color: "#00f4f5"}]}>
-                {booking.payment_mode === "cash"
-                  ? "Efectivo"
-                  : booking.payment_mode === "corp"
-                    ? "Empresarial"
-                    : booking.payment_mode === "Daviplata"
-                      ? "Daviplata"
-                      : booking.payment_mode === "Wallet"
-                        ? "Billetera"
-                        : "Otro método"}
+                {getPaymentModeLabel(booking.payment_mode)}
               </Text>
 
             </View>

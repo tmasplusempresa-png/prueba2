@@ -13,6 +13,7 @@ import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/config/SupabaseConfig';
 import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
+import { getBookingFareRange, formatBookingFareRange } from '@/constants/fare';
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -37,6 +38,7 @@ type Reservation = {
   drop_lng: number;
   booking_date: string;
   driver_share: number;
+  trip_cost: number;
   estimate: number;
   price: number;
   distance: number;
@@ -203,7 +205,7 @@ const DriverActivityScreen = () => {
     for (const b of typeFiltered) {
       const ts = b.booking_date ? new Date(b.booking_date) : null;
       if (!ts || isNaN(ts.getTime())) continue;
-      const amount = Number(b.estimate || b.price || 0);
+      const amount = getBookingFareRange(b).min;
       if (isSameDay(ts, now)) { day.total += amount; day.count += 1; }
       if (ts >= weekStart && ts <= now) { week.total += amount; week.count += 1; }
       if (ts.getMonth() === now.getMonth() && ts.getFullYear() === now.getFullYear()) {
@@ -223,7 +225,7 @@ const DriverActivityScreen = () => {
 
   const dayFilterTotal = useMemo(() => {
     if (!dayFilter) return 0;
-    return currentData.reduce((sum, b) => sum + Number(b.estimate || b.price || 0), 0);
+    return currentData.reduce((sum, b) => sum + getBookingFareRange(b).min, 0);
   }, [currentData, dayFilter]);
 
   const onPickerChange = (event: DateTimePickerEvent, selectedDate?: Date) => {
@@ -252,7 +254,7 @@ const DriverActivityScreen = () => {
         </View>
         <View style={st.miniRight}>
           <Text style={st.miniDate}>{formatDate(item.booking_date)}</Text>
-          <Text style={st.miniPrice}>$ {(item.estimate || item.price)?.toLocaleString('es-CO')}</Text>
+          <Text style={st.miniPrice}>{formatBookingFareRange(item)}</Text>
         </View>
       </TouchableOpacity>
     </Animatable.View>

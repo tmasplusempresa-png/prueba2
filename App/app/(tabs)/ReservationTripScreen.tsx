@@ -36,9 +36,13 @@ import { useChatUnreadCount } from '@/hooks/useChatUnreadCount';
 import FloatingChatModal from '@/components/FloatingChatModal';
 import ProfilePhotoPreview from '@/components/ProfilePhotoPreview';
 import StarRating from 'react-native-star-rating-widget';
+import {
+  normalizePaymentMode,
+  getPaymentModeLabel,
+  getPaymentModeLogoUri,
+  getPaymentModeIonicon,
+} from '@/common/utils/paymentMode';
 
-const NEQUI_LOGO_URI = 'https://img.logo.dev/nequi.com.co?token=pk_c_F6FSsGSaKey4lkmcDLNw';
-const DAVIPLATA_LOGO_URI = 'https://img.logo.dev/daviplata.com?token=pk_c_F6FSsGSaKey4lkmcDLNw';
 const ROUTE_LINE_BLUE = '#00E5FF';
 const TIP_BASE_ZOOM = 17;
 /** Pitch de cámara en navegación in-app (0 = cenital, ~60–70 = 3D marcado). */
@@ -284,11 +288,10 @@ const ReservationTripScreen = () => {
   };
 
   // Payment info from the reservation
-  const paymentMode = reservation.payment_mode || 'cash';
+  const paymentMode = normalizePaymentMode(reservation.payment_mode);
   const driverPaymentNumber = user?.bankAccount || user?.mobile || '';
 
-  const paymentLabel = paymentMode === 'nequi' ? 'Nequi'
-    : paymentMode === 'daviplata' ? 'Daviplata' : 'Efectivo';
+  const paymentLabel = getPaymentModeLabel(reservation.payment_mode);
 
   /* ── Custom alert state ── */
   const [alertVisible, setAlertVisible] = useState(false);
@@ -1201,13 +1204,17 @@ const ReservationTripScreen = () => {
   const showRouteEndTip = routeCoords.length > 1 && phase !== 'ARRIVED_AT_PICKUP';
 
   const renderPaymentIcon = (size = 14) => {
-    if (paymentMode === 'nequi') {
-      return <Image source={{ uri: NEQUI_LOGO_URI }} style={{ width: size, height: size, borderRadius: 3 }} />;
+    const logoUri = getPaymentModeLogoUri(paymentMode);
+    if (logoUri) {
+      return <Image source={{ uri: logoUri }} style={{ width: size, height: size, borderRadius: 3 }} />;
     }
-    if (paymentMode === 'daviplata') {
-      return <Image source={{ uri: DAVIPLATA_LOGO_URI }} style={{ width: size, height: size, borderRadius: 3 }} />;
-    }
-    return <Ionicons name="cash-outline" size={size} color="#00E676" />;
+    return (
+      <Ionicons
+        name={getPaymentModeIonicon(paymentMode) as any}
+        size={size}
+        color={paymentMode === 'cash' ? '#00E676' : '#00E5FF'}
+      />
+    );
   };
 
   // Call customer - Usando Agora UIKit
@@ -1559,7 +1566,7 @@ const ReservationTripScreen = () => {
                   {renderPaymentIcon(14)}
                 </View>
                 <Text style={s.priceCardPaymentText}>
-                  {paymentMode === 'cash' ? 'Pago en Efectivo' : paymentMode === 'nequi' ? 'Pago por Nequi' : 'Pago por Daviplata'}
+                  {paymentMode === 'cash' ? 'Pago en Efectivo' : `Pago por ${paymentLabel}`}
                 </Text>
               </View>
               {paymentMode !== 'cash' && (

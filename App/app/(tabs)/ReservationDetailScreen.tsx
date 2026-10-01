@@ -22,11 +22,15 @@ import {
   CLIENT_ORIGIN_MARKER_IMAGE,
   CLIENT_DEST_MARKER_IMAGE,
 } from '@/components/ClientOriginMapMarker';
+import {
+  getPaymentModeLabel,
+  getPaymentModeLogoUri,
+  getPaymentModeIonicon,
+  isCashPayment,
+} from '@/common/utils/paymentMode';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 const GOOGLE_MAPS_APIKEY = API_KEY;
-const NEQUI_LOGO_URI = 'https://img.logo.dev/nequi.com.co?token=pk_c_F6FSsGSaKey4lkmcDLNw';
-const DAVIPLATA_LOGO_URI = 'https://img.logo.dev/daviplata.com?token=pk_c_F6FSsGSaKey4lkmcDLNw';
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -579,15 +583,6 @@ Te confirmo, estos son los datos de tu servicio:
 `;
   };
 
-  const getPaymentMethodLabel = (mode: string) => {
-    switch (mode) {
-      case 'cash': return 'Efectivo';
-      case 'nequi': return 'Nequi';
-      case 'daviplata': return 'Daviplata';
-      default: return 'Efectivo';
-    }
-  };
-
   const openRatingModal = () => {
     setStars(0);
     setComment('');
@@ -875,17 +870,19 @@ Te confirmo, estos son los datos de tu servicio:
 
             <View style={s.paymentRow}>
               <View style={s.payLogoBox}>
-                {reservation.payment_mode === 'nequi' ? (
-                  <Image source={{ uri: NEQUI_LOGO_URI }} style={s.payLogoImg} />
-                ) : reservation.payment_mode === 'daviplata' ? (
-                  <Image source={{ uri: DAVIPLATA_LOGO_URI }} style={s.payLogoImg} />
+                {getPaymentModeLogoUri(reservation.payment_mode) ? (
+                  <Image source={{ uri: getPaymentModeLogoUri(reservation.payment_mode)! }} style={s.payLogoImg} />
                 ) : (
-                  <Ionicons name="cash-outline" size={16} color="#16A34A" />
+                  <Ionicons
+                    name={getPaymentModeIonicon(reservation.payment_mode) as any}
+                    size={16}
+                    color={isCashPayment(reservation.payment_mode) ? '#16A34A' : '#00E5FF'}
+                  />
                 )}
               </View>
               <Text style={s.paymentLabel}>Método de pago:</Text>
               <Text style={s.paymentValue}>
-                {getPaymentMethodLabel(reservation.payment_mode || 'cash')}
+                {getPaymentModeLabel(reservation.payment_mode)}
               </Text>
             </View>
           </View>
