@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   Image, Platform, Share, Modal, TextInput, ActivityIndicator,
 } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
@@ -18,10 +18,7 @@ import { preferredConductorId } from '@/common/utils/driverIds';
 import { resolveCarTypeLabel, resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
-import {
-  CLIENT_ORIGIN_MARKER_IMAGE,
-  CLIENT_DEST_MARKER_IMAGE,
-} from '@/components/ClientOriginMapMarker';
+import { ClientRouteMarker } from '@/components/ClientOriginMapMarker';
 import {
   getPaymentModeLabel,
   getPaymentModeLogoUri,
@@ -749,18 +746,10 @@ Te confirmo, estos son los datos de tu servicio:
                   tappable={false}
                   zIndex={2}
                 />
-                <Marker
-                  coordinate={routeCoords[0]}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  image={CLIENT_ORIGIN_MARKER_IMAGE}
-                  tracksViewChanges={false}
-                  zIndex={4}
-                />
-                <Marker
+                <ClientRouteMarker coordinate={routeCoords[0]} variant="origin" zIndex={4} />
+                <ClientRouteMarker
                   coordinate={routeCoords[routeCoords.length - 1]}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  image={CLIENT_DEST_MARKER_IMAGE}
-                  tracksViewChanges={false}
+                  variant="destination"
                   zIndex={5}
                 />
               </MapView>

@@ -165,6 +165,14 @@ const UpdatesScreen = () => {
               />
               <Text style={styles.statusText}>{runTypeMessage}</Text>
             </View>
+            {!currentlyRunning.isEmbeddedLaunch && currentlyRunning.updateId ? (
+              <Text style={styles.updateIdText}>
+                ID: {currentlyRunning.updateId.slice(0, 8)}
+                {currentlyRunning.createdAt
+                  ? ` · ${currentlyRunning.createdAt.toLocaleString()}`
+                  : ""}
+              </Text>
+            ) : null}
           </View>
 
           {/* Update Banner */}
@@ -381,6 +389,12 @@ const styles = StyleSheet.create({
     marginLeft: 10,
     flex: 1,
     lineHeight: 18,
+  },
+  updateIdText: {
+    fontSize: 11,
+    color: "#9FB3C8",
+    marginTop: 6,
+    marginLeft: 30,
   },
   updateBanner: {
     flexDirection: "row",

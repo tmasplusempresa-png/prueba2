@@ -26,10 +26,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { getGoogleMapStyle, GoogleMapTheme } from '@/config/googleMapsDarkStyle';
 import { RouteMapPin, ROUTE_PIN_WIDTH, ROUTE_PIN_HEIGHT } from '@/components/RouteMapPin';
-import {
-  CLIENT_ORIGIN_MARKER_IMAGE,
-  CLIENT_DEST_MARKER_IMAGE,
-} from '@/components/ClientOriginMapMarker';
+import { ClientRouteMarker } from '@/components/ClientOriginMapMarker';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = 'tmasplus_recent_destination_searches';
@@ -1531,20 +1528,16 @@ const CreateReservationScreen = () => {
               onRegionChangeComplete={handleMapRegionChangeComplete}
             >
               {showOriginMarker && (
-                <Marker
+                <ClientRouteMarker
                   coordinate={{ latitude: origin.latitude, longitude: origin.longitude }}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  image={CLIENT_ORIGIN_MARKER_IMAGE}
-                  tracksViewChanges={false}
+                  variant="origin"
                   zIndex={2}
                 />
               )}
               {showDestMarker && (
-                <Marker
+                <ClientRouteMarker
                   coordinate={{ latitude: destination.latitude, longitude: destination.longitude }}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  image={CLIENT_DEST_MARKER_IMAGE}
-                  tracksViewChanges={false}
+                  variant="destination"
                   zIndex={3}
                 />
               )}
