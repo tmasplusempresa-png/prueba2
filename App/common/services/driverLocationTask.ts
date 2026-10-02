@@ -225,6 +225,11 @@ async function ensurePermissions(): Promise<boolean> {
     return false;
   }
 
+  // Si el SO ya concedió "Siempre", la divulgación ya se mostró antes de pedirlo:
+  // no depender del flag local (se pierde al reinstalar y su clave puede no coincidir).
+  const bgCurrent = await Location.getBackgroundPermissionsAsync();
+  if (bgCurrent.status === 'granted') return true;
+
   // Prominent Disclosure: nunca solicitamos ubicación en segundo plano si el
   // conductor no ha aceptado antes la pantalla de divulgación. Si no hay
   // consentimiento (p. ej. tocó "Ahora no"), pedimos que se vuelva a mostrar
@@ -242,13 +247,8 @@ async function ensurePermissions(): Promise<boolean> {
     return false;
   }
 
-  const bg = await Location.getBackgroundPermissionsAsync();
-  let bgStatus = bg.status;
-  if (bgStatus !== 'granted') {
-    const req = await Location.requestBackgroundPermissionsAsync();
-    bgStatus = req.status;
-  }
-  if (bgStatus !== 'granted') {
+  const req = await Location.requestBackgroundPermissionsAsync();
+  if (req.status !== 'granted') {
     console.warn('[driverLocationTask] background location denied — tracking will die when app backgrounds');
     return false;
   }

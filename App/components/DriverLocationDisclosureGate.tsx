@@ -42,7 +42,9 @@ export default function DriverLocationDisclosureGate() {
   const user = useSelector((s: any) => s.auth?.user);
   const profile = useSelector((s: any) => s.auth?.profile);
   const isDriver = pickUserType(user, profile) === 'driver';
-  const userId: string | null = user?.id ?? null;
+  // setProfile sobrescribe user.id con persona.id; driverLocationTask lee el
+  // consentimiento con el auth uid (session.user.id), así que se usa ese.
+  const userId: string | null = user?.auth_id ?? user?.id ?? null;
 
   const [visible, setVisible] = useState(false);
   // Evita volver a mostrar el modal repetidamente dentro de la misma sesión.
