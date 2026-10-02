@@ -50,6 +50,8 @@ const NAV_PITCH = 60;
 const NAV_ZOOM = 19;
 /** Cámara 2D al reubicar / salir de Navegar. */
 const OVERVIEW_ZOOM = 17;
+/** "Finalizar viaje" solo se habilita a esta distancia del destino. */
+const END_TRIP_MAX_DISTANCE_M = 20;
 
 /** Desde esta velocidad (~9 km/h) el rumbo GPS es confiable; por debajo manda la brújula. */
 const MOVING_SPEED_MPS = 2.5;
@@ -87,6 +89,10 @@ const projectMeters = (p: LatLng, bearing: number, meters: number): LatLng => {
 };
 
 const NAV_GLOW_RING_IMAGE = require('@/assets/images/icon-map-vector/nav-glow-ring.png');
+const DRIVER_PUCK_TILTED_IMAGE = require('@/assets/images/icon-map-vector/location-circle-nav.png');
+const NAV_GLOW_RING_TILTED_IMAGE = require('@/assets/images/icon-map-vector/nav-glow-ring-nav.png');
+/** Desde este pitch de cámara se usa el puntero grande (la perspectiva lo encoge). */
+const TILTED_PITCH_DEG = 25;
 const ROUTE_TURN_ARROW_IMAGE = require('@/assets/images/icon-map-vector/route-turn-arrow.png');
 /** Periodo del parpadeo del borde del puntero. */
 const GLOW_PERIOD_MS = 1600;
@@ -94,21 +100,19 @@ const GLOW_TICK_MS = 80;
 
 type DriverPuckHandle = {
   setHeading: (deg: number) => void;
-  /** Rumbo de la cámara en Navegar (puntero de frente a pantalla); null = 2D plano. */
-  setMapBearing: (deg: number | null) => void;
+  /** Cámara inclinada: usa la versión grande para compensar la perspectiva. */
+  setTilted: (tilted: boolean) => void;
 };
 
 /**
  * Puntero del conductor. Gira con easing propio (requestAnimationFrame) y solo
- * re-renderiza este marcador, no toda la pantalla.
- *
- * En 3D un marcador `flat` se acuesta sobre el mapa y se ve más pequeño por la
- * perspectiva; en Navegar se dibuja de frente y se compensa el rumbo de la cámara.
+ * re-renderiza este marcador, no toda la pantalla. Siempre va acostado sobre el
+ * mapa (flat), así en 3D se ve sobre la vía como en Waze.
  */
 const DriverPuck = React.memo(
   React.forwardRef<DriverPuckHandle, { coordinate: AnimatedRegion }>(({ coordinate }, ref) => {
     const [rotation, setRotation] = useState(0);
-    const [mapBearing, setMapBearingState] = useState<number | null>(null);
+    const [tilted, setTiltedState] = useState(false);
     const [glow, setGlow] = useState(1);
     const shownRef = useRef(0);
     const targetRef = useRef(0);
@@ -143,9 +147,7 @@ const DriverPuck = React.memo(
           targetRef.current = normalizeDeg(deg);
           if (frameRef.current == null) frameRef.current = requestAnimationFrame(step);
         },
-        setMapBearing: (deg: number | null) => {
-          setMapBearingState(deg == null ? null : Math.round(normalizeDeg(deg)));
-        },
+        setTilted: (next: boolean) => setTiltedState(next),
       }),
       [step],
     );
@@ -157,28 +159,27 @@ const DriverPuck = React.memo(
       [],
     );
 
-    const flat = mapBearing == null;
-    const shownRotation = flat ? rotation : normalizeDeg(rotation - mapBearing);
-
     return (
       <>
         <MarkerAnimated
+          key={tilted ? 'ring-3d' : 'ring-2d'}
           coordinate={coordinate as any}
           anchor={{ x: 0.5, y: 0.5 }}
-          flat={flat}
+          flat
           opacity={glow}
           tracksViewChanges={false}
-          zIndex={9}
-          image={NAV_GLOW_RING_IMAGE}
+          zIndex={20}
+          image={tilted ? NAV_GLOW_RING_TILTED_IMAGE : NAV_GLOW_RING_IMAGE}
         />
         <MarkerAnimated
+          key={tilted ? 'puck-3d' : 'puck-2d'}
           coordinate={coordinate as any}
           anchor={{ x: 0.5, y: 0.5 }}
-          flat={flat}
-          rotation={shownRotation}
+          flat
+          rotation={rotation}
           tracksViewChanges={false}
-          zIndex={10}
-          image={DRIVER_LOCATION_PUCK_IMAGE}
+          zIndex={21}
+          image={tilted ? DRIVER_PUCK_TILTED_IMAGE : DRIVER_LOCATION_PUCK_IMAGE}
         />
       </>
     );
@@ -202,7 +203,7 @@ const tipRadiusForZoom = (zoom: number) => {
   const levelsOut = Math.max(0, TIP_BASE_ZOOM - zoom);
   const levelsIn = Math.max(0, zoom - TIP_BASE_ZOOM);
   const scaled = 7 * Math.pow(1.28, levelsOut) / Math.pow(1.55, levelsIn);
-  return Math.min(Math.max(scaled, 5), 14);
+  return Math.min(Math.max(scaled, 2), 14);
 };
 
 const TIP_START_FILL = '#FFFFFF';
@@ -309,6 +310,72 @@ const smoothRoute = (pts: { latitude: number; longitude: number }[]) => {
   return out;
 };
 
+/** Si el GPS cae a menos de esto de la ruta, el puntero se pega a la vía. */
+const ROUTE_SNAP_MAX_M = 35;
+/** Rumbo GPS contrario a la ruta (más de esto) = va en otra dirección: no pegar. */
+const ROUTE_SNAP_MAX_HEADING_DIFF = 100;
+
+type RouteSnap = { point: LatLng; seg: number; distM: number; bearing: number };
+
+/** Punto más cercano de la ruta (proyección local en metros, suficiente a escala de ciudad). */
+const snapToRoute = (route: LatLng[], p: LatLng): RouteSnap | null => {
+  if (route.length < 2) return null;
+  const kx = 111320 * Math.cos((p.latitude * Math.PI) / 180);
+  const ky = 110540;
+  let best: RouteSnap | null = null;
+  for (let i = 0; i < route.length - 1; i++) {
+    const a = route[i];
+    const b = route[i + 1];
+    const ax = (a.longitude - p.longitude) * kx;
+    const ay = (a.latitude - p.latitude) * ky;
+    const bx = (b.longitude - p.longitude) * kx;
+    const by = (b.latitude - p.latitude) * ky;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+    const qx = ax + t * dx;
+    const qy = ay + t * dy;
+    const distM = Math.hypot(qx, qy);
+    if (!best || distM < best.distM) {
+      best = {
+        point: {
+          latitude: a.latitude + (b.latitude - a.latitude) * t,
+          longitude: a.longitude + (b.longitude - a.longitude) * t,
+        },
+        seg: i,
+        distM,
+        bearing: bearingDeg(a, b),
+      };
+    }
+  }
+  return best;
+};
+
+/** Avanza `meters` sobre la ruta desde un punto pegado; devuelve posición y rumbo del tramo. */
+const advanceAlongRoute = (route: LatLng[], snap: RouteSnap, meters: number) => {
+  let cur = snap.point;
+  let remaining = meters;
+  for (let i = snap.seg; i < route.length - 1; i++) {
+    const end = route[i + 1];
+    const d = getDistanceMeters(cur.latitude, cur.longitude, end.latitude, end.longitude);
+    if (d >= remaining && d > 0) {
+      const t = remaining / d;
+      return {
+        point: {
+          latitude: cur.latitude + (end.latitude - cur.latitude) * t,
+          longitude: cur.longitude + (end.longitude - cur.longitude) * t,
+        },
+        bearing: bearingDeg(route[i], end),
+      };
+    }
+    remaining -= d;
+    cur = end;
+  }
+  const n = route.length;
+  return { point: route[n - 1], bearing: bearingDeg(route[n - 2], route[n - 1]) };
+};
+
 type RouteTurn = { coord: LatLng; bearing: number };
 /** La flecha va sobre el tramo de salida del giro, un poco después de la esquina. */
 const TURN_ARROW_OFFSET_M = 9;
@@ -399,8 +466,9 @@ const ReservationTripScreen = () => {
   const setNavMode = useCallback((on: boolean) => {
     navModeRef.current = on;
     setInAppNav(on);
-    puckRef.current?.setMapBearing(on ? navCourseRef.current : null);
   }, []);
+  /** Copia de la ruta para el callback GPS (pegar el puntero a la vía). */
+  const routeCoordsRef = useRef<LatLng[]>([]);
   const [customerPhoto, setCustomerPhoto] = useState<string | null>(null);
   const unreadChatCount = useChatUnreadCount(reservation?.id, 'driver', !!reservation?.id);
   const [chatVisible, setChatVisible] = useState(false);
@@ -409,8 +477,12 @@ const ReservationTripScreen = () => {
   const mapZoomRef = useRef(17);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
   const [routeTurns, setRouteTurns] = useState<RouteTurn[]>([]);
+  useEffect(() => {
+    routeCoordsRef.current = routeCoords;
+  }, [routeCoords]);
   const [loading, setLoading] = useState(false);
   const [distanceToPickup, setDistanceToPickup] = useState<number | null>(null);
+  const [distanceToDrop, setDistanceToDrop] = useState<number | null>(null);
   const [driverCountdown, setDriverCountdown] = useState<number | null>(null);
   const localTimerStart = useRef<number | null>(null); // Fallback local timestamp
   const voiceReminderSent = useRef(false);
@@ -572,45 +644,81 @@ const ReservationTripScreen = () => {
           const spd = typeof speed === 'number' && speed > 0 ? speed : 0;
           speedMpsRef.current = spd;
           const next = { latitude, longitude };
-          let shown: LatLng = next;
+          const gpsHeading = typeof heading === 'number' && heading >= 0 ? heading : null;
 
-          if (prev) {
-            const moved = getDistanceMeters(prev.latitude, prev.longitude, latitude, longitude);
-            // Quieto, el GPS "camina" unos metros: no mover el puntero por ruido.
-            if (spd < 1 && moved < Math.max(8, acc)) return;
-            if (spd >= MOVING_SPEED_MPS) {
-              const course =
-                typeof heading === 'number' && heading >= 0
-                  ? heading
-                  : moved >= 5
-                    ? bearingDeg(prev, next)
-                    : null;
-              if (course != null) {
-                applyHeading(course);
-                navCourseRef.current = course;
-                if (navModeRef.current) puckRef.current?.setMapBearing(course);
-                shown = projectMeters(next, course, spd * POSITION_LEAD_S);
-              }
-            }
+          // Pegar a la vía: el GPS puede caer sobre casas/edificios junto a la calle.
+          const route = routeCoordsRef.current;
+          let snap = route.length > 1 ? snapToRoute(route, next) : null;
+          if (snap && snap.distM > Math.max(ROUTE_SNAP_MAX_M, Math.min(acc, 50))) snap = null;
+          if (
+            snap &&
+            spd >= MOVING_SPEED_MPS &&
+            gpsHeading != null &&
+            Math.abs(angleDelta(snap.bearing, gpsHeading)) > ROUTE_SNAP_MAX_HEADING_DIFF
+          ) {
+            snap = null;
+          }
+
+          const glideTo = (target: LatLng) => {
             (driverAnim.timing as any)({
-              latitude: shown.latitude,
-              longitude: shown.longitude,
+              latitude: target.latitude,
+              longitude: target.longitude,
               latitudeDelta: 0,
               longitudeDelta: 0,
               duration: MARKER_GLIDE_MS,
               easing: Easing.linear,
               useNativeDriver: false,
             }).start();
-            followNavCamera(shown, MARKER_GLIDE_MS);
+            followNavCamera(target, MARKER_GLIDE_MS);
+            shownLocationRef.current = target;
+          };
+
+          if (!prev) {
+            const start = snap ? snap.point : next;
+            driverAnim.setValue({ ...start, latitudeDelta: 0, longitudeDelta: 0 } as any);
+            shownLocationRef.current = start;
           } else {
-            driverAnim.setValue({ latitude, longitude, latitudeDelta: 0, longitudeDelta: 0 } as any);
+            const moved = getDistanceMeters(prev.latitude, prev.longitude, latitude, longitude);
+            // Quieto, el GPS "camina" unos metros: no mover el puntero por ruido.
+            if (spd < 1 && moved < Math.max(8, acc)) {
+              // La ruta pudo llegar después del primer fix: pegar a la vía sin moverse.
+              const shownNow = shownLocationRef.current;
+              if (
+                snap &&
+                shownNow &&
+                getDistanceMeters(shownNow.latitude, shownNow.longitude, snap.point.latitude, snap.point.longitude) > 3
+              ) {
+                glideTo(snap.point);
+              }
+              return;
+            }
+            let shown: LatLng = snap ? snap.point : next;
+            if (spd >= MOVING_SPEED_MPS) {
+              const lead = spd * POSITION_LEAD_S;
+              let course: number | null;
+              if (snap) {
+                const ahead = advanceAlongRoute(route, snap, lead);
+                shown = ahead.point;
+                course = ahead.bearing;
+              } else {
+                course = gpsHeading ?? (moved >= 5 ? bearingDeg(prev, next) : null);
+                if (course != null) shown = projectMeters(next, course, lead);
+              }
+              if (course != null) {
+                applyHeading(course);
+                navCourseRef.current = course;
+              }
+            }
+            glideTo(shown);
           }
 
-          shownLocationRef.current = shown;
           driverLocationRef.current = next;
           setDriverLocation(next);
           if (pickupLat && pickupLng) {
             setDistanceToPickup(getDistanceMeters(latitude, longitude, pickupLat, pickupLng));
+          }
+          if (dropLat && dropLng) {
+            setDistanceToDrop(getDistanceMeters(latitude, longitude, dropLat, dropLng));
           }
         },
       );
@@ -620,7 +728,7 @@ const ReservationTripScreen = () => {
       cancelled = true;
       sub?.remove();
     };
-  }, [pickupLat, pickupLng, applyHeading, followNavCamera, driverAnim]);
+  }, [pickupLat, pickupLng, dropLat, dropLng, applyHeading, followNavCamera, driverAnim]);
 
   // Brújula: con el carro quieto o lento, el puntero sigue el giro del celular.
   useEffect(() => {
@@ -630,7 +738,8 @@ const ReservationTripScreen = () => {
       try {
         sub = await Location.watchHeadingAsync((h) => {
           if (cancelled) return;
-          if (speedMpsRef.current >= MOVING_SPEED_MPS) {
+          // En Navegar el puntero mira hacia la ruta (como Waze), no hacia donde apunta el celular.
+          if (navModeRef.current || speedMpsRef.current >= MOVING_SPEED_MPS) {
             compassSmoothedRef.current = null;
             return;
           }
@@ -1418,9 +1527,21 @@ const ReservationTripScreen = () => {
   // gira con el curso GPS y la cámara sigue cada fix (followNavCamera).
   const startInAppNav = () => {
     navZoomRef.current = NAV_ZOOM;
-    navCourseRef.current = lastHeadingRef.current;
-    setNavMode(true);
     const center = shownLocationRef.current;
+    // Mirar hacia la ruta: sobre ella, en su sentido de avance; fuera de ella, hacia el punto más cercano.
+    let course = lastHeadingRef.current;
+    const route = routeCoordsRef.current;
+    const snap = center && route.length > 1 ? snapToRoute(route, center) : null;
+    if (snap) {
+      course =
+        snap.distM <= ROUTE_SNAP_MAX_M
+          ? advanceAlongRoute(route, snap, 20).bearing
+          : bearingDeg(center as LatLng, snap.point);
+    }
+    navCourseRef.current = course;
+    applyHeading(course);
+    puckRef.current?.setTilted(true);
+    setNavMode(true);
     if (!center || !mapRef.current) return;
     mapRef.current.animateCamera(
       { center, heading: navCourseRef.current, pitch: NAV_PITCH, zoom: NAV_ZOOM },
@@ -1431,6 +1552,7 @@ const ReservationTripScreen = () => {
   // Reubicar: manual, sale de Navegar y recentra en 2D (norte arriba).
   const locateOnMap = () => {
     setNavMode(false);
+    puckRef.current?.setTilted(false);
     const center = shownLocationRef.current;
     if (!center || !mapRef.current) return;
     mapRef.current.animateCamera(
@@ -1563,6 +1685,9 @@ const ReservationTripScreen = () => {
 
   const currentConfig = phaseConfig[phase];
   const canConfirmArrival = distanceToPickup !== null && distanceToPickup <= 200;
+  // Sin coordenadas de destino no se bloquea (no habría forma de habilitarlo).
+  const canEndTrip =
+    !(dropLat && dropLng) || (distanceToDrop !== null && distanceToDrop <= END_TRIP_MAX_DISTANCE_M);
 
   return (
     <View style={s.root}>
@@ -1589,6 +1714,9 @@ const ReservationTripScreen = () => {
         onRegionChangeComplete={(region) => {
           Promise.resolve(mapRef.current?.getCamera?.())
             .then((cam: any) => {
+              if (typeof cam?.pitch === 'number') {
+                puckRef.current?.setTilted(cam.pitch >= TILTED_PITCH_DEG);
+              }
               if (typeof cam?.zoom === 'number') syncMapZoom(cam.zoom);
               else syncMapZoom(undefined, region.latitudeDelta);
             })
@@ -1997,18 +2125,25 @@ const ReservationTripScreen = () => {
 
         {phase === 'TRIP_STARTED' && (
           <TouchableOpacity
-            style={[s.actionBtn, { backgroundColor: '#00E5FF' }]}
+            style={[s.actionBtn, canEndTrip ? { backgroundColor: '#00E5FF' } : s.actionBtnDisabled]}
             onPress={handleEndTrip}
-            disabled={loading}
+            disabled={loading || !canEndTrip}
             activeOpacity={0.85}
           >
             {loading ? (
               <ActivityIndicator color="#051A26" size="small" />
             ) : (
               <>
-                <Ionicons name="checkmark-circle" size={22} color="#051A26" />
-                <Text style={s.actionBtnTxt}>Finalizar Viaje</Text>
+                <Ionicons name="checkmark-circle" size={22} color={canEndTrip ? '#051A26' : 'rgba(255,255,255,0.3)'} />
+                <Text style={[s.actionBtnTxt, !canEndTrip && s.actionBtnTxtDisabled]}>Finalizar Viaje</Text>
               </>
+            )}
+            {!canEndTrip && distanceToDrop !== null && (
+              <Text style={s.distanceTxt}>
+                {distanceToDrop < 1000
+                  ? `${Math.round(distanceToDrop)} m`
+                  : `${(distanceToDrop / 1000).toFixed(1)} km`}
+              </Text>
             )}
           </TouchableOpacity>
         )}

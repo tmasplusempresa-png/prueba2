@@ -29,16 +29,58 @@ function writePng(name, size, pixelFn) {
 }
 
 // Anillo: borde nítido justo fuera del círculo del puck + halo que se desvanece.
-const PUCK_RADIUS = 43; // radio visible de location-circle.png (88px)
-writePng('nav-glow-ring.png', 132, (x, y, size) => {
+// puckRadius = radio visible del puck que rodea; el lienzo es 1.5× el del puck.
+const glowRing = (puckRadius) => (x, y, size) => {
+  const k = puckRadius / 43;
   const c = size / 2;
   const r = Math.hypot(x - c, y - c);
-  const edge = Math.max(0, 1 - Math.abs(r - (PUCK_RADIUS + 1.5)) / 2.2);
-  const glow = r > PUCK_RADIUS ? Math.exp(-Math.pow((r - PUCK_RADIUS) / 9, 2)) * 0.75 : 0;
+  const edge = Math.max(0, 1 - Math.abs(r - (puckRadius + 1.5 * k)) / (2.2 * k));
+  const glow = r > puckRadius ? Math.exp(-Math.pow((r - puckRadius) / (9 * k), 2)) * 0.75 : 0;
   const a = Math.max(edge, glow);
   const white = edge * 0.55; // núcleo del borde más claro
-  return [Math.round(0 + 255 * white), Math.round(229 + 26 * white), 255, a];
-});
+  return [Math.round(255 * white), Math.round(229 + 26 * white), 255, a];
+};
+writePng('nav-glow-ring.png', 132, glowRing(43)); // rodea location-circle.png (88px)
+
+// Puck grande para la cámara inclinada (3D): mismo diseño que location-circle.png
+// (círculo #0A2E3D, borde #093C4C, flecha #00E5FF), dibujado con supersampling.
+const NAV_PUCK_SIZE = 124;
+function inPolygon(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+const navPuck = (x, y, size) => {
+  const SS = 4;
+  const c = size / 2;
+  const R = 0.455 * size;
+  const arrow = [
+    [0.5, 0.24],
+    [0.69, 0.71],
+    [0.5, 0.6],
+    [0.31, 0.71],
+  ].map(([ax, ay]) => [ax * size, ay * size]);
+  let r = 0, g = 0, b = 0, a = 0;
+  for (let sy = 0; sy < SS; sy++) {
+    for (let sx = 0; sx < SS; sx++) {
+      const px = x - 0.5 + (sx + 0.5) / SS;
+      const py = y - 0.5 + (sy + 0.5) / SS;
+      const d = Math.hypot(px - c, py - c);
+      if (d > R) continue;
+      let col = d > R - 0.06 * size ? [9, 60, 76] : [10, 46, 61];
+      if (inPolygon(px, py, arrow)) col = [0, 229, 255];
+      r += col[0]; g += col[1]; b += col[2]; a += 1;
+    }
+  }
+  if (a === 0) return [0, 0, 0, 0];
+  return [Math.round(r / a), Math.round(g / a), Math.round(b / a), a / (SS * SS)];
+};
+writePng('location-circle-nav.png', NAV_PUCK_SIZE, navPuck);
+writePng('nav-glow-ring-nav.png', Math.round(NAV_PUCK_SIZE * 1.5), glowRing(0.455 * NAV_PUCK_SIZE + 3));
 
 // Chevron "^" apuntando hacia arriba (rotation = rumbo de salida del giro).
 function distToSegment(px, py, ax, ay, bx, by) {
