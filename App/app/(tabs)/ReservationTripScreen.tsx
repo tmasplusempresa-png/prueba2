@@ -163,28 +163,37 @@ const DriverPuck = React.memo(
       [],
     );
 
+    // Ambos tamaños quedan montados y solo se alterna la opacidad: desmontar un
+    // marcador animado (cambiar key/image) deja una copia fantasma congelada en iOS.
+    const variants = [
+      { id: '2d', visible: !tilted, ring: NAV_GLOW_RING_IMAGE, puck: DRIVER_LOCATION_PUCK_IMAGE },
+      { id: '3d', visible: tilted, ring: NAV_GLOW_RING_TILTED_IMAGE, puck: DRIVER_PUCK_TILTED_IMAGE },
+    ];
     return (
       <>
-        <MarkerAnimated
-          key={tilted ? 'ring-3d' : 'ring-2d'}
-          coordinate={coordinate as any}
-          anchor={{ x: 0.5, y: 0.5 }}
-          flat
-          opacity={glow}
-          tracksViewChanges={false}
-          zIndex={20}
-          image={tilted ? NAV_GLOW_RING_TILTED_IMAGE : NAV_GLOW_RING_IMAGE}
-        />
-        <MarkerAnimated
-          key={tilted ? 'puck-3d' : 'puck-2d'}
-          coordinate={coordinate as any}
-          anchor={{ x: 0.5, y: 0.5 }}
-          flat
-          rotation={rotation}
-          tracksViewChanges={false}
-          zIndex={21}
-          image={tilted ? DRIVER_PUCK_TILTED_IMAGE : DRIVER_LOCATION_PUCK_IMAGE}
-        />
+        {variants.map((v) => (
+          <React.Fragment key={v.id}>
+            <MarkerAnimated
+              coordinate={coordinate as any}
+              anchor={{ x: 0.5, y: 0.5 }}
+              flat
+              opacity={v.visible ? glow : 0}
+              tracksViewChanges={false}
+              zIndex={v.visible ? 20 : 1}
+              image={v.ring}
+            />
+            <MarkerAnimated
+              coordinate={coordinate as any}
+              anchor={{ x: 0.5, y: 0.5 }}
+              flat
+              rotation={rotation}
+              opacity={v.visible ? 1 : 0}
+              tracksViewChanges={false}
+              zIndex={v.visible ? 21 : 1}
+              image={v.puck}
+            />
+          </React.Fragment>
+        ))}
       </>
     );
   }),
