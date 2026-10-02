@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useImperativeHandle } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Image, Linking, Platform, Dimensions, Modal, TextInput,
+  ActivityIndicator, Image, Linking, Platform, Dimensions, Modal, TextInput, Easing,
 } from 'react-native';
 import * as Animatable from 'react-native-animatable';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
@@ -45,9 +45,11 @@ import {
 
 const ROUTE_LINE_BLUE = '#00E5FF';
 const TIP_BASE_ZOOM = 17;
-/** Pitch de cámara en navegación in-app (0 = cenital, ~60–70 = 3D marcado). */
-const IN_APP_NAV_PITCH = 65;
-const IN_APP_NAV_ZOOM = 18.5;
+/** Cámara modo Navegar (tipo Waze): 3D, zoom fijo de calle. */
+const NAV_PITCH = 60;
+const NAV_ZOOM = 19;
+/** Cámara 2D al reubicar / salir de Navegar. */
+const OVERVIEW_ZOOM = 17;
 
 /** Desde esta velocidad (~9 km/h) el rumbo GPS es confiable; por debajo manda la brújula. */
 const MOVING_SPEED_MPS = 2.5;
@@ -55,15 +57,92 @@ const MOVING_SPEED_MPS = 2.5;
 const MAX_FIX_ACCURACY_M = 50;
 /** El primer fix suele ser la ubicación en caché del SO (minutos atrás). */
 const MAX_FIX_AGE_MS = 30_000;
-/** Suavizado de brújula (0–1): más alto responde más rápido, más bajo tiembla menos. */
-const COMPASS_SMOOTHING = 0.35;
-const HEADING_MIN_DELTA_DEG = 2;
-const HEADING_MIN_INTERVAL_MS = 80;
-/** Igual al intervalo GPS: el puntero y la cámara se deslizan sin saltos entre fixes. */
-const MARKER_GLIDE_MS = 1000;
+/** Suavizado de brújula (0–1): más bajo = giro más suave. */
+const COMPASS_SMOOTHING = 0.2;
+/** Fracción del giro restante que avanza el puntero por frame (easing). */
+const PUCK_ROTATION_EASING = 0.15;
+/** Igual al intervalo GPS: puntero y cámara se deslizan sin saltos entre fixes. */
+const GPS_INTERVAL_MS = 1000;
+const MARKER_GLIDE_MS = GPS_INTERVAL_MS;
+/**
+ * En marcha se proyecta la posición hacia adelante (velocidad × LEAD) para
+ * compensar la latencia del fix + el deslizamiento; sin esto el puntero va ~2 s atrás.
+ */
+const POSITION_LEAD_S = 1.2;
+
+type LatLng = { latitude: number; longitude: number };
 
 const angleDelta = (from: number, to: number) => ((to - from + 540) % 360) - 180;
 const normalizeDeg = (d: number) => ((d % 360) + 360) % 360;
+const projectMeters = (p: LatLng, bearing: number, meters: number): LatLng => {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const δ = meters / 6371000;
+  const θ = toRad(bearing);
+  const φ1 = toRad(p.latitude);
+  const λ1 = toRad(p.longitude);
+  const φ2 = Math.asin(Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ));
+  const λ2 =
+    λ1 + Math.atan2(Math.sin(θ) * Math.sin(δ) * Math.cos(φ1), Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2));
+  return { latitude: (φ2 * 180) / Math.PI, longitude: (λ2 * 180) / Math.PI };
+};
+
+type DriverPuckHandle = { setHeading: (deg: number) => void };
+
+/**
+ * Puntero del conductor. Gira con easing propio (requestAnimationFrame) y solo
+ * re-renderiza este marcador, no toda la pantalla.
+ */
+const DriverPuck = React.memo(
+  React.forwardRef<DriverPuckHandle, { coordinate: AnimatedRegion }>(({ coordinate }, ref) => {
+    const [rotation, setRotation] = useState(0);
+    const shownRef = useRef(0);
+    const targetRef = useRef(0);
+    const frameRef = useRef<number | null>(null);
+
+    const step = useCallback(() => {
+      const d = angleDelta(shownRef.current, targetRef.current);
+      if (Math.abs(d) < 0.3) {
+        shownRef.current = targetRef.current;
+        setRotation(targetRef.current);
+        frameRef.current = null;
+        return;
+      }
+      shownRef.current = normalizeDeg(shownRef.current + d * PUCK_ROTATION_EASING);
+      setRotation(shownRef.current);
+      frameRef.current = requestAnimationFrame(step);
+    }, []);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        setHeading: (deg: number) => {
+          targetRef.current = normalizeDeg(deg);
+          if (frameRef.current == null) frameRef.current = requestAnimationFrame(step);
+        },
+      }),
+      [step],
+    );
+
+    useEffect(
+      () => () => {
+        if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
+      },
+      [],
+    );
+
+    return (
+      <MarkerAnimated
+        coordinate={coordinate as any}
+        anchor={{ x: 0.5, y: 0.5 }}
+        flat
+        rotation={rotation}
+        tracksViewChanges={false}
+        zIndex={10}
+        image={DRIVER_LOCATION_PUCK_IMAGE}
+      />
+    );
+  }),
+);
 const bearingDeg = (
   a: { latitude: number; longitude: number },
   b: { latitude: number; longitude: number },
@@ -212,16 +291,27 @@ const ReservationTripScreen = () => {
     return 'NAVIGATING_TO_PICKUP';
   });
   const [driverLocation, setDriverLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-  const driverLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
-  const [driverHeading, setDriverHeading] = useState(0);
-  const headingRef = useRef(0);
-  const lastHeadingSetRef = useRef(0);
+  /** Último fix GPS real aceptado. */
+  const driverLocationRef = useRef<LatLng | null>(null);
+  /** Posición mostrada (con proyección en marcha): destino del puntero y de la cámara. */
+  const shownLocationRef = useRef<LatLng | null>(null);
+  const puckRef = useRef<DriverPuckHandle>(null);
+  /** Último rumbo enviado al puntero (GPS o brújula). */
+  const lastHeadingRef = useRef(0);
+  /** Rumbo del mapa en Navegar: solo el curso GPS en marcha (como Waze, la brújula no gira el mapa). */
+  const navCourseRef = useRef(0);
   const compassSmoothedRef = useRef<number | null>(null);
   const speedMpsRef = useRef(0);
   const driverAnim = useRef(
     new AnimatedRegion({ latitude: 0, longitude: 0, latitudeDelta: 0, longitudeDelta: 0 }),
   ).current;
   const [inAppNav, setInAppNav] = useState(false);
+  const navModeRef = useRef(false);
+  const navZoomRef = useRef(NAV_ZOOM);
+  const setNavMode = useCallback((on: boolean) => {
+    navModeRef.current = on;
+    setInAppNav(on);
+  }, []);
   const [customerPhoto, setCustomerPhoto] = useState<string | null>(null);
   const unreadChatCount = useChatUnreadCount(reservation?.id, 'driver', !!reservation?.id);
   const [chatVisible, setChatVisible] = useState(false);
@@ -355,15 +445,18 @@ const ReservationTripScreen = () => {
     });
   }, [distanceToPickup, phase, paymentMode]);
 
-  // Rumbo del puntero: un solo punto de entrada, con umbral y límite de frecuencia
-  // para no re-renderizar la pantalla en cada muestra del sensor.
   const applyHeading = useCallback((target: number) => {
-    const now = Date.now();
-    if (Math.abs(angleDelta(headingRef.current, target)) < HEADING_MIN_DELTA_DEG) return;
-    if (now - lastHeadingSetRef.current < HEADING_MIN_INTERVAL_MS) return;
-    headingRef.current = normalizeDeg(target);
-    lastHeadingSetRef.current = now;
-    setDriverHeading(Math.round(headingRef.current));
+    lastHeadingRef.current = normalizeDeg(target);
+    puckRef.current?.setHeading(lastHeadingRef.current);
+  }, []);
+
+  // Cámara Navegar: imperativa (sin estado) para no re-renderizar ni pelear con otros efectos.
+  const followNavCamera = useCallback((center: LatLng, duration: number) => {
+    if (!navModeRef.current || !mapRef.current) return;
+    mapRef.current.animateCamera(
+      { center, heading: navCourseRef.current, pitch: NAV_PITCH, zoom: navZoomRef.current },
+      { duration },
+    );
   }, []);
 
   // GPS (en Android usa el Fused Location Provider de Google Play Services).
@@ -378,7 +471,7 @@ const ReservationTripScreen = () => {
         await Location.enableNetworkProviderAsync().catch(() => {});
       }
       sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 },
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: GPS_INTERVAL_MS, distanceInterval: 0 },
         (loc) => {
           if (Date.now() - loc.timestamp > MAX_FIX_AGE_MS) return;
           const { latitude, longitude, accuracy, speed, heading } = loc.coords;
@@ -389,6 +482,7 @@ const ReservationTripScreen = () => {
           const spd = typeof speed === 'number' && speed > 0 ? speed : 0;
           speedMpsRef.current = spd;
           const next = { latitude, longitude };
+          let shown: LatLng = next;
 
           if (prev) {
             const moved = getDistanceMeters(prev.latitude, prev.longitude, latitude, longitude);
@@ -401,20 +495,27 @@ const ReservationTripScreen = () => {
                   : moved >= 5
                     ? bearingDeg(prev, next)
                     : null;
-              if (course != null) applyHeading(course);
+              if (course != null) {
+                applyHeading(course);
+                navCourseRef.current = course;
+                shown = projectMeters(next, course, spd * POSITION_LEAD_S);
+              }
             }
             (driverAnim.timing as any)({
-              latitude,
-              longitude,
+              latitude: shown.latitude,
+              longitude: shown.longitude,
               latitudeDelta: 0,
               longitudeDelta: 0,
               duration: MARKER_GLIDE_MS,
+              easing: Easing.linear,
               useNativeDriver: false,
             }).start();
+            followNavCamera(shown, MARKER_GLIDE_MS);
           } else {
             driverAnim.setValue({ latitude, longitude, latitudeDelta: 0, longitudeDelta: 0 } as any);
           }
 
+          shownLocationRef.current = shown;
           driverLocationRef.current = next;
           setDriverLocation(next);
           if (pickupLat && pickupLng) {
@@ -428,7 +529,7 @@ const ReservationTripScreen = () => {
       cancelled = true;
       sub?.remove();
     };
-  }, [pickupLat, pickupLng, applyHeading, driverAnim]);
+  }, [pickupLat, pickupLng, applyHeading, followNavCamera, driverAnim]);
 
   // Brújula: con el carro quieto o lento, el puntero sigue el giro del celular.
   useEffect(() => {
@@ -498,28 +599,6 @@ const ReservationTripScreen = () => {
     load();
     return () => { cancelled = true; };
   }, [reservation?.customer_id, reservation?.customer, reservation?.customer_image]);
-
-  // Navegación in-app tipo Waze: la cámara sigue al puck. Si cambió la posición,
-  // se desliza al mismo ritmo que el marcador; si solo giró, responde rápido.
-  const lastCamCenterRef = useRef<{ latitude: number; longitude: number } | null>(null);
-  useEffect(() => {
-    if (!inAppNav || !driverLocation || !mapRef.current) return;
-    const last = lastCamCenterRef.current;
-    const moved =
-      !last ||
-      last.latitude !== driverLocation.latitude ||
-      last.longitude !== driverLocation.longitude;
-    lastCamCenterRef.current = driverLocation;
-    mapRef.current.animateCamera(
-      {
-        center: driverLocation,
-        heading: driverHeading,
-        pitch: IN_APP_NAV_PITCH,
-        zoom: mapZoomRef.current,
-      },
-      { duration: moved ? MARKER_GLIDE_MS : 200 },
-    );
-  }, [inAppNav, driverLocation, driverHeading]);
 
   // Mientras esta pantalla esté montada, "posee" su booking: el watcher global
   // (useDriverCancellationWatcher) ignora este id para no duplicar el modal.
@@ -626,15 +705,27 @@ const ReservationTripScreen = () => {
     } catch {}
   }, []);
 
-  // Update route based on phase
+  // Ruta según fase. Hacia la recogida se recalcula solo si el conductor se alejó
+  // del último origen; pickup→drop es fija por fase.
+  const routeOriginRef = useRef<{ phase: TripPhase; at: LatLng } | null>(null);
   useEffect(() => {
     if (!driverLocation) return;
+    const last = routeOriginRef.current;
     if (phase === 'NAVIGATING_TO_PICKUP' && pickupLat && pickupLng) {
+      if (
+        last?.phase === phase &&
+        getDistanceMeters(last.at.latitude, last.at.longitude, driverLocation.latitude, driverLocation.longitude) < 60
+      ) {
+        return;
+      }
+      routeOriginRef.current = { phase, at: driverLocation };
       fetchRoute(driverLocation.latitude, driverLocation.longitude, pickupLat, pickupLng);
     } else if (phase === 'TRIP_STARTED' && pickupLat && pickupLng && dropLat && dropLng) {
+      if (last?.phase === phase) return;
+      routeOriginRef.current = { phase, at: driverLocation };
       fetchRoute(pickupLat, pickupLng, dropLat, dropLng);
     }
-  }, [phase, driverLocation?.latitude, driverLocation?.longitude, fetchRoute, pickupLat, pickupLng, dropLat, dropLng]);
+  }, [phase, driverLocation, fetchRoute, pickupLat, pickupLng, dropLat, dropLng]);
 
   // Reemplaza la ruta sugerida (Mapbox/Google, fija desde TRIP_STARTED) por el
   // recorrido real registrado en `booking_tracking` — el trazo debe pasar por
@@ -662,6 +753,7 @@ const ReservationTripScreen = () => {
       }));
       if (points.length > 1) {
         setRouteCoords(points);
+        setNavMode(false);
         mapRef.current?.fitToCoordinates(points, {
           edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
           animated: true,
@@ -677,18 +769,25 @@ const ReservationTripScreen = () => {
   // también corriera ahí, su fitToCoordinates(driverLocation+pickup) podía
   // ganar la carrera y recortar la vista a solo 2 puntos, tapando el resto
   // del trazo aunque routeCoords ya tuviera todo el recorrido.
+  // Encuadre automático: UNA vez por fase, y nunca en Navegar. Antes dependía de
+  // driverLocation y se re-ejecutaba con cada fix, peleando con la cámara.
+  const fittedPhaseRef = useRef<TripPhase | null>(null);
+  const hasDriverLocation = !!driverLocation;
   useEffect(() => {
     if (phase === 'TRIP_COMPLETE') return;
+    if (fittedPhaseRef.current === phase || !hasDriverLocation) return;
     const timer = setTimeout(() => {
-      if (!mapRef.current) return;
-      const markers: { latitude: number; longitude: number }[] = [];
-      if (driverLocation) markers.push(driverLocation);
+      if (!mapRef.current || navModeRef.current) return;
+      const markers: LatLng[] = [];
+      const driverLoc = shownLocationRef.current;
+      if (driverLoc) markers.push(driverLoc);
       if (pickupLat && pickupLng && phase !== 'TRIP_STARTED') markers.push({ latitude: pickupLat, longitude: pickupLng });
       if (phase === 'TRIP_STARTED' && dropLat && dropLng) {
         markers.push({ latitude: pickupLat, longitude: pickupLng });
         markers.push({ latitude: dropLat, longitude: dropLng });
       }
       if (markers.length >= 2) {
+        fittedPhaseRef.current = phase;
         mapRef.current.fitToCoordinates(markers, {
           edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
           animated: true,
@@ -696,7 +795,7 @@ const ReservationTripScreen = () => {
       }
     }, 500);
     return () => clearTimeout(timer);
-  }, [phase, driverLocation, pickupLat, pickupLng, dropLat, dropLng]);
+  }, [phase, hasDriverLocation, pickupLat, pickupLng, dropLat, dropLng]);
 
   // Update booking status in Supabase
   const updateBookingStatus = async (status: string, extraFields?: Record<string, any>) => {
@@ -1156,7 +1255,7 @@ const ReservationTripScreen = () => {
 
   // Open Google Maps navigation
   const openNavigation = () => {
-    setInAppNav(false);
+    setNavMode(false);
     let destLat: number, destLng: number;
     if (phase === 'NAVIGATING_TO_PICKUP' || phase === 'ARRIVED_AT_PICKUP') {
       destLat = pickupLat;
@@ -1171,7 +1270,7 @@ const ReservationTripScreen = () => {
 
   // Open Waze navigation
   const openWaze = () => {
-    setInAppNav(false);
+    setNavMode(false);
     let destLat: number, destLng: number;
     if (phase === 'NAVIGATING_TO_PICKUP' || phase === 'ARRIVED_AT_PICKUP') {
       destLat = pickupLat;
@@ -1184,52 +1283,45 @@ const ReservationTripScreen = () => {
     Linking.openURL(url);
   };
 
+  // Navegar (tipo Waze): 3D, zoom de calle, centrado en el puntero; el mapa
+  // gira con el curso GPS y la cámara sigue cada fix (followNavCamera).
   const startInAppNav = () => {
-    setInAppNav(true);
-    if (driverLocation && mapRef.current) {
-      mapZoomRef.current = IN_APP_NAV_ZOOM;
-      setMapZoom(IN_APP_NAV_ZOOM);
-      mapRef.current.animateCamera(
-        {
-          center: driverLocation,
-          heading: driverHeading || 0,
-          pitch: IN_APP_NAV_PITCH,
-          zoom: IN_APP_NAV_ZOOM,
-        },
-        { duration: 600 },
-      );
-    }
-  };
-
-  const locateOnMap = () => {
-    if (!driverLocation || !mapRef.current) return;
+    navZoomRef.current = NAV_ZOOM;
+    navCourseRef.current = lastHeadingRef.current;
+    setNavMode(true);
+    const center = shownLocationRef.current;
+    if (!center || !mapRef.current) return;
     mapRef.current.animateCamera(
-      {
-        center: driverLocation,
-        heading: inAppNav ? (driverHeading || 0) : 0,
-        pitch: inAppNav ? IN_APP_NAV_PITCH : 0,
-        zoom: mapZoomRef.current,
-      },
-      { duration: 400 },
+      { center, heading: navCourseRef.current, pitch: NAV_PITCH, zoom: NAV_ZOOM },
+      { duration: 700 },
     );
   };
 
+  // Reubicar: manual, sale de Navegar y recentra en 2D (norte arriba).
+  const locateOnMap = () => {
+    setNavMode(false);
+    const center = shownLocationRef.current;
+    if (!center || !mapRef.current) return;
+    mapRef.current.animateCamera(
+      { center, heading: 0, pitch: 0, zoom: OVERVIEW_ZOOM },
+      { duration: 500 },
+    );
+  };
+
+  const toggleInAppNav = () => (navModeRef.current ? locateOnMap() : startInAppNav());
+
   const zoomBy = (delta: number) => {
+    if (!mapRef.current) return;
+    if (navModeRef.current) {
+      navZoomRef.current = Math.min(21, Math.max(15, navZoomRef.current + delta));
+      const center = shownLocationRef.current;
+      if (center) followNavCamera(center, 250);
+      return;
+    }
     const next = Math.min(21, Math.max(12, mapZoomRef.current + delta));
     mapZoomRef.current = next;
     setMapZoom(next);
-    if (!mapRef.current) return;
-    const center = driverLocation || (pickupLat ? { latitude: pickupLat, longitude: pickupLng } : null);
-    if (!center) return;
-    mapRef.current.animateCamera(
-      {
-        center,
-        heading: inAppNav ? (driverHeading || 0) : 0,
-        pitch: inAppNav ? IN_APP_NAV_PITCH : 0,
-        zoom: next,
-      },
-      { duration: 250 },
-    );
+    mapRef.current.animateCamera({ zoom: next }, { duration: 250 });
   };
 
   const syncMapZoom = (cameraZoom?: number, latitudeDelta?: number) => {
@@ -1359,6 +1451,10 @@ const ReservationTripScreen = () => {
         customMapStyle={GOOGLE_MAPS_DARK_STYLE}
         rotateEnabled
         pitchEnabled
+        onPanDrag={() => {
+          // Si el conductor arrastra el mapa, deja de seguirlo (como Waze).
+          if (navModeRef.current) setNavMode(false);
+        }}
         onRegionChangeComplete={(region) => {
           Promise.resolve(mapRef.current?.getCamera?.())
             .then((cam: any) => {
@@ -1368,17 +1464,7 @@ const ReservationTripScreen = () => {
             .catch(() => syncMapZoom(undefined, region.latitudeDelta));
         }}
       >
-        {driverLocation && (
-          <MarkerAnimated
-            coordinate={driverAnim as any}
-            anchor={{ x: 0.5, y: 0.5 }}
-            flat
-            rotation={driverHeading}
-            tracksViewChanges={false}
-            zIndex={10}
-            image={DRIVER_LOCATION_PUCK_IMAGE}
-          />
-        )}
+        {driverLocation && <DriverPuck ref={puckRef} coordinate={driverAnim} />}
 
         {/* Route polyline + puntas dinámicas (misma escala que halo navegar) */}
         {routeCoords.length > 1 && (
@@ -1437,7 +1523,7 @@ const ReservationTripScreen = () => {
           <View style={[s.mapSideControls, { bottom: panelHeight + 14 }]} pointerEvents="box-none">
             <TouchableOpacity
               style={[s.mapCtrlBtn, inAppNav && s.mapCtrlBtnOn]}
-              onPress={() => (inAppNav ? setInAppNav(false) : startInAppNav())}
+              onPress={toggleInAppNav}
               activeOpacity={0.85}
             >
               <Image source={DRIVER_LOCATION_PUCK_IMAGE} style={s.mapCtrlPuck} />
@@ -1478,6 +1564,7 @@ const ReservationTripScreen = () => {
           </TouchableOpacity>
 
           <TouchableOpacity style={s.topBtn} onPress={() => {
+            setNavMode(false);
             mapRef.current?.fitToCoordinates(
               [
                 ...(driverLocation ? [driverLocation] : []),
@@ -1573,7 +1660,7 @@ const ReservationTripScreen = () => {
         <View style={s.navRow}>
           <TouchableOpacity
             style={[s.navBtn, inAppNav && s.navBtnActive]}
-            onPress={() => (inAppNav ? setInAppNav(false) : startInAppNav())}
+            onPress={toggleInAppNav}
             activeOpacity={0.8}
           >
             <Image source={DRIVER_LOCATION_PUCK_IMAGE} style={s.navPuckIcon} />
