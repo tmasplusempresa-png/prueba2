@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import * as Animatable from 'react-native-animatable';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
-import MapView, { MarkerAnimated, AnimatedRegion, Polyline, Circle, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Marker, MarkerAnimated, AnimatedRegion, Polyline, Circle, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -86,18 +86,42 @@ const projectMeters = (p: LatLng, bearing: number, meters: number): LatLng => {
   return { latitude: (φ2 * 180) / Math.PI, longitude: (λ2 * 180) / Math.PI };
 };
 
-type DriverPuckHandle = { setHeading: (deg: number) => void };
+const NAV_GLOW_RING_IMAGE = require('@/assets/images/icon-map-vector/nav-glow-ring.png');
+const ROUTE_TURN_ARROW_IMAGE = require('@/assets/images/icon-map-vector/route-turn-arrow.png');
+/** Periodo del parpadeo del borde del puntero. */
+const GLOW_PERIOD_MS = 1600;
+const GLOW_TICK_MS = 80;
+
+type DriverPuckHandle = {
+  setHeading: (deg: number) => void;
+  /** Rumbo de la cámara en Navegar (puntero de frente a pantalla); null = 2D plano. */
+  setMapBearing: (deg: number | null) => void;
+};
 
 /**
  * Puntero del conductor. Gira con easing propio (requestAnimationFrame) y solo
  * re-renderiza este marcador, no toda la pantalla.
+ *
+ * En 3D un marcador `flat` se acuesta sobre el mapa y se ve más pequeño por la
+ * perspectiva; en Navegar se dibuja de frente y se compensa el rumbo de la cámara.
  */
 const DriverPuck = React.memo(
   React.forwardRef<DriverPuckHandle, { coordinate: AnimatedRegion }>(({ coordinate }, ref) => {
     const [rotation, setRotation] = useState(0);
+    const [mapBearing, setMapBearingState] = useState<number | null>(null);
+    const [glow, setGlow] = useState(1);
     const shownRef = useRef(0);
     const targetRef = useRef(0);
     const frameRef = useRef<number | null>(null);
+
+    useEffect(() => {
+      const start = Date.now();
+      const id = setInterval(() => {
+        const t = ((Date.now() - start) % GLOW_PERIOD_MS) / GLOW_PERIOD_MS;
+        setGlow(0.35 + 0.65 * (0.5 + 0.5 * Math.cos(t * Math.PI * 2)));
+      }, GLOW_TICK_MS);
+      return () => clearInterval(id);
+    }, []);
 
     const step = useCallback(() => {
       const d = angleDelta(shownRef.current, targetRef.current);
@@ -119,6 +143,9 @@ const DriverPuck = React.memo(
           targetRef.current = normalizeDeg(deg);
           if (frameRef.current == null) frameRef.current = requestAnimationFrame(step);
         },
+        setMapBearing: (deg: number | null) => {
+          setMapBearingState(deg == null ? null : Math.round(normalizeDeg(deg)));
+        },
       }),
       [step],
     );
@@ -130,16 +157,30 @@ const DriverPuck = React.memo(
       [],
     );
 
+    const flat = mapBearing == null;
+    const shownRotation = flat ? rotation : normalizeDeg(rotation - mapBearing);
+
     return (
-      <MarkerAnimated
-        coordinate={coordinate as any}
-        anchor={{ x: 0.5, y: 0.5 }}
-        flat
-        rotation={rotation}
-        tracksViewChanges={false}
-        zIndex={10}
-        image={DRIVER_LOCATION_PUCK_IMAGE}
-      />
+      <>
+        <MarkerAnimated
+          coordinate={coordinate as any}
+          anchor={{ x: 0.5, y: 0.5 }}
+          flat={flat}
+          opacity={glow}
+          tracksViewChanges={false}
+          zIndex={9}
+          image={NAV_GLOW_RING_IMAGE}
+        />
+        <MarkerAnimated
+          coordinate={coordinate as any}
+          anchor={{ x: 0.5, y: 0.5 }}
+          flat={flat}
+          rotation={shownRotation}
+          tracksViewChanges={false}
+          zIndex={10}
+          image={DRIVER_LOCATION_PUCK_IMAGE}
+        />
+      </>
     );
   }),
 );
@@ -210,7 +251,9 @@ const getDistanceMeters = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-const decodePolyline = (encoded: string): { latitude: number; longitude: number }[] => {
+/** precision: 5 = Google / Mapbox `polyline`, 6 = Mapbox `polyline6` (más detalle en curvas). */
+const decodePolyline = (encoded: string, precision = 5): { latitude: number; longitude: number }[] => {
+  const factor = Math.pow(10, precision);
   const coords: { latitude: number; longitude: number }[] = [];
   let index = 0, lat = 0, lng = 0;
   while (index < encoded.length) {
@@ -220,10 +263,55 @@ const decodePolyline = (encoded: string): { latitude: number; longitude: number 
     shift = 0; result = 0;
     do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
     lng += (result & 1) ? ~(result >> 1) : (result >> 1);
-    coords.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+    coords.push({ latitude: lat / factor, longitude: lng / factor });
   }
   return coords;
 };
+
+/** Radio (m) con que se redondea cada esquina de la ruta: suaviza sin salirse de la calle. */
+const ROUTE_CORNER_RADIUS_M = 7;
+const ROUTE_CORNER_STEPS = 5;
+
+/**
+ * Redondea las esquinas de la polilínea con una curva cuadrática corta en cada
+ * vértice (en vez de Chaikin, que en cuadras largas recorta decenas de metros).
+ */
+const smoothRoute = (pts: { latitude: number; longitude: number }[]) => {
+  if (pts.length < 3) return pts;
+  const lerp = (a: LatLng, b: LatLng, t: number): LatLng => ({
+    latitude: a.latitude + (b.latitude - a.latitude) * t,
+    longitude: a.longitude + (b.longitude - a.longitude) * t,
+  });
+  const out: LatLng[] = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const a = pts[i - 1];
+    const v = pts[i];
+    const b = pts[i + 1];
+    const lenA = getDistanceMeters(a.latitude, a.longitude, v.latitude, v.longitude);
+    const lenB = getDistanceMeters(v.latitude, v.longitude, b.latitude, b.longitude);
+    const d = Math.min(ROUTE_CORNER_RADIUS_M, lenA / 2, lenB / 2);
+    if (d < 0.5) {
+      out.push(v);
+      continue;
+    }
+    const p0 = lerp(v, a, d / lenA);
+    const p2 = lerp(v, b, d / lenB);
+    for (let s = 0; s <= ROUTE_CORNER_STEPS; s++) {
+      const t = s / ROUTE_CORNER_STEPS;
+      const u = 1 - t;
+      out.push({
+        latitude: u * u * p0.latitude + 2 * u * t * v.latitude + t * t * p2.latitude,
+        longitude: u * u * p0.longitude + 2 * u * t * v.longitude + t * t * p2.longitude,
+      });
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+};
+
+type RouteTurn = { coord: LatLng; bearing: number };
+/** La flecha va sobre el tramo de salida del giro, un poco después de la esquina. */
+const TURN_ARROW_OFFSET_M = 9;
 
 // Formatea una duración en segundos a "Xh Ym" / "Xm Ys" para el resumen de viaje.
 const formatTripDuration = (totalSeconds: number | null | undefined): string => {
@@ -311,6 +399,7 @@ const ReservationTripScreen = () => {
   const setNavMode = useCallback((on: boolean) => {
     navModeRef.current = on;
     setInAppNav(on);
+    puckRef.current?.setMapBearing(on ? navCourseRef.current : null);
   }, []);
   const [customerPhoto, setCustomerPhoto] = useState<string | null>(null);
   const unreadChatCount = useChatUnreadCount(reservation?.id, 'driver', !!reservation?.id);
@@ -319,6 +408,7 @@ const ReservationTripScreen = () => {
   const [mapZoom, setMapZoom] = useState(17);
   const mapZoomRef = useRef(17);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const [routeTurns, setRouteTurns] = useState<RouteTurn[]>([]);
   const [loading, setLoading] = useState(false);
   const [distanceToPickup, setDistanceToPickup] = useState<number | null>(null);
   const [driverCountdown, setDriverCountdown] = useState<number | null>(null);
@@ -498,6 +588,7 @@ const ReservationTripScreen = () => {
               if (course != null) {
                 applyHeading(course);
                 navCourseRef.current = course;
+                if (navModeRef.current) puckRef.current?.setMapBearing(course);
                 shown = projectMeters(next, course, spd * POSITION_LEAD_S);
               }
             }
@@ -682,24 +773,63 @@ const ReservationTripScreen = () => {
   }, [reservation?.id, reservation?.customer_name, phase, nav]);
 
   // Fetch route polyline
+  // overview=full + polyline6: geometría completa (la simplificada dibuja curvas "cuadradas").
   const fetchRoute = useCallback(async (fromLat: number, fromLng: number, toLat: number, toLng: number) => {
     try {
       if (MAPBOX_TOKEN) {
-        const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${fromLng},${fromLat};${toLng},${toLat}?geometries=polyline&access_token=${MAPBOX_TOKEN}`;
+        const url =
+          `https://api.mapbox.com/directions/v5/mapbox/driving/${fromLng},${fromLat};${toLng},${toLat}` +
+          `?geometries=polyline6&overview=full&steps=true&access_token=${MAPBOX_TOKEN}`;
         const res = await fetch(url);
         const data = await res.json();
-        if (data.routes?.[0]?.geometry) {
-          setRouteCoords(decodePolyline(data.routes[0].geometry));
+        const route = data.routes?.[0];
+        if (route?.geometry) {
+          const turns: RouteTurn[] = [];
+          for (const leg of route.legs || []) {
+            for (const step of leg.steps || []) {
+              const m = step.maneuver;
+              if (!m?.location || typeof m.bearing_after !== 'number') continue;
+              if (m.type === 'depart' || m.type === 'arrive') continue;
+              if (!/left|right|uturn/.test(String(m.modifier || ''))) continue;
+              const at = { latitude: m.location[1], longitude: m.location[0] };
+              turns.push({
+                coord: projectMeters(at, m.bearing_after, TURN_ARROW_OFFSET_M),
+                bearing: m.bearing_after,
+              });
+            }
+          }
+          setRouteCoords(smoothRoute(decodePolyline(route.geometry, 6)));
+          setRouteTurns(turns);
           return;
         }
       }
-      // Fallback to Google
+      // Fallback a Google: la polilínea de cada paso trae el detalle completo.
       if (API_KEY) {
         const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${fromLat},${fromLng}&destination=${toLat},${toLng}&key=${API_KEY}`;
         const res = await fetch(url);
         const data = await res.json();
-        if (data.routes?.[0]?.overview_polyline?.points) {
+        const steps: any[] = data.routes?.[0]?.legs?.[0]?.steps || [];
+        const full: LatLng[] = [];
+        const turns: RouteTurn[] = [];
+        for (const step of steps) {
+          const pts = step?.polyline?.points ? decodePolyline(step.polyline.points) : [];
+          if (/left|right|uturn/.test(String(step?.maneuver || '')) && pts.length >= 2) {
+            const out = pts.find(
+              (p) => getDistanceMeters(pts[0].latitude, pts[0].longitude, p.latitude, p.longitude) > 3,
+            );
+            if (out) {
+              const bearing = bearingDeg(pts[0], out);
+              turns.push({ coord: projectMeters(pts[0], bearing, TURN_ARROW_OFFSET_M), bearing });
+            }
+          }
+          full.push(...(full.length ? pts.slice(1) : pts));
+        }
+        if (full.length > 1) {
+          setRouteCoords(smoothRoute(full));
+          setRouteTurns(turns);
+        } else if (data.routes?.[0]?.overview_polyline?.points) {
           setRouteCoords(decodePolyline(data.routes[0].overview_polyline.points));
+          setRouteTurns([]);
         }
       }
     } catch {}
@@ -753,6 +883,7 @@ const ReservationTripScreen = () => {
       }));
       if (points.length > 1) {
         setRouteCoords(points);
+        setRouteTurns([]);
         setNavMode(false);
         mapRef.current?.fitToCoordinates(points, {
           edgePadding: { top: 120, right: 60, bottom: 280, left: 60 },
@@ -1471,7 +1602,7 @@ const ReservationTripScreen = () => {
           <>
             <Polyline
               coordinates={routeCoords}
-              strokeWidth={8}
+              strokeWidth={11}
               strokeColor={ROUTE_LINE_BLUE}
               lineJoin="round"
               lineCap="round"
@@ -1479,12 +1610,25 @@ const ReservationTripScreen = () => {
             />
             <Polyline
               coordinates={routeCoords}
-              strokeWidth={5}
+              strokeWidth={7}
               strokeColor="#00E676"
               lineJoin="round"
               lineCap="round"
               zIndex={3}
             />
+            {(inAppNav || mapZoom >= 15) &&
+              routeTurns.map((t, i) => (
+                <Marker
+                  key={`turn-${i}-${t.coord.latitude}-${t.coord.longitude}`}
+                  coordinate={t.coord}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  flat
+                  rotation={t.bearing}
+                  tracksViewChanges={false}
+                  zIndex={4}
+                  image={ROUTE_TURN_ARROW_IMAGE}
+                />
+              ))}
             {showRouteStartTip && (
               <Circle
                 center={routeCoords[0]}
