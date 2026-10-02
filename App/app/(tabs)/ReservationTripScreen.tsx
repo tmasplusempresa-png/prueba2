@@ -71,6 +71,10 @@ const MARKER_GLIDE_MS = GPS_INTERVAL_MS;
  * compensar la latencia del fix + el deslizamiento; sin esto el puntero va ~2 s atrás.
  */
 const POSITION_LEAD_S = 1.2;
+/** En Navegar el mapa se orienta hacia este punto adelante en la ruta (anticipa curvas). */
+const NAV_LOOKAHEAD_M = 35;
+/** Fracción del giro pendiente del mapa aplicada por fix: giro gradual, sin saltos. */
+const NAV_COURSE_SMOOTHING = 0.5;
 
 type LatLng = { latitude: number; longitude: number };
 
@@ -696,17 +700,29 @@ const ReservationTripScreen = () => {
             if (spd >= MOVING_SPEED_MPS) {
               const lead = spd * POSITION_LEAD_S;
               let course: number | null;
+              let mapCourse: number | null;
               if (snap) {
                 const ahead = advanceAlongRoute(route, snap, lead);
                 shown = ahead.point;
                 course = ahead.bearing;
+                // El mapa mira a un punto más adelante en la ruta: empieza a girar
+                // al entrar a la curva y la deja recta hacia el frente al salir.
+                const lookAhead = advanceAlongRoute(route, snap, lead + NAV_LOOKAHEAD_M).point;
+                mapCourse =
+                  getDistanceMeters(shown.latitude, shown.longitude, lookAhead.latitude, lookAhead.longitude) > 3
+                    ? bearingDeg(shown, lookAhead)
+                    : course;
               } else {
                 course = gpsHeading ?? (moved >= 5 ? bearingDeg(prev, next) : null);
                 if (course != null) shown = projectMeters(next, course, lead);
+                mapCourse = course;
               }
-              if (course != null) {
-                applyHeading(course);
-                navCourseRef.current = course;
+              if (course != null) applyHeading(course);
+              if (mapCourse != null) {
+                const prevCourse = navCourseRef.current;
+                navCourseRef.current = normalizeDeg(
+                  prevCourse + angleDelta(prevCourse, mapCourse) * NAV_COURSE_SMOOTHING,
+                );
               }
             }
             glideTo(shown);
@@ -738,8 +754,8 @@ const ReservationTripScreen = () => {
       try {
         sub = await Location.watchHeadingAsync((h) => {
           if (cancelled) return;
-          // En Navegar el puntero mira hacia la ruta (como Waze), no hacia donde apunta el celular.
-          if (navModeRef.current || speedMpsRef.current >= MOVING_SPEED_MPS) {
+          // Solo gira el puntero; el mapa en Navegar lo orienta la ruta, no la brújula.
+          if (speedMpsRef.current >= MOVING_SPEED_MPS) {
             compassSmoothedRef.current = null;
             return;
           }
@@ -1528,18 +1544,23 @@ const ReservationTripScreen = () => {
   const startInAppNav = () => {
     navZoomRef.current = NAV_ZOOM;
     const center = shownLocationRef.current;
-    // Mirar hacia la ruta: sobre ella, en su sentido de avance; fuera de ella, hacia el punto más cercano.
+    // Girar el mapa para dejar la línea de ruta recta hacia el frente de la pantalla.
+    // El puntero no se toca: sigue la brújula.
     let course = lastHeadingRef.current;
     const route = routeCoordsRef.current;
     const snap = center && route.length > 1 ? snapToRoute(route, center) : null;
-    if (snap) {
-      course =
-        snap.distM <= ROUTE_SNAP_MAX_M
-          ? advanceAlongRoute(route, snap, 20).bearing
-          : bearingDeg(center as LatLng, snap.point);
+    if (center && snap) {
+      if (snap.distM <= ROUTE_SNAP_MAX_M) {
+        const lookAhead = advanceAlongRoute(route, snap, NAV_LOOKAHEAD_M).point;
+        course =
+          getDistanceMeters(snap.point.latitude, snap.point.longitude, lookAhead.latitude, lookAhead.longitude) > 3
+            ? bearingDeg(snap.point, lookAhead)
+            : advanceAlongRoute(route, snap, 1).bearing;
+      } else {
+        course = bearingDeg(center, snap.point);
+      }
     }
     navCourseRef.current = course;
-    applyHeading(course);
     puckRef.current?.setTilted(true);
     setNavMode(true);
     if (!center || !mapRef.current) return;
