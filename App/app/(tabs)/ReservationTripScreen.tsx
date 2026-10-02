@@ -51,7 +51,7 @@ const NAV_ZOOM = 19;
 /** Cámara 2D al reubicar / salir de Navegar. */
 const OVERVIEW_ZOOM = 17;
 /** "Finalizar viaje" solo se habilita a esta distancia del destino. */
-const END_TRIP_MAX_DISTANCE_M = 20;
+const END_TRIP_MAX_DISTANCE_M = 100;
 
 /** Desde esta velocidad (~9 km/h) el rumbo GPS es confiable; por debajo manda la brújula. */
 const MOVING_SPEED_MPS = 2.5;
