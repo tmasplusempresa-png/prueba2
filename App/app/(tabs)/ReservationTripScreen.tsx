@@ -344,13 +344,15 @@ const ReservationTripScreen = () => {
       sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 2000 },
         loc => {
+          // El primer fix suele ser la ubicación en caché del SO (minutos atrás).
+          if (Date.now() - loc.timestamp > 30_000) return;
           const pos = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
           setDriverLocation(pos);
           const gpsH = loc.coords.heading;
           if (typeof gpsH === 'number' && gpsH >= 0) {
             gpsHeadingRef.current = gpsH;
-            // Fuera de Navegar: solo GPS. En Navegar la brújula manda si vas lento.
-            if (!inAppNavRef.current || (loc.coords.speed ?? 0) >= 1.5) {
+            // Quieto, el rumbo GPS es ruido y hace girar el puntero.
+            if ((loc.coords.speed ?? 0) >= 1.5) {
               setDriverHeading(gpsH);
             }
           }

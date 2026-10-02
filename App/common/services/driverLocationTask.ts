@@ -23,6 +23,14 @@ const MAX_LOCAL_BACKUP_POINTS = 500;
 
 const MIN_DISTANCE_METERS = 15;
 const SAFETY_INTERVAL_MS = 8000;
+// Al arrancar, el SO entrega primero la última ubicación en caché (puede ser de
+// donde estuvo el conductor hace minutos) y luego fixes WiFi/celda imprecisos.
+const MAX_FIX_AGE_MS = 30_000;
+const MAX_ACCURACY_METERS = 60;
+// Si llevamos tiempo sin publicar, aceptamos fixes peores para no dejar al
+// pasajero sin señal en zonas de GPS pobre.
+const RELAXED_ACCURACY_METERS = 150;
+const RELAXED_AFTER_MS = 30_000;
 
 function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000;
@@ -73,27 +81,47 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
     return;
   }
 
-  const latest = locations[locations.length - 1];
-  const { latitude: lat, longitude: lng, accuracy } = latest.coords;
-
   let lastInsert: { lat: number; lng: number; time: number } | null = null;
   try {
     const raw = await AsyncStorage.getItem(LAST_INSERT_KEY);
     if (raw) lastInsert = JSON.parse(raw);
   } catch {}
 
+  const now = Date.now();
+  const sinceLastInsert = lastInsert ? now - lastInsert.time : Infinity;
+  const accuracyLimit =
+    sinceLastInsert > RELAXED_AFTER_MS ? RELAXED_ACCURACY_METERS : MAX_ACCURACY_METERS;
+  const usable = locations.filter((l) => {
+    if (now - l.timestamp > MAX_FIX_AGE_MS) return false;
+    const acc = l.coords.accuracy;
+    return typeof acc !== 'number' || acc <= accuracyLimit;
+  });
+  if (usable.length === 0) {
+    console.log('[driverLocationTask] descartados', locations.length, 'fix(es) viejos/imprecisos');
+    return;
+  }
+
+  const latest = usable[usable.length - 1];
+  let { latitude: lat, longitude: lng } = latest.coords;
+  const { accuracy } = latest.coords;
+
   if (lastInsert) {
     const distMoved = haversineMeters(lastInsert.lat, lastInsert.lng, lat, lng);
-    const elapsed = Date.now() - lastInsert.time;
-    if (distMoved < MIN_DISTANCE_METERS && elapsed < SAFETY_INTERVAL_MS) {
-      console.log(
-        '[driverLocationTask] throttled (dist=' +
-          distMoved.toFixed(1) +
-          'm, elapsed=' +
-          elapsed +
-          'ms)',
-      );
-      return;
+    if (distMoved < MIN_DISTANCE_METERS) {
+      if (sinceLastInsert < SAFETY_INTERVAL_MS) {
+        console.log(
+          '[driverLocationTask] throttled (dist=' +
+            distMoved.toFixed(1) +
+            'm, elapsed=' +
+            sinceLastInsert +
+            'ms)',
+        );
+        return;
+      }
+      // Heartbeat con la última posición publicada: mantiene fresca la señal
+      // del pasajero sin que el jitter del GPS mueva/gire el carro estando quieto.
+      lat = lastInsert.lat;
+      lng = lastInsert.lng;
     }
   }
 
