@@ -72,6 +72,7 @@ import { showDriverActiveNotification, dismissDriverNotification, updateDriverNo
 import { requestIgnoreBatteryOptimization } from '@/common/services/batteryOptimizationPrompt';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { registerDriverGoHandlers } from '@/common/utils/driverGoBridge';
+import { ensureDriverGoPermissions, openAppSettings } from '@/common/utils/driverGoPermissions';
 import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useDriverNavBottomPad } from '@/components/DriverBottomNav';
@@ -1434,9 +1435,6 @@ const MapScreen = () => {
 
     // Al activar GO: ubicación «Siempre» + notificaciones son obligatorias
     if (newStatus) {
-      const { ensureDriverGoPermissions, openAppSettings } = await import(
-        '@/common/utils/driverGoPermissions'
-      );
       const perm = await ensureDriverGoPermissions();
       if (!perm.ok) {
         const buttons: AlertButton[] = perm.openSettings
