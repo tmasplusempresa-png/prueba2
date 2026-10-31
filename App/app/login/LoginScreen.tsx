@@ -13,7 +13,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useDispatch } from "react-redux";
 import { AntDesign, MaterialCommunityIcons, Feather } from "@expo/vector-icons";
 import { login } from "@/common/reducers/authReducer";
-import { validateEmailFormat, validatePhoneFormat, extractPhoneDigits, normalizeEmail } from '@/common/utils/validators';
+import { validateEmailFormat, validatePhoneFormat, extractPhoneDigits, normalizeEmail, formatReferralCode, isValidReferralCodeFormat } from '@/common/utils/validators';
 import { useEmailValidation } from '@/hooks/useEmailValidation';
 import { usePhoneValidation } from '@/hooks/usePhoneValidation';
 import { useAuth } from '@/hooks/useAuth';
@@ -412,7 +412,7 @@ const LoginScreen = ({ navigation }: Props) => {
     const sanitizedEmail = sanitizeInput(form.email, 'email');
     const sanitizedMobile = sanitizeInput(form.mobile, 'phone');
     const sanitizedDocumentNumber = (form.documentNumber || '').replace(/[^0-9A-Za-z-]/g, '').trim();
-    const sanitizedReferralCode = (form.referralCode || '').trim();
+    const sanitizedReferralCode = formatReferralCode(form.referralCode);
 
     if (
       !sanitizedFirstName ||
@@ -426,6 +426,11 @@ const LoginScreen = ({ navigation }: Props) => {
       !form.confirmPassword
     ) {
       showAlert('error', 'Error', 'Por favor completa todos los campos correctamente');
+      return;
+    }
+
+    if (sanitizedReferralCode && !isValidReferralCodeFormat(sanitizedReferralCode)) {
+      showAlert('error', 'Error', 'El código de referido debe tener el formato AAA-XXXXX');
       return;
     }
 
@@ -1168,12 +1173,13 @@ const LoginScreen = ({ navigation }: Props) => {
                                 placeholder="Código de referido (opcional)"
                                 placeholderTextColor="rgba(255, 255, 255, 0.5)"
                                 value={form.referralCode}
-                                onChangeText={(t) => updateField('referralCode', t.trim())}
+                                onChangeText={(t) => updateField('referralCode', formatReferralCode(t).slice(0, 9))}
                                 onFocus={() => setUI(u => ({ ...u, referralCodeFocused: true }))}
                                 onBlur={() => setUI(u => ({ ...u, referralCodeFocused: false }))}
                                 editable={!ui.loading}
                                 autoCapitalize="characters"
-                                maxLength={32}
+                                autoCorrect={false}
+                                maxLength={9}
                               />
                               {ui.referralCodeFocused && <View style={styles.scanLine} />}
                             </View>

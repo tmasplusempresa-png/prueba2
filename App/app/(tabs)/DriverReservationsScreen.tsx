@@ -800,6 +800,12 @@ const DriverReservationsScreen = ({
   const handleAccept = async (reservation: Reservation) => {
     const isImmmediate = reservation.booking_type === 'immediate';
 
+    // La BD tambien lo exige (trigger reserva_requiere_conductor_aprobado); esto evita el viaje de ida y vuelta.
+    if (user?.approved === false) {
+      showAlert('warning', 'Cuenta no verificada', 'Tu cuenta aún no ha sido verificada. Podrás tomar servicios y reservas cuando el equipo apruebe tu documentación.');
+      return;
+    }
+
     // Regla de negocio: el conductor solo puede tomar servicios cuya categoría
     // coincida con la del vehículo que tiene actualmente activo.
     const driverCarTypeNorm = normalizeCarType(activeCarType);

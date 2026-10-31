@@ -909,6 +909,12 @@ const MapScreen = () => {
       return;
     }
 
+    // La BD tambien lo exige (trigger reserva_requiere_conductor_aprobado); esto evita el viaje de ida y vuelta.
+    if (isDriverView && user.approved === false) {
+      showAlert('warning', 'Cuenta no verificada', 'Tu cuenta aún no ha sido verificada. Podrás tomar servicios cuando el equipo apruebe tu documentación.');
+      return;
+    }
+
     navigation.navigate("RideList", { booking });
 
     dispatch(acceptBooking({ booking, driverProfile: user }))

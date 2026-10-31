@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import Constants from 'expo-constants';
 import { supabase, clearStoredSession } from '@/config/SupabaseConfig';
-import { normalizeEmail } from '@/common/utils/validators';
+import { normalizeEmail, formatReferralCode } from '@/common/utils/validators';
 
 interface LoginPayload {
   email: string;
@@ -112,7 +112,7 @@ export const useAuth = () => {
         defaultRedirect;
 
       console.log('[useAuth.signUp] emailRedirectTo:', emailRedirectTo);
-      const normalizedReferredBy = (payload.referredByCode || '').trim() || null;
+      const normalizedReferredBy = formatReferralCode(payload.referredByCode) || null;
 
       const { data, error: authError } = await supabase.auth.signUp({
         email: sanitizedEmail,

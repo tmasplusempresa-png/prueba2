@@ -16,7 +16,8 @@ import {
   collectDriverIdCandidates,
 } from '@/common/utils/driverIds';
 
-const ACTIVE_STATUSES = ['ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED'];
+// REACHED: llegó al destino pero el viaje no se cierra hasta COMPLETE.
+const ACTIVE_STATUSES = ['ACCEPTED', 'ARRIVED', 'STARTED', 'REACHED', 'IN_PROGRESS', 'TRIP_STARTED'];
 
 // Watchdog anti-kill: si el foreground service muere silenciosamente en OEMs
 // agresivos (MIUI, EMUI, ColorOS), `hasStartedLocationUpdatesAsync` puede
