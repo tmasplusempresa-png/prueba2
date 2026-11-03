@@ -11,10 +11,12 @@ import {
 } from "react-native";
 import { AntDesign, Ionicons } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 type Props = NativeStackScreenProps<any>;
 
 const Insurance = ({ navigation }: Props) => {
+  const headerTopPadding = useHeaderTopPadding(8, 14);
   const glow1 = useRef(new Animated.Value(0)).current;
   const glow2 = useRef(new Animated.Value(0)).current;
   const orbRotate = useRef(new Animated.Value(0)).current;
@@ -103,7 +105,7 @@ const Insurance = ({ navigation }: Props) => {
   });
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: headerTopPadding }]}>
       <StatusBar barStyle="light-content" />
 
       <View pointerEvents="none" style={styles.bgLayer}>

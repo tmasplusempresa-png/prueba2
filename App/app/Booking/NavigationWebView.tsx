@@ -3,8 +3,11 @@ import React from "react";
 import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
 import { useRoute, useNavigation } from "@react-navigation/native";
+import { StatusBar } from "expo-status-bar";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const NavigationWebView = () => {
+  const topPadding = useHeaderTopPadding(0, 0);
   const route = useRoute();
   const navigation = useNavigation();
   const { url } = route.params as { url: string };
@@ -16,7 +19,8 @@ const NavigationWebView = () => {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: topPadding }]}>
+      <StatusBar style="dark" />
       <WebView
         source={{ uri: url }}
         onNavigationStateChange={handleWebViewNavigationStateChange}
@@ -36,6 +40,7 @@ const NavigationWebView = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: "#fff",
   },
   loading: {
     position: "absolute",

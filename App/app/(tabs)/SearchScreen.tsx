@@ -12,7 +12,6 @@ import {
   Platform,
   Animated,
   StatusBar,
-  ScrollView,
   ActivityIndicator,
 } from "react-native";
 import { useSelector } from "react-redux";
@@ -57,6 +56,12 @@ const TYPE_ICONS: Record<string, { icon: string; family: string; color: string }
   Restaurante: { icon: "silverware-fork-knife", family: "MaterialCommunityIcons", color: "#E91E63" },
   Otro: { icon: "map-marker-radius", family: "MaterialCommunityIcons", color: "#FFFFFF" },
 };
+
+type PlaceType = "Casa" | "Trabajo" | "Otro";
+const PLACE_TYPES: PlaceType[] = ["Casa", "Trabajo", "Otro"];
+/** Solo puede existir un lugar de cada uno de estos tipos por usuario; su nombre es el propio tipo. */
+const UNIQUE_PLACE_TYPES: PlaceType[] = ["Casa", "Trabajo"];
+const isFixedNameType = (type?: string | null) => !!type && (UNIQUE_PLACE_TYPES as string[]).includes(type);
 
 // Floating diamond particle
 const PARTICLES = [
@@ -109,12 +114,13 @@ const DiamondParticle = ({ size, x, y, color, duration, delay }: typeof PARTICLE
   );
 };
 
-export default function FavoritesScreen({ navigation }: Props) {
+export default function FavoritesScreen({ navigation, route }: Props) {
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const profile = useSelector((state: RootState) => state.auth.profile) as any;
   const insets = useSafeAreaInsets();
   const navBottomPad = useCustomerNavBottomPad();
   const headerTopPadding = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
+  const modalBottomPadding = Platform.OS === 'ios' ? Math.max(insets.bottom + 6, 24) : 28;
   const isCustomer = String(
     profile?.user_type ||
       user?.usertype ||
@@ -130,15 +136,12 @@ export default function FavoritesScreen({ navigation }: Props) {
   const [newAddressLabel, setNewAddressLabel] = useState("");
   const [newAddress, setNewAddress] = useState("");
   const [newAddressDetails, setNewAddressDetails] = useState<any>(null);
-  const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
-  const [editingAddressLabel, setEditingAddressLabel] = useState<string>("");
+  const [newPlaceType, setNewPlaceType] = useState<PlaceType>("Otro");
+  const [editingPlace, setEditingPlace] = useState<Address | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const searchAutocompleteRef = useRef<any>(null);
+  const placeAutocompleteRef = useRef<any>(null);
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
-
-  const [selectedAddress, setSelectedAddress] = useState<Address | null>(null);
-  const [isFavorite, setIsFavorite] = useState(false);
-  const [favoriteType, setFavoriteType] = useState<string | null>(null);
 
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
@@ -215,51 +218,76 @@ export default function FavoritesScreen({ navigation }: Props) {
   // ── Helpers: contar favoritos actuales ──
   const favoriteCount = addresses.filter(a => a.isFavorite).length;
 
-  const handleLongPress = (address: Address) => {
-    setSelectedAddress(address);
-    setIsFavorite(address.isFavorite || false);
-    setFavoriteType(address.typeAddress || null);
-  };
+  const isTypeTaken = (type: string | null, excludeId?: string) =>
+    !!type &&
+    (UNIQUE_PLACE_TYPES as string[]).includes(type) &&
+    addresses.some(a => a.typeAddress === type && a.id !== excludeId);
 
-  // ── UPDATE favorito (categoría + is_favorite) en Supabase ──
-  const handleSaveFavorite = async () => {
-    if (!selectedAddress || !supabaseUserId) return;
-    // Validar límite de 5 al marcar como favorito
-    if (isFavorite && !selectedAddress.isFavorite && favoriteCount >= MAX_FAVORITES) {
+  const showTypeTakenAlert = (type: string) =>
+    showAlert(
+      'warning',
+      `Ya tienes ${type === 'Casa' ? 'una dirección de casa' : 'una dirección de trabajo'}`,
+      'Edítala o elimínala para registrar una nueva.',
+    );
+
+  const openNewPlaceModal = (type: PlaceType = "Otro") => {
+    if (favoriteCount >= MAX_FAVORITES) {
       showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
       return;
     }
-    try {
-      const headers = await getSupabaseAuthHeaders(true);
-      const url = `${SUPABASE_URL}/rest/v1/favorite_places?id=eq.${encodeURIComponent(selectedAddress.id)}`;
-      const resp = await fetch(url, {
-        method: 'PATCH',
-        headers: { ...headers, 'Prefer': 'return=representation' },
-        body: JSON.stringify({
-          is_favorite: isFavorite,
-          type_address: favoriteType,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.text();
-        if (err.includes('máximo 5')) {
-          showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos.`);
-        } else {
-          showAlert('error', 'Error', 'No se pudo actualizar el lugar.');
-        }
-        return;
-      }
-      setAddresses(prev =>
-        prev.map(a => a.id === selectedAddress.id ? { ...a, isFavorite, typeAddress: favoriteType } : a)
-      );
-    } catch (e) {
-      console.warn('[FavPlaces] handleSaveFavorite error:', e);
-      showAlert('error', 'Error', 'Error de conexión al guardar.');
-    }
-    setSelectedAddress(null);
-    setIsFavorite(false);
-    setFavoriteType(null);
+    setEditingPlace(null);
+    setNewAddressLabel("");
+    setNewAddress("");
+    setNewAddressDetails(null);
+    setNewPlaceType(isTypeTaken(type) ? "Otro" : type);
+    setModalVisible(true);
   };
+
+  // ── Llegada desde Inicio (Casa / Trabajo sin registrar) ──
+  const missingType = (route?.params as any)?.missingType as PlaceType | undefined;
+  const missingNonce = (route?.params as any)?.nonce;
+  useEffect(() => {
+    if (!missingType || loading) return;
+    navigation.setParams({ missingType: undefined, nonce: undefined });
+    if (isTypeTaken(missingType)) return;
+    const label = missingType === 'Casa' ? 'casa' : 'trabajo';
+    showAlert(
+      'info',
+      `Aún no tienes dirección de ${label}`,
+      `Crea tu dirección de ${label} para pedir tu viaje con un solo toque desde el inicio.`,
+      [
+        { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+        { text: 'Crear ahora', onPress: () => { setAlertVisible(false); openNewPlaceModal(missingType); } },
+      ],
+    );
+  }, [missingType, missingNonce, loading]);
+
+  const openEditPlaceModal = (place: Address) => {
+    const type = (PLACE_TYPES as string[]).includes(place.typeAddress || '')
+      ? (place.typeAddress as PlaceType)
+      : "Otro";
+    setEditingPlace(place);
+    setNewPlaceType(type);
+    setNewAddressLabel(type === "Otro" ? place.label : "");
+    setNewAddress(place.address || "");
+    setNewAddressDetails(null);
+    setModalVisible(true);
+  };
+
+  const closePlaceModal = () => {
+    setModalVisible(false);
+    setEditingPlace(null);
+    setNewAddressLabel("");
+    setNewAddress("");
+    setNewAddressDetails(null);
+    setNewPlaceType("Otro");
+  };
+
+  useEffect(() => {
+    if (!modalVisible) return;
+    const t = setTimeout(() => placeAutocompleteRef.current?.setAddressText(editingPlace?.address || ""), 50);
+    return () => clearTimeout(t);
+  }, [modalVisible, editingPlace]);
 
   const filteredAddresses = searchQuery.trim()
     ? addresses.filter(
@@ -333,10 +361,51 @@ export default function FavoritesScreen({ navigation }: Props) {
     searchAutocompleteRef.current?.setAddressText("");
   };
 
-  // ── INSERT lugar desde modal "Nuevo Lugar" → Supabase ──
-  const handleAddAddress = async () => {
-    if (newAddressLabel.trim() === "" || newAddress.trim() === "") {
+  // ── UPDATE lugar desde modal "Editar lugar" → Supabase ──
+  const handleUpdatePlace = async (place: Address, placeName: string) => {
+    const coords = newAddressDetails
+      ? { latitude: newAddressDetails.geometry.location.lat, longitude: newAddressDetails.geometry.location.lng }
+      : { latitude: place.lat, longitude: place.lng };
+    try {
+      const headers = await getSupabaseAuthHeaders(true);
+      const resp = await fetch(`${SUPABASE_URL}/rest/v1/favorite_places?id=eq.${encodeURIComponent(place.id)}`, {
+        method: 'PATCH',
+        headers: { ...headers, 'Prefer': 'return=representation' },
+        body: JSON.stringify({
+          name: placeName,
+          description: newAddress,
+          type_address: newPlaceType,
+          ...coords,
+        }),
+      });
+      if (!resp.ok) {
+        console.warn('[FavPlaces] update error:', await resp.text());
+        showAlert('error', 'Error', 'No se pudo actualizar el lugar.');
+        return;
+      }
+      setAddresses(prev => prev.map(a => a.id === place.id
+        ? { ...a, label: placeName, address: newAddress, typeAddress: newPlaceType, lat: coords.latitude, lng: coords.longitude }
+        : a));
+      closePlaceModal();
+    } catch (e) {
+      console.warn('[FavPlaces] handleUpdatePlace error:', e);
+      showAlert('error', 'Error', 'Error de conexión al guardar.');
+    }
+  };
+
+  // ── INSERT / UPDATE lugar desde el modal → Supabase ──
+  const handleSavePlace = async () => {
+    const placeName = newPlaceType === "Otro" ? newAddressLabel.trim() : newPlaceType;
+    if (placeName === "" || newAddress.trim() === "") {
       showAlert('error', 'Error', 'Por favor, completa todos los campos.');
+      return;
+    }
+    if (isTypeTaken(newPlaceType, editingPlace?.id)) {
+      showTypeTakenAlert(newPlaceType);
+      return;
+    }
+    if (editingPlace) {
+      await handleUpdatePlace(editingPlace, placeName);
       return;
     }
     if (!newAddressDetails) {
@@ -359,12 +428,12 @@ export default function FavoritesScreen({ navigation }: Props) {
         headers: { ...headers, 'Prefer': 'return=representation' },
         body: JSON.stringify({
           user_id: supabaseUserId,
-          name: newAddressLabel.trim(),
+          name: placeName,
           description: newAddress,
           latitude: newAddressDetails.geometry.location.lat,
           longitude: newAddressDetails.geometry.location.lng,
           is_favorite: true,
-          type_address: 'Otro',
+          type_address: newPlaceType,
           usage_count: 1,
         }),
       });
@@ -391,14 +460,11 @@ export default function FavoritesScreen({ navigation }: Props) {
       };
       setAddresses(prev => [newAddr, ...prev]);
     } catch (e) {
-      console.warn('[FavPlaces] handleAddAddress error:', e);
+      console.warn('[FavPlaces] handleSavePlace error:', e);
       showAlert('error', 'Error', 'Error de conexión al guardar.');
     }
 
-    setNewAddressLabel("");
-    setNewAddress("");
-    setNewAddressDetails(null);
-    setModalVisible(false);
+    closePlaceModal();
   };
 
   const handleLocationSelect = (data: any, details: any = null) => {
@@ -410,34 +476,6 @@ export default function FavoritesScreen({ navigation }: Props) {
       setNewAddress(data.description);
       setNewAddressDetails(null);
     }
-  };
-
-  const handleEditAddress = (id: string, label: string) => {
-    setEditingAddressId(id);
-    setEditingAddressLabel(label);
-  };
-
-  // ── UPDATE nombre del lugar en Supabase ──
-  const handleSaveEdit = async (id: string) => {
-    setEditingAddressId(null);
-    const trimmed = editingAddressLabel.trim();
-    if (!trimmed) { setEditingAddressLabel(""); return; }
-    try {
-      const headers = await getSupabaseAuthHeaders(true);
-      const url = `${SUPABASE_URL}/rest/v1/favorite_places?id=eq.${encodeURIComponent(id)}`;
-      await fetch(url, {
-        method: 'PATCH',
-        headers: { ...headers, 'Prefer': 'return=representation' },
-        body: JSON.stringify({ name: trimmed }),
-      });
-      setAddresses(prev => prev.map(a => a.id === id ? { ...a, label: trimmed } : a));
-    } catch (e) { console.warn('[FavPlaces] handleSaveEdit error:', e); }
-    setEditingAddressLabel("");
-  };
-
-  const handleFavoriteTypeSelect = (type: string | null) => {
-    setFavoriteType(type);
-    setIsFavorite(type !== null);
   };
 
   // ── DELETE lugar de Supabase ──
@@ -473,30 +511,38 @@ export default function FavoritesScreen({ navigation }: Props) {
     return <MaterialCommunityIcons name={icon as any} size={16} color={color} />;
   };
 
-  const renderFavoriteTypeButton = (type: string | null, label: string) => {
-    const isSelected = favoriteType === type;
-    const typeInfo = type ? TYPE_ICONS[type] : null;
-    return (
-      <TouchableOpacity
-        key={type ?? "none"}
-        style={[styles.favoriteTypeButton, isSelected && styles.selectedFavoriteTypeButton]}
-        onPress={() => handleFavoriteTypeSelect(type)}
-        activeOpacity={0.7}
-      >
-        {typeInfo && (
-          <MaterialCommunityIcons
-            name={typeInfo.icon as any}
-            size={20}
-            color={isSelected ? "#fff" : typeInfo.color}
-            style={{ marginRight: 6 }}
-          />
-        )}
-        <Text style={[styles.favoriteTypeButtonText, isSelected && styles.selectedFavoriteTypeButtonText]}>
-          {label}
-        </Text>
-      </TouchableOpacity>
-    );
-  };
+  const renderPlaceTypeSelector = (
+    selected: string | null,
+    onSelect: (type: PlaceType) => void,
+    excludeId?: string,
+  ) => (
+    <View style={styles.placeTypeRow}>
+      {PLACE_TYPES.map((type) => {
+        const isSelected = selected === type;
+        const taken = isTypeTaken(type, excludeId);
+        return (
+          <TouchableOpacity
+            key={type}
+            style={[
+              styles.placeTypeOption,
+              isSelected && styles.placeTypeOptionOn,
+              taken && styles.placeTypeOptionTaken,
+            ]}
+            onPress={() => (taken ? showTypeTakenAlert(type) : onSelect(type))}
+            activeOpacity={0.75}
+          >
+            <MaterialCommunityIcons
+              name={TYPE_ICONS[type].icon as any}
+              size={20}
+              color={isSelected ? "#051A26" : "#00E5FF"}
+            />
+            <Text style={[styles.placeTypeTxt, isSelected && styles.placeTypeTxtOn]}>{type}</Text>
+            {taken && <Text style={styles.placeTypeTakenTxt}>Registrada</Text>}
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
 
   const renderAddressItem = ({ item, index }: { item: Address; index: number }) => {
     const typeInfo = item.typeAddress ? TYPE_ICONS[item.typeAddress] : null;
@@ -504,8 +550,7 @@ export default function FavoritesScreen({ navigation }: Props) {
       <Animatable.View animation="fadeInUp" duration={600} delay={index * 80} useNativeDriver>
         <TouchableOpacity
           activeOpacity={0.8}
-          onPress={() => handleEditAddress(item.id, item.label)}
-          onLongPress={() => handleLongPress(item)}
+          onPress={() => openEditPlaceModal(item)}
           style={styles.cardOuter}
         >
           <LinearGradient
@@ -526,20 +571,9 @@ export default function FavoritesScreen({ navigation }: Props) {
             {/* Content */}
             <View style={styles.cardContent}>
               <View style={styles.cardTopRow}>
-                {editingAddressId === item.id ? (
-                  <TextInput
-                    style={styles.editInput}
-                    value={editingAddressLabel}
-                    onChangeText={setEditingAddressLabel}
-                    onBlur={() => handleSaveEdit(item.id)}
-                    autoFocus
-                    selectionColor="#00E5FF"
-                  />
-                ) : (
-                  <Text style={styles.cardLabel} numberOfLines={1}>
-                    {item.label}
-                  </Text>
-                )}
+                <Text style={styles.cardLabel} numberOfLines={1}>
+                  {item.label}
+                </Text>
                 {item.isFavorite && (
                   <Entypo name="star" size={16} color="#00E5FF" style={{ marginLeft: 6 }} />
                 )}
@@ -547,7 +581,7 @@ export default function FavoritesScreen({ navigation }: Props) {
               <Text style={styles.cardAddress} numberOfLines={2}>
                 {item.address}
               </Text>
-              {item.typeAddress && (
+              {item.typeAddress && !isFixedNameType(item.typeAddress) && (
                 <View style={[styles.typeBadge, { borderColor: typeInfo?.color || "#00E5FF" }]}>
                   {getTypeIcon(item.typeAddress)}
                   <Text style={[styles.typeBadgeText, { color: typeInfo?.color || "#00E5FF" }]}>
@@ -557,7 +591,13 @@ export default function FavoritesScreen({ navigation }: Props) {
               )}
             </View>
 
-            {/* Delete */}
+            <TouchableOpacity
+              style={styles.deleteButton}
+              onPress={() => openEditPlaceModal(item)}
+              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+            >
+              <MaterialIcons name="edit" size={20} color="rgba(0,229,255,0.85)" />
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.deleteButton}
               onPress={() => handleDeleteAddress(item.id)}
@@ -615,20 +655,14 @@ export default function FavoritesScreen({ navigation }: Props) {
         ) : null}
         <View style={[styles.headerTitleWrap, isCustomer && styles.headerTitleWrapCustomer]}>
           {isCustomer ? <Text style={styles.headerEyebrow}>T+plus</Text> : null}
-          <Text style={styles.headerTitle}>Mis Direcciones</Text>
+          <Text style={styles.headerTitle}>Mis Lugares Favoritos</Text>
           <Text style={styles.headerSubtitle}>
             {favoriteCount}/{MAX_FAVORITES} favoritos • {addresses.length} {addresses.length === 1 ? "lugar" : "lugares"}
           </Text>
         </View>
         <TouchableOpacity
           style={styles.addButton}
-          onPress={() => {
-            if (favoriteCount >= MAX_FAVORITES) {
-              showAlert('warning', 'Límite alcanzado', `Solo puedes tener ${MAX_FAVORITES} lugares favoritos. Elimina uno para agregar otro.`);
-              return;
-            }
-            setModalVisible(true);
-          }}
+          onPress={() => openNewPlaceModal()}
           activeOpacity={0.8}
         >
           <LinearGradient
@@ -752,19 +786,19 @@ export default function FavoritesScreen({ navigation }: Props) {
         )}
       </Animated.View>
 
-      {/* Modal: Add new address */}
+      {/* Modal: Nuevo / Editar lugar */}
       <Modal
         animationType="slide"
         transparent={true}
         visible={modalVisible}
-        onRequestClose={() => setModalVisible(false)}
+        onRequestClose={closePlaceModal}
         presentationStyle="overFullScreen"
       >
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
           style={styles.modalOverlay}
         >
-          <View style={styles.modalContent}>
+          <View style={[styles.modalContent, { paddingBottom: modalBottomPadding }]}>
             <LinearGradient
               colors={["#0A1628", "#0D2137", "#0A1628"]}
               style={StyleSheet.absoluteFill}
@@ -774,26 +808,38 @@ export default function FavoritesScreen({ navigation }: Props) {
             {/* Modal glow */}
             <View style={styles.modalGlow} />
 
-            <Text style={styles.modalTitle}>Nuevo Lugar</Text>
-            <Text style={styles.modalSubtitle}>Agrega una dirección a tus favoritos</Text>
+            <Text style={styles.modalTitle}>{editingPlace ? "Editar lugar" : "Nuevo Lugar"}</Text>
+            <Text style={styles.modalSubtitle}>
+              {editingPlace ? "Actualiza el tipo, nombre o dirección" : "Agrega una dirección a tus favoritos"}
+            </Text>
+
+            <Text style={styles.favoriteTypeTitle}>Tipo de lugar</Text>
+            {renderPlaceTypeSelector(newPlaceType, setNewPlaceType, editingPlace?.id)}
 
             <View style={{ marginVertical: 12, zIndex: 10 }}>
-              <View style={styles.inputWrapper}>
-                <MaterialCommunityIcons name="label-outline" size={20} color="#00E5FF" style={{ marginRight: 10 }} />
-                <TextInput
-                  style={styles.input}
-                  placeholder="Nombre del lugar (ej. Casa, Trabajo)"
-                  placeholderTextColor="rgba(255,255,255,0.35)"
-                  value={newAddressLabel}
-                  onChangeText={setNewAddressLabel}
-                  selectionColor="#00E5FF"
-                />
-              </View>
+              {newPlaceType === "Otro" && (
+                <View style={styles.inputWrapper}>
+                  <MaterialCommunityIcons name="label-outline" size={20} color="#00E5FF" style={{ marginRight: 10 }} />
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Nombre del lugar (ej. Gimnasio)"
+                    placeholderTextColor="rgba(255,255,255,0.35)"
+                    value={newAddressLabel}
+                    onChangeText={setNewAddressLabel}
+                    selectionColor="#00E5FF"
+                  />
+                </View>
+              )}
               <GooglePlacesAutocomplete
+                ref={placeAutocompleteRef}
                 placeholder="Buscar dirección..."
                 minLength={2}
                 fetchDetails={true}
                 onPress={handleLocationSelect}
+                textInputProps={{
+                  placeholderTextColor: "rgba(255,255,255,0.35)",
+                  selectionColor: "#00E5FF",
+                }}
                 query={{
                   key: API_KEY,
                   language: "es",
@@ -836,75 +882,19 @@ export default function FavoritesScreen({ navigation }: Props) {
               />
             </View>
 
-            <TouchableOpacity style={styles.saveButton} onPress={handleAddAddress} activeOpacity={0.8}>
+            <TouchableOpacity style={styles.saveButton} onPress={handleSavePlace} activeOpacity={0.8}>
               <LinearGradient colors={["#00E5FF", "#00B8D4"]} style={styles.saveButtonGradient}>
-                <Ionicons name="bookmark" size={18} color="#fff" style={{ marginRight: 8 }} />
-                <Text style={styles.saveButtonText}>Guardar Lugar</Text>
+                <Ionicons name={editingPlace ? "checkmark-circle" : "bookmark"} size={18} color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.saveButtonText}>{editingPlace ? "Guardar cambios" : "Guardar Lugar"}</Text>
               </LinearGradient>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.cancelButton} onPress={() => setModalVisible(false)}>
+            <TouchableOpacity style={styles.cancelButton} onPress={closePlaceModal}>
               <Text style={styles.cancelButtonText}>Cancelar</Text>
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Modal: Edit / Favorite type */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={selectedAddress !== null}
-        onRequestClose={() => setSelectedAddress(null)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <LinearGradient
-              colors={["#0A1628", "#0D2137", "#0A1628"]}
-              style={StyleSheet.absoluteFill}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-            />
-            <View style={styles.modalGlow} />
-
-            <Text style={styles.modalTitle}>Detalles del Lugar</Text>
-            {selectedAddress && (
-              <>
-                <View style={styles.detailRow}>
-                  <MaterialCommunityIcons name="label-outline" size={20} color="#00E5FF" />
-                  <Text style={styles.detailLabel}>{selectedAddress.label}</Text>
-                </View>
-                <View style={styles.detailRow}>
-                  <Ionicons name="location-sharp" size={20} color="#00E5FF" />
-                  <Text style={styles.detailAddress}>{selectedAddress.address}</Text>
-                </View>
-
-                <Text style={styles.favoriteTypeTitle}>Categoría</Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.favoriteTypeScroll}
-                >
-                  {renderFavoriteTypeButton(null, "Ninguna")}
-                  {renderFavoriteTypeButton("Casa", "Casa")}
-                  {renderFavoriteTypeButton("Trabajo", "Trabajo")}
-                  {renderFavoriteTypeButton("Otro", "Otro")}
-                  {renderFavoriteTypeButton("Gimnasio", "Gimnasio")}
-                  {renderFavoriteTypeButton("Supermercado", "Mercado")}
-                  {renderFavoriteTypeButton("Parque", "Parque")}
-                  {renderFavoriteTypeButton("Escuela", "Escuela")}
-                  {renderFavoriteTypeButton("Restaurante", "Restaurante")}
-                </ScrollView>
-              </>
-            )}
-            <TouchableOpacity style={styles.saveButton} onPress={handleSaveFavorite} activeOpacity={0.8}>
-              <LinearGradient colors={["#00E5FF", "#00B8D4"]} style={styles.saveButtonGradient}>
-                <Ionicons name="checkmark-circle" size={18} color="#fff" style={{ marginRight: 8 }} />
-                <Text style={styles.saveButtonText}>Guardar</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
       <CustomAlert
         visible={alertVisible}
         type={alertType}
@@ -1064,15 +1054,6 @@ const styles = StyleSheet.create({
     color: "#fff",
     flex: 1,
   },
-  editInput: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#00E5FF",
-    borderBottomWidth: 1,
-    borderBottomColor: "#00E5FF",
-    paddingVertical: 2,
-  },
   cardAddress: {
     fontSize: 13,
     color: "rgba(255,255,255,0.5)",
@@ -1213,26 +1194,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   // ─── Detail modal ───
-  detailRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginTop: 14,
-    paddingHorizontal: 4,
-  },
-  detailLabel: {
-    fontSize: 17,
-    fontWeight: "600",
-    color: "#fff",
-    marginLeft: 10,
-    flex: 1,
-  },
-  detailAddress: {
-    fontSize: 14,
-    color: "rgba(255,255,255,0.55)",
-    marginLeft: 10,
-    flex: 1,
-    lineHeight: 20,
-  },
   favoriteTypeTitle: {
     fontSize: 14,
     fontWeight: "600",
@@ -1242,32 +1203,40 @@ const styles = StyleSheet.create({
     marginTop: 20,
     marginBottom: 10,
   },
-  favoriteTypeScroll: {
-    paddingBottom: 4,
-  },
-  favoriteTypeButton: {
+  placeTypeRow: {
     flexDirection: "row",
+    gap: 10,
+  },
+  placeTypeOption: {
+    flex: 1,
     alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    paddingVertical: 12,
+    borderRadius: 14,
     backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
-    borderColor: "rgba(0,229,255,0.12)",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    marginRight: 8,
+    borderColor: "rgba(0,229,255,0.15)",
   },
-  selectedFavoriteTypeButton: {
-    backgroundColor: "rgba(0,229,255,0.2)",
+  placeTypeOptionOn: {
+    backgroundColor: "#00E5FF",
     borderColor: "#00E5FF",
   },
-  favoriteTypeButtonText: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 14,
+  placeTypeOptionTaken: {
+    opacity: 0.45,
   },
-  selectedFavoriteTypeButtonText: {
-    color: "#fff",
-    fontWeight: "600",
+  placeTypeTxt: {
     fontSize: 14,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.85)",
+  },
+  placeTypeTxtOn: {
+    color: "#051A26",
+    fontWeight: "700",
+  },
+  placeTypeTakenTxt: {
+    fontSize: 10,
+    color: "rgba(255,255,255,0.6)",
   },
 });
 

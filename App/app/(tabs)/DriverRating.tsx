@@ -19,10 +19,13 @@ var { height, width } = Dimensions.get("window");
 import { useDispatch, useSelector } from "react-redux";
 import { completePaymentBooking } from "@/common/store/bookingsSlice";
 import { useRoute } from "@react-navigation/native";
+import { StatusBar } from "expo-status-bar";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const MAIN_COLOR = "#eeee";
 
 export default function DriverRating(props) {
+  const headerTopPadding = useHeaderTopPadding(8, 60);
   const dispatch = useDispatch();
   const route = useRoute();
   const { booking } = route.params;
@@ -108,7 +111,8 @@ export default function DriverRating(props) {
   };
   return (
     <View style={[styles.mainViewStyle, { backgroundColor: MAIN_COLOR }]}>
-      <View style={{ height: 60 }} />
+      <StatusBar style="dark" />
+      <View style={{ height: headerTopPadding }} />
       <View style={styles.vew}>
         <View style={styles.tripMainView}>
           {booking ? (

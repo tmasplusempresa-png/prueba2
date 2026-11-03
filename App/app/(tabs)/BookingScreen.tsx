@@ -46,6 +46,7 @@ import { useNavigation, useRoute } from "@react-navigation/native";
 import { AntDesign, Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { createSelector } from 'reselect';
+import { useBottomSafePadding, useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 
 // Memoized selectors (simple, no reselect needed)
 const selectDrivers = (state: RootState) => (state as any).bookings?.recentDrivers || [];
@@ -55,6 +56,8 @@ const selectUser = (state: RootState) => (state as any).auth?.user || null;
 //console.log(type,"type")
 
 const BookingScreen = () => {
+  const overlayTopPadding = useHeaderTopPadding(4, 48);
+  const footerBottomPadding = useBottomSafePadding(16, 16);
   // Redux and navigation
   const dispatch = useDispatch();
   const navigation = useNavigation<any>();
@@ -1071,7 +1074,7 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
       </View>
 
       {/* === OVERLAY: Botón volver + tarjeta de dirección === */}
-      <View style={styles.topOverlay} pointerEvents="box-none">
+      <View style={[styles.topOverlay, { paddingTop: overlayTopPadding }]} pointerEvents="box-none">
         <TouchableOpacity
           activeOpacity={0.8}
           style={styles.backButton}
@@ -1249,7 +1252,7 @@ const snapPoints = useMemo(() => ["35%", "55%", "85%"], []); // Map visible in t
             />
 
             {/* === FOOTER FIJO: Pago + Botones === */}
-            <View style={styles.sheetFooter}>
+            <View style={[styles.sheetFooter, { paddingBottom: footerBottomPadding }]}>
               {/* Promo badge */}
               {selectedPromo && (
                 <View style={styles.promoBadge}>

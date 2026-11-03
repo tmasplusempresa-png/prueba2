@@ -204,8 +204,12 @@ async function getEligibleDriverIds(idCategoria: any, carTypeName: string | null
   return [...new Set(ids)];
 }
 
+function isEmpresarial(record: Record<string, any>): boolean {
+  return String(record.modo_pago ?? "").toLowerCase() === "empresarial";
+}
+
 function buildDriverBody(record: Record<string, any>, carTypeName: string | null, tipo: "inmediato" | "programado"): string {
-  const car = carTypeName ?? "Servicio";
+  const car = `${carTypeName ?? "Servicio"}${isEmpresarial(record) ? " · Empresarial" : ""}`;
   const pickup = truncate(record.origen_direccion ?? "Ubicación por definir", 60);
   if (tipo === "programado") {
     const when = record.solicitado_en ? formatShortDate(record.solicitado_en) : "";
@@ -221,6 +225,8 @@ function buildAcceptedBody(_record: Record<string, any>): string {
 }
 
 function buildCompleteBody(record: Record<string, any>): string {
+  // El colaborador nunca ve el precio de un viaje empresarial: solo lo ven la empresa y el conductor.
+  if (isEmpresarial(record)) return "Gracias por viajar con T+Plus. Este viaje se factura a tu empresa.";
   const total = record.costo_total;
   if (total == null) return "Gracias por viajar con T+Plus";
   return `Total: $${Number(total).toLocaleString("es-CO")}`;

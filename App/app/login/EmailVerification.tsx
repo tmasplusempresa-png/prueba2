@@ -17,6 +17,7 @@ import { verifyEmail } from "@/common/store/authSlice";
 import {updateProfile} from "@/common/actions/authactions"
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store/store";
+import { StatusBar } from "expo-status-bar";
 const EmailVerification = ({ route, navigation }: NativeStackScreenProps<any>) => {
 
   const [isCodeSent, setIsCodeSent] = useState(false);
@@ -102,6 +103,7 @@ const EmailVerification = ({ route, navigation }: NativeStackScreenProps<any>) =
 
   return (
     <View style={styles.container}>
+      <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
       <Image source={require("./../../assets/images/logo1024x1024.png")} style={styles.logo} />
       <Text style={styles.title}>Verifica tu correo electrónico</Text>
       <Text style={styles.subtitle}>

@@ -13,6 +13,8 @@ import * as Location from "expo-location";
 import axios from "axios";
 import { useSelector } from "react-redux";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { StatusBar } from "expo-status-bar";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const SUPPORT_EMAIL = "soporte@tmasplus.online";
 
@@ -83,6 +85,7 @@ const buildDriverTripMessage = (
 };
 
 const SecurityScreen = ({ route }) => {
+  const headerTopPadding = useHeaderTopPadding(8, 20);
   const { booking, estimatedTime, estimatedDistance } = route.params; // booking + ETA opcionales
   const [isLoadingLoc, setIsLoadingLoc] = useState(false);
   const [isLoadingTrip, setIsLoadingTrip] = useState(false);
@@ -182,7 +185,8 @@ const SecurityScreen = ({ route }) => {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView contentContainerStyle={[styles.container, { paddingTop: headerTopPadding }]}>
+      <StatusBar style="dark" />
       <Text style={styles.title}>Seguridad</Text>
       <Text style={styles.subtitle}>
         {isDriver

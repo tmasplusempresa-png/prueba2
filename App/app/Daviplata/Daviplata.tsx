@@ -35,10 +35,13 @@ import { addKilometers } from '@/common/reducers/KilometersSlice';
 import { AntDesign } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { StatusBar } from 'expo-status-bar';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 const MINUTES_EXPIRATION_CODE = 3;
 const SECONDS_EXPIRATION_CODE = 0;
 
 const DaviplataPayment = (props) => {
+    const headerTopPadding = useHeaderTopPadding(8, 20);
     const user = useSelector((state: RootState) => state.auth.user);
 
     const route = useRoute();
@@ -415,7 +418,8 @@ const DaviplataPayment = (props) => {
         setLoading(false);
     }
     return (<ScrollView>
-        <View style={styles.container}>
+        <StatusBar style="dark" />
+        <View style={[styles.container, { paddingTop: headerTopPadding }]}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
                 <AntDesign name="arrow-left" size={24} color="#000" />
             </TouchableOpacity>

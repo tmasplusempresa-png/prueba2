@@ -41,7 +41,15 @@ import ProfilePhotoPreview from '@/components/ProfilePhotoPreview';
 import CustomAlert, { AlertType } from '@/components/CustomAlert';
 import SearchingDriverLoader from '@/components/SearchingDriverLoader';
 import { formatBookingFareRange } from '@/constants/fare';
-import { getPaymentModeLabel, getPaymentModeIonicon, isTransferPayment } from '@/common/utils/paymentMode';
+import {
+  getPaymentModeLabel,
+  getPaymentModeIonicon,
+  isCorporatePayment,
+  isPassengerFareHidden,
+  isTransferPayment,
+} from '@/common/utils/paymentMode';
+import { useBookingCompany } from '@/hooks/useBookingCompany';
+import { BilledCompanyRow } from '@/components/BilledCompanyRow';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -212,6 +220,10 @@ const CustomerActiveTripScreen = () => {
     booking?.id || bookingId,
     'customer',
     !!(booking?.id || bookingId)
+  );
+  const billedCompany = useBookingCompany(
+    booking?.id || bookingId,
+    isCorporatePayment(booking?.payment_mode)
   );
   const [chatVisible, setChatVisible] = useState(false);
   const fadeAnimAlert = useRef(new Animated.Value(0)).current;
@@ -1166,8 +1178,12 @@ const CustomerActiveTripScreen = () => {
           <Animatable.View animation="fadeInUp" duration={450} useNativeDriver>
             <SearchingDriverLoader
               reference={booking.reference}
-              fareLabel="Valor estimado"
-              fareValue={formatBookingFareRange(booking)}
+              fareLabel={isPassengerFareHidden(booking.payment_mode) ? 'Pago' : 'Valor estimado'}
+              fareValue={
+                isPassengerFareHidden(booking.payment_mode)
+                  ? getPaymentModeLabel(booking.payment_mode)
+                  : formatBookingFareRange(booking)
+              }
               otp={booking.otp}
             />
           </Animatable.View>
@@ -1191,14 +1207,21 @@ const CustomerActiveTripScreen = () => {
                 )}
               </View>
 
-              <View style={s.fareRowCompact}>
-                <Text style={s.priceInStatusLabel}>
-                  {booking.status === 'COMPLETE' ? 'Valor final liquidado' : 'Valor estimado'}
-                </Text>
-                <Text style={s.priceInStatusAmountCompact}>
-                  {formatBookingFareRange(booking)}
-                </Text>
-              </View>
+              {isPassengerFareHidden(booking.payment_mode) ? (
+                <View style={s.fareRowCompact}>
+                  <Text style={s.priceInStatusLabel}>Pago</Text>
+                  <Text style={s.priceInStatusAmountCompact}>{getPaymentModeLabel(booking.payment_mode)}</Text>
+                </View>
+              ) : (
+                <View style={s.fareRowCompact}>
+                  <Text style={s.priceInStatusLabel}>
+                    {booking.status === 'COMPLETE' ? 'Valor final liquidado' : 'Valor estimado'}
+                  </Text>
+                  <Text style={s.priceInStatusAmountCompact}>
+                    {formatBookingFareRange(booking)}
+                  </Text>
+                </View>
+              )}
 
               {!!booking.otp && !booking.otp_verified && booking.status !== 'COMPLETE' && booking.status !== 'PAID' && (
                 <Text style={s.otpInlineHint}>
@@ -1486,6 +1509,7 @@ const CustomerActiveTripScreen = () => {
               )}
 
               <View style={s.payContactBlock}>
+                {billedCompany ? <BilledCompanyRow company={billedCompany} style={{ marginBottom: 10 }} /> : null}
                 {booking.payment_mode && (
                   <View style={s.payModeRow}>
                     <Ionicons
@@ -1788,10 +1812,19 @@ const CustomerActiveTripScreen = () => {
             </LinearGradient>
             <Text style={s.alertTitle}>¡Viaje completado!</Text>
 
-            <Text style={s.tripSummaryTotalLabel}>Valor final del servicio</Text>
-            <Text style={s.tripSummaryTotalAmount}>
-              {formatBookingFareRange(booking)}
-            </Text>
+            {isPassengerFareHidden(booking?.payment_mode) ? (
+              <>
+                <Text style={s.tripSummaryTotalLabel}>Pago</Text>
+                <Text style={s.tripSummaryTotalAmount}>{getPaymentModeLabel(booking?.payment_mode)}</Text>
+              </>
+            ) : (
+              <>
+                <Text style={s.tripSummaryTotalLabel}>Valor final del servicio</Text>
+                <Text style={s.tripSummaryTotalAmount}>
+                  {formatBookingFareRange(booking)}
+                </Text>
+              </>
+            )}
 
             <View style={s.tripSummaryRow}>
               <View style={s.tripSummaryItem}>

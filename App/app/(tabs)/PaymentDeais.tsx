@@ -16,6 +16,8 @@ import { colors } from "@/scripts/theme";
 var { width, height } = Dimensions.get("window");
 import PromoComp from "@/components/PromoComp";
 import { useSelector, useDispatch } from "react-redux";
+import { StatusBar } from "expo-status-bar";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 import {
 
   useNavigation,
@@ -53,6 +55,7 @@ const hasNotch =
     width === 932);
 
 export default function PaymentScreen(props) {
+  const topPadding = useHeaderTopPadding(0, 0);
   const updateBooking = completePaymentBooking;
   const dispatch = useDispatch();
   const route = useRoute();
@@ -482,7 +485,8 @@ export default function PaymentScreen(props) {
   const roundedAmount = roundPrice(parseFloat(payDetails.amount));
 
   return (
-    <View style={styles.mainView}>
+    <View style={[styles.mainView, { paddingTop: topPadding }]}>
+      <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
       <ScrollView
         showsVerticalScrollIndicator={false}
         style={styles.scrollStyle}

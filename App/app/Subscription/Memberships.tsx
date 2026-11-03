@@ -5,8 +5,11 @@ import { RootState, AppDispatch } from "@/common/store";
 import { fetchMemberships, renewMembership, createMembership, cancelMembership, selectMembershipLoading } from "@/common/reducers/membershipSlice";
 import { differenceInDays } from "date-fns";
 import { preferredConductorId } from "@/common/utils/driverIds";
+import { StatusBar } from "expo-status-bar";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const SubscriptionCard = () => {
+  const headerTopPadding = useHeaderTopPadding(8, 20);
   const dispatch = useDispatch<AppDispatch>();
   const user = useSelector((state: RootState) => state.auth.user);
   const profile = useSelector((state: RootState) => (state as any).auth.profile);
@@ -66,7 +69,8 @@ const SubscriptionCard = () => {
   const daysLeft = activeMembership ? differenceInDays(new Date(activeMembership.fecha_terminada), new Date()) : 0;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: headerTopPadding }]}>
+      <StatusBar style="dark" />
       {/* Si no tiene membresía activa, mostrar opción para crear */}
       {!activeMembership ? (
         <View style={styles.card}>

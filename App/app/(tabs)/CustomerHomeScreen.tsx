@@ -2,22 +2,20 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
-  ScrollView,
   TouchableOpacity,
   Pressable,
   Image,
   Animated,
   StyleSheet,
   Dimensions,
+  ImageSourcePropType,
   Platform,
   Linking,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
   InteractionManager,
 } from 'react-native';
 import { useSelector } from 'react-redux';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -27,13 +25,30 @@ import { RootState } from '@/common/store';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import BookingRealtimeService from '@/common/services/BookingRealtimeService';
 import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
+import { useMyCompanies } from '@/hooks/useMyCompanies';
 
 const { width: SW, height: SH } = Dimensions.get('window');
-const CARD_W = 260;
-const CARD_GAP = 16;
 const H_PAD = 20;
 const BG_IMAGE = require('../../assets/images/bg.png');
 const CARD_TEXTURE = require('../../assets/images/card_texture.png');
+/** Fondo compartido: Buscar destino, servicios, accesos T+plus y chips Casa/Trabajo. */
+const GLASS_BG = 'rgba(14,42,56,0.76)';
+const GLASS_BORDER = 'rgba(255,255,255,0.14)';
+// Mismas imágenes de categoría que muestra "Asigna tu ruta" / Detalles de reserva.
+const SERVICE_IMAGES = {
+  ConfortPlus: require('@/assets/images/TREAS-E.png'),
+  XPlus: require('@/assets/images/TREAS-X.png'),
+  VanPlus: require('@/assets/images/TREAS-Van.png'),
+  TaxiPlus: require('@/assets/images/TREAS-T.png'),
+};
+
+type QuickPlaceKey = 'Casa' | 'Trabajo';
+type QuickPlace = { latitude: number; longitude: number; title: string };
+
+const QUICK_PLACES: { key: QuickPlaceKey; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
+  { key: 'Casa', icon: 'home' },
+  { key: 'Trabajo', icon: 'briefcase' },
+];
 
 const PARTICLES = Array.from({ length: 8 }, (_, i) => ({
   id: i,
@@ -103,39 +118,71 @@ const Scalable = ({
 };
 
 const ActionBtn = ({
-  icon,
+  image,
+  logoUri,
+  icon = 'business-outline',
   label,
   sub,
   onPress,
+  wide = false,
 }: {
-  icon: any;
+  image?: ImageSourcePropType;
+  logoUri?: string | null;
+  icon?: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
   sub: string;
   onPress: () => void;
+  wide?: boolean;
 }) => {
   const anim = useRef(new Animated.Value(0)).current;
   const onIn = () => Animated.spring(anim, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
   const onOut = () => Animated.spring(anim, { toValue: 0, useNativeDriver: true, speed: 20, bounciness: 10 }).start();
   const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] });
   const lift = anim.interpolate({ inputRange: [0, 1], outputRange: [0, -2] });
+  const cta = (
+    <View style={s.serviceCta}>
+      <Ionicons name="chevron-forward" size={16} color="#051A26" />
+    </View>
+  );
+  const texts = (
+    <>
+      <Text style={s.serviceTitle} numberOfLines={1}>{label}</Text>
+      <Text style={s.serviceSub} numberOfLines={1}>{sub}</Text>
+    </>
+  );
   return (
-    <TouchableOpacity style={s.serviceCardWrap} onPress={onPress} onPressIn={onIn} onPressOut={onOut} activeOpacity={1}>
+    <TouchableOpacity
+      style={[s.serviceCardWrap, wide && s.serviceCardWrapWide]}
+      onPress={onPress}
+      onPressIn={onIn}
+      onPressOut={onOut}
+      activeOpacity={1}
+    >
       <Animated.View style={[s.serviceCard, { transform: [{ scale }, { translateY: lift }] }]}>
-        <View style={s.serviceCardContent}>
-          <View style={s.serviceIconWrap}>
-            <Ionicons name={icon} size={18} color="#00E5FF" />
+        {wide ? (
+          <>
+            <View style={[s.serviceLogoWrap, s.serviceMediaWide]}>
+              {logoUri ? (
+                <Image source={{ uri: logoUri }} style={s.serviceLogo} resizeMode="cover" />
+              ) : (
+                <Ionicons name={icon} size={24} color="#00E5FF" />
+              )}
+            </View>
+            <View style={s.serviceTextWrap}>{texts}</View>
+          </>
+        ) : (
+          <View style={s.serviceTextWrap}>
+            {image ? (
+              <Image source={image} style={s.serviceImg} resizeMode="contain" />
+            ) : (
+              <View style={s.serviceLogoWrap}>
+                <Ionicons name={icon} size={24} color="#00E5FF" />
+              </View>
+            )}
+            <View style={s.serviceTexts}>{texts}</View>
           </View>
-          <Text style={s.serviceTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>
-            {label}
-          </Text>
-          <Text style={s.serviceSub} numberOfLines={2}>
-            {sub}
-          </Text>
-          <View style={s.serviceCta}>
-            <Text style={s.serviceCtaTxt}>Solicitar</Text>
-            <Ionicons name="chevron-forward" size={14} color="#051A26" />
-          </View>
-        </View>
+        )}
+        {cta}
       </Animated.View>
     </TouchableOpacity>
   );
@@ -167,9 +214,9 @@ const CustomerHomeScreen = () => {
 
   const [dbFirstName, setDbFirstName] = useState<string | null>(null);
   const [dbLastName, setDbLastName] = useState<string | null>(null);
-  const [activeCard, setActiveCard] = useState(0);
   const [hasUnread, setHasUnread] = useState(false);
   const [activeBookingId, setActiveBookingId] = useState<string | null>(null);
+  const [quickPlaces, setQuickPlaces] = useState<Partial<Record<QuickPlaceKey, QuickPlace>>>({});
   const lastStatusRef = useRef<string | null>(null);
   const lastBookingIdRef = useRef<string | null>(null);
 
@@ -179,6 +226,7 @@ const CustomerHomeScreen = () => {
   const bellAnim = useRef(new Animated.Value(0)).current;
   const navigateLockRef = useRef(false);
   const navBottomPad = useCustomerNavBottomPad();
+  const { companies } = useMyCompanies();
 
   const greeting = useCallback(() => {
     const h = new Date().getHours();
@@ -204,6 +252,40 @@ const CustomerHomeScreen = () => {
     })();
     return () => { alive = false; };
   }, [user?.id]);
+
+  // ── Lugares guardados como Casa / Trabajo (se recargan al volver de "Lugares") ──
+  useEffect(() => {
+    if (!isFocused) return;
+    let alive = true;
+    (async () => {
+      try {
+        const authId = user?.id || user?.auth_id;
+        if (!authId) return;
+        const headers = await getSupabaseAuthHeaders();
+        const userRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/users?or=(auth_id.eq.${encodeURIComponent(authId)},id.eq.${encodeURIComponent(authId)})&select=id&limit=1`,
+          { headers },
+        );
+        if (!userRes.ok) return;
+        const uid = (await userRes.json())?.[0]?.id;
+        if (!uid) return;
+        const favRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/favorite_places?user_id=eq.${encodeURIComponent(uid)}&type_address=in.(Casa,Trabajo)&select=description,latitude,longitude,type_address&order=created_at.desc`,
+          { headers },
+        );
+        if (!favRes.ok) return;
+        const rows: any[] = await favRes.json();
+        const next: Partial<Record<QuickPlaceKey, QuickPlace>> = {};
+        rows.forEach((r) => {
+          const key = r.type_address as QuickPlaceKey;
+          if (next[key] || r.latitude == null || r.longitude == null) return;
+          next[key] = { latitude: Number(r.latitude), longitude: Number(r.longitude), title: r.description || key };
+        });
+        if (alive) setQuickPlaces(next);
+      } catch {}
+    })();
+    return () => { alive = false; };
+  }, [isFocused, user?.id, user?.auth_id]);
 
   // ── Voice greeting on first focus after login ──
   useEffect(() => {
@@ -375,35 +457,42 @@ const CustomerHomeScreen = () => {
     };
   }, [isFocused, nav]);
 
-  const navigateToCreateReservation = useCallback(() => {
+  const openCreateReservation = useCallback((corporate: boolean, carType?: string, destination?: QuickPlace) => {
     if (navigateLockRef.current) return;
     navigateLockRef.current = true;
 
     InteractionManager.runAfterInteractions(() => {
-      nav.navigate('CreateReservation');
+      nav.navigate('CreateReservation', {
+        corporate,
+        ...(carType ? { carType } : null),
+        ...(destination ? { destination } : null),
+      });
       setTimeout(() => {
         navigateLockRef.current = false;
       }, 650);
     });
   }, [nav]);
+  const navigateToCreateReservation = useCallback(() => openCreateReservation(false), [openCreateReservation]);
+  const navigateToCorporateReservation = useCallback(() => openCreateReservation(true), [openCreateReservation]);
+  const onQuickPlacePress = useCallback((key: QuickPlaceKey) => {
+    const place = quickPlaces[key];
+    if (place) openCreateReservation(false, undefined, place);
+    else nav.navigate('Lugares', { missingType: key, nonce: Date.now() });
+  }, [quickPlaces, openCreateReservation, nav]);
 
   const firstName = dbFirstName || profile?.first_name || profile?.firstName || user?.first_name || user?.firstName || user?.user_metadata?.first_name || user?.user_metadata?.firstName || '';
   const lastName = dbLastName || profile?.last_name || profile?.lastName || user?.last_name || user?.lastName || user?.user_metadata?.last_name || user?.user_metadata?.lastName || '';
-  const displayName = firstName ? `${firstName}${lastName ? ' ' + lastName : ''}` : 'Usuario';
+  const initials = `${firstName.trim()[0] || ''}${lastName.trim()[0] || ''}`.toUpperCase() || 'U';
   const headerTopPad = Math.max(insets.top, Platform.OS === 'ios' ? 14 : 10) + 6;
   const scrollBottomPad = 60 + navBottomPad;
   const headerBgOp = scrollY.interpolate({ inputRange: [0, 40], outputRange: [0, 1], extrapolate: 'clamp' });
   const bellRot = bellAnim.interpolate({ inputRange: [-15, 0, 15], outputRange: ['-15deg', '0deg', '15deg'] });
 
-  const onCardScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    setActiveCard(Math.max(0, Math.min(2, Math.round(e.nativeEvent.contentOffset.x / (CARD_W + CARD_GAP)))));
-  }, []);
-
   const SERVICES = [
-    { id: 'T+Plus Especial', label: 'T+Plus Especial', sub: 'Servicio premium y exclusivo.', icon: 'star-outline' as const },
-    { id: 'T+Plus Particular', label: 'T+Plus Particular', sub: 'Viajes cómodos y directos.', icon: 'car-outline' as const },
-    { id: 'T+plus Van', label: 'T+plus Van', sub: 'Ideal para grupos y equipaje.', icon: 'car-outline' as const },
-    { id: 'T+plus taxi', label: 'T+plus taxi', sub: 'Rápido, seguro y cercano.', icon: 'car-outline' as const },
+    { id: 'ConfortPlus', label: 'ConfortPlus', sub: 'Premium y exclusivo', image: SERVICE_IMAGES.ConfortPlus },
+    { id: 'XPlus', label: 'XPlus', sub: 'Cómodo y directo', image: SERVICE_IMAGES.XPlus },
+    { id: 'VanPlus', label: 'VanPlus', sub: 'Grupos y equipaje', image: SERVICE_IMAGES.VanPlus },
+    { id: 'TaxiPlus', label: 'TaxiPlus', sub: 'Rápido y seguro', image: SERVICE_IMAGES.TaxiPlus },
   ];
   const BENEFITS = [
     { id: 'seg', icon: 'shield-checkmark-outline' as const, label: 'Seguridad', sub: 'Viajes protegidos' },
@@ -422,22 +511,34 @@ const CustomerHomeScreen = () => {
       <View style={[s.headerWrap, { paddingTop: headerTopPad }]}>
         <Animated.View style={[StyleSheet.absoluteFillObject, s.headerScrollBg, { opacity: headerBgOp }]} />
         <Animatable.View animation="fadeInDown" duration={500} style={s.header}>
-          <View style={s.avatarRing}>
-            {user?.profile_image
-              ? <Image source={{ uri: user.profile_image }} style={s.avatarImg} />
-              : <View style={s.avatarInner}><Ionicons name="person-outline" size={22} color="#00E5FF" /></View>}
-          </View>
-          <View style={s.greetWrap}>
-            <Text style={s.greetLabel}>{greeting()}</Text>
-            <Text style={s.greetName}>{displayName}</Text>
-          </View>
+          <TouchableOpacity
+            style={s.profileLink}
+            activeOpacity={0.75}
+            onPress={() => nav.navigate('Profile')}
+          >
+            <View style={s.avatarWrap}>
+              <View style={s.avatarRing}>
+                {user?.profile_image
+                  ? <Image source={{ uri: user.profile_image }} style={s.avatarImg} />
+                  : <View style={s.avatarInner}><Text style={s.avatarInitials}>{initials}</Text></View>}
+              </View>
+              <View style={s.avatarStatus} />
+            </View>
+            <View style={s.greetWrap}>
+              <Text style={s.greetLabel}>{`¡${greeting()}!`}</Text>
+              <Text style={s.greetName} numberOfLines={1}>
+                {firstName || 'Usuario'}
+                {lastName ? <Text style={s.greetLastName}>{` ${lastName}`}</Text> : null}
+              </Text>
+            </View>
+          </TouchableOpacity>
           <Pressable
             style={({ pressed }) => [s.notifBtn, pressed && s.notifBtnPressed]}
             onPress={onBellPress}
             hitSlop={10}
           >
             <Animated.View style={{ transform: [{ rotate: bellRot }] }}>
-              <Ionicons name="notifications" size={24} color="#00E5FF" />
+              <Ionicons name="notifications-outline" size={22} color="#00E5FF" />
             </Animated.View>
             {(hasUnread || !!activeBookingId) && <View style={s.notifDot} />}
           </Pressable>
@@ -450,67 +551,87 @@ const CustomerHomeScreen = () => {
         scrollEventThrottle={16}
         onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
       >
-        <Animatable.View animation="fadeInUp" duration={500} delay={50} useNativeDriver>
-          <Scalable onPress={navigateToCreateReservation} scaleTo={0.97} liftBy={-2} style={s.destCard}>
+        <Animatable.View animation="fadeInUp" duration={500} delay={50} useNativeDriver style={s.destSection}>
+          <Text style={s.headline}>
+            ¿A dónde <Text style={s.headlineAccent}>vamos</Text> hoy?
+          </Text>
+          <Scalable onPress={navigateToCreateReservation} scaleTo={0.98} liftBy={-2} style={s.destCard}>
             <View style={s.destInner}>
-              <Ionicons name="location-outline" size={20} style={s.destLeadingIcon} />
-              <Text style={s.destText}>¿A dónde vamos?</Text>
+              <MaterialCommunityIcons name="map-marker-radius" size={26} color="#00E5FF" style={s.destLeadingIcon} />
+              <View style={s.destTextWrap}>
+                <Text style={s.destTitle}>Buscar destino</Text>
+                <Text style={s.destSub} numberOfLines={1}>Dirección, lugar o punto de referencia</Text>
+              </View>
               <View style={s.destArrow}>
-                <Ionicons name="arrow-forward" size={18} color="#00E5FF" />
+                <Ionicons name="arrow-forward" size={20} color="#051A26" />
               </View>
             </View>
           </Scalable>
-        </Animatable.View>
-        <Animatable.View animation="fadeInUp" duration={500} delay={150} useNativeDriver>
-          <View style={s.sectionHeader}>
-            <Text style={s.sectionTitle}>Servicios</Text>
-            <View style={s.badge}><Text style={s.badgeText}>RÁPIDO</Text></View>
-          </View>
-          <View style={s.actionsGrid}>
-            {SERVICES.map(sv => (
-              <ActionBtn key={sv.id} icon={sv.icon} label={sv.label} sub={sv.sub} onPress={navigateToCreateReservation} />
+          <View style={s.quickRow}>
+            {QUICK_PLACES.map((q) => (
+              <TouchableOpacity
+                key={q.key}
+                style={s.quickChip}
+                activeOpacity={0.75}
+                onPress={() => onQuickPlacePress(q.key)}
+              >
+                <Ionicons name={q.icon} size={17} color="#00E5FF" />
+                <Text style={s.quickChipTxt}>{q.key}</Text>
+              </TouchableOpacity>
             ))}
           </View>
         </Animatable.View>
+        <Animatable.View animation="fadeInUp" duration={500} delay={150} useNativeDriver>
+          <View style={s.actionsGrid}>
+            {SERVICES.map(sv => (
+              <ActionBtn
+                key={sv.id}
+                image={sv.image}
+                label={sv.label}
+                sub={sv.sub}
+                onPress={() => openCreateReservation(false, sv.id)}
+              />
+            ))}
+            {companies.length > 0 && (
+              <ActionBtn
+                wide
+                logoUri={companies.length === 1 ? companies[0].logoUrl : null}
+                label="Empresa"
+                sub={companies.length === 1 ? companies[0].name : `${companies.length} empresas vinculadas`}
+                onPress={navigateToCorporateReservation}
+              />
+            )}
+          </View>
+        </Animatable.View>
         <Animatable.View animation="fadeInUp" duration={500} delay={250} useNativeDriver>
-          <View style={s.sectionHeader}>
+          <View style={[s.sectionHeader, s.sectionHeaderSpread]}>
             <Text style={s.sectionTitle}>T+plus</Text>
             <View style={s.badge}>
               <Text style={s.badgeText}>Tu acceso inteligente</Text>
             </View>
           </View>
+          <View style={s.actionsGrid}>
+            <ActionBtn
+              icon="time-outline"
+              label="¡Tus Reservas!"
+              sub="Reservas activas"
+              onPress={() => nav.navigate('Historial')}
+            />
+            <ActionBtn
+              icon="document-text-outline"
+              label="Historial"
+              sub="Viajes y actividad"
+              onPress={() => nav.navigate('Historial')}
+            />
+            <ActionBtn
+              wide
+              icon="card-outline"
+              label="¡Usa tu carnet!"
+              sub="Identifícate fácil y seguro"
+              onPress={() => nav.navigate('Carnet')}
+            />
+          </View>
         </Animatable.View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          snapToInterval={CARD_W + CARD_GAP}
-          decelerationRate="fast"
-          contentContainerStyle={s.cardsContent}
-          style={s.cardsOuter}
-          onScroll={onCardScroll}
-          onMomentumScrollEnd={onCardScroll}
-          scrollEventThrottle={32}
-        >
-          <Scalable onPress={() => nav.navigate('Historial')} liftBy={-4} style={[s.tplusCard, s.cardReservas]}>
-            <View style={s.cardIconWrap}><Ionicons name="time-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>¡Tus Reservas!</Text>
-            <Text style={s.cardDesc}>Tienes 0 reservas activas. Toca aquí para ver detalles y estar al tanto de tus viajes.</Text>
-            <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver reservas</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
-          </Scalable>
-          <Scalable onPress={() => nav.navigate('Historial')} liftBy={-4} style={[s.tplusCard, s.cardHistorial]}>
-            <View style={s.cardIconWrap}><Ionicons name="document-text-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>Historial</Text>
-            <Text style={s.cardDesc}>Revisa tu historial de viajes, pagos y actividad reciente en un solo lugar.</Text>
-            <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver historial</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
-          </Scalable>
-          <Scalable onPress={() => nav.navigate('Carnet')} liftBy={-4} style={[s.tplusCard, s.cardCarnet]}>
-            <View style={s.cardIconWrap}><Ionicons name="card-outline" size={40} color="#00E5FF" /></View>
-            <Text style={s.cardTitle} adjustsFontSizeToFit minimumFontScale={0.85} numberOfLines={2}>¡Usa tu carnet!</Text>
-            <Text style={s.cardDesc}>Presenta tu carnet T+plus para identificarte fácilmente. ¡Es tu acceso seguro y confiable!</Text>
-            <View style={s.cardAction}><Text style={s.cardActionTxt}>Ver carnet</Text><Ionicons name="chevron-forward" size={16} color="#00E5FF" /></View>
-          </Scalable>
-        </ScrollView>
-        <View style={s.dotsRow}>{[0, 1, 2].map(i => <View key={i} style={[s.dot, activeCard === i && s.dotActive]} />)}</View>
         <Animatable.View animation="fadeInUp" duration={500} delay={350} useNativeDriver>
           <Scalable onPress={() => Linking.openURL('https://tmasplus.com/beneficios')} scaleTo={0.98} liftBy={-2} style={s.promoCard}>
             <View style={s.promoBgView} />
@@ -547,33 +668,58 @@ const s = StyleSheet.create({
   headerWrap: { zIndex: 10 },
   headerScrollBg: { backgroundColor: 'rgba(5,26,38,0.96)', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(0,229,255,0.1)' },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: H_PAD, paddingTop: 6, paddingBottom: 12 },
-  avatarRing: { width: 48, height: 48, borderRadius: 24, borderWidth: 2, borderColor: '#00E5FF', overflow: 'hidden', marginRight: 14, justifyContent: 'center', alignItems: 'center' },
+  avatarWrap: { marginRight: 14 },
+  avatarRing: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,229,255,0.65)',
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0A2E3D',
+  },
   avatarImg: { width: '100%', height: '100%' },
-  avatarInner: { width: '100%', height: '100%', backgroundColor: '#0A2E3D', justifyContent: 'center', alignItems: 'center' },
+  avatarInner: { width: '100%', height: '100%', backgroundColor: '#0A3442', justifyContent: 'center', alignItems: 'center' },
+  avatarInitials: { fontSize: 17, fontWeight: '700', color: '#00E5FF', letterSpacing: 0.5 },
+  avatarStatus: {
+    position: 'absolute',
+    right: 0,
+    bottom: 1,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#00E5FF',
+    borderWidth: 2,
+    borderColor: '#051A26',
+  },
+  profileLink: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   greetWrap: { flex: 1 },
-  greetLabel: { fontSize: 13, color: 'rgba(255,255,255,0.5)', letterSpacing: 0.5 },
-  greetName: { fontSize: 20, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3 },
+  greetLabel: { fontSize: 13, fontWeight: '500', color: 'rgba(255,255,255,0.55)', marginBottom: 1 },
+  greetName: { fontSize: 19, fontWeight: '800', color: '#ffffff', letterSpacing: -0.3 },
+  greetLastName: { fontWeight: '500', color: 'rgba(255,255,255,0.6)' },
   notifBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(5, 26, 38, 0.92)',
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
     borderWidth: 1,
-    borderColor: '#00E5FF',
+    borderColor: 'rgba(255,255,255,0.14)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   notifDot: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#00E676',
+    top: 8,
+    right: 9,
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    backgroundColor: '#00E5FF',
     borderWidth: 1.5,
-    borderColor: '#051A26',
-    shadowColor: '#00E676',
+    borderColor: '#0A2230',
+    shadowColor: '#00E5FF',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.8,
     shadowRadius: 4,
@@ -582,15 +728,24 @@ const s = StyleSheet.create({
   notifBtnPressed: { opacity: 0.85 },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: H_PAD, paddingTop: 18 },
-  destCard: { marginBottom: 28, paddingVertical: 16, paddingHorizontal: 24, borderRadius: 28, backgroundColor: 'rgba(255,255,255,0.15)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)', shadowColor: '#000000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.2, shadowRadius: 14, elevation: 5 },
+  destSection: { marginBottom: 18 },
+  headline: { fontSize: 27, fontWeight: '800', color: '#ffffff', letterSpacing: -0.6, marginBottom: 14 },
+  headlineAccent: { color: '#00E5FF' },
+  destCard: { paddingVertical: 12, paddingLeft: 16, paddingRight: 12, borderRadius: 18, backgroundColor: GLASS_BG, borderWidth: 1, borderColor: GLASS_BORDER },
+  destTextWrap: { flex: 1, marginRight: 12 },
+  destTitle: { fontSize: 16, fontWeight: '700', color: '#ffffff', letterSpacing: -0.2 },
+  destSub: { marginTop: 2, fontSize: 12.5, color: 'rgba(255,255,255,0.55)' },
+  quickRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  quickChip: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 9, paddingHorizontal: 15, borderRadius: 20, backgroundColor: GLASS_BG, borderWidth: 1, borderColor: GLASS_BORDER },
+  quickChipTxt: { fontSize: 14, fontWeight: '500', color: 'rgba(255,255,255,0.85)' },
   destTexture: { ...StyleSheet.absoluteFillObject, opacity: 0.32 },
   destInner: { flexDirection: 'row', alignItems: 'center' },
   destLeadingIcon: { marginRight: 12, color: '#00E5FF' },
   iconPulseWrap: { width: 40, height: 40, marginRight: 14, justifyContent: 'center', alignItems: 'center' },
   destIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#00E5FF', justifyContent: 'center', alignItems: 'center', shadowColor: '#00E5FF', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10, elevation: 8 },
-  destText: { flex: 1, fontSize: 16, fontWeight: '700', color: '#EAF2F7', letterSpacing: -0.2 },
-  destArrow: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', justifyContent: 'center', alignItems: 'center' },
+  destArrow: { width: 46, height: 46, borderRadius: 13, backgroundColor: '#00E5FF', justifyContent: 'center', alignItems: 'center', shadowColor: '#00E5FF', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.55, shadowRadius: 10, elevation: 6 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, marginTop: 4, flexWrap: 'wrap' },
+  sectionHeaderSpread: { justifyContent: 'space-between', flexWrap: 'nowrap' },
   sectionTitle: { fontSize: 20, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3, marginRight: 8 },
   sectionSub: { fontSize: 13, color: 'rgba(255,255,255,0.5)' },
   badge: {
@@ -614,83 +769,74 @@ const s = StyleSheet.create({
     width: (SW - H_PAD * 2 - 12) / 2,
     marginBottom: 12,
   },
+  serviceCardWrapWide: {
+    width: '100%',
+  },
   serviceCard: {
-    borderRadius: 14,
-    overflow: 'hidden',
-    minHeight: 108,
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.2)',
-    backgroundColor: 'rgba(10,46,61,0.94)',
-  },
-  serviceCardContent: {
-    padding: 10,
-  },
-  serviceIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    backgroundColor: 'rgba(0,229,255,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  serviceTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#ffffff',
-    lineHeight: 16,
-    letterSpacing: -0.2,
-    marginBottom: 2,
-  },
-  serviceSub: {
-    fontSize: 10,
-    color: 'rgba(255,255,255,0.65)',
-    lineHeight: 13,
-    marginBottom: 8,
-  },
-  serviceCta: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: '#00E5FF',
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    backgroundColor: GLASS_BG,
   },
-  serviceCtaTxt: {
+  serviceImg: {
+    width: '100%',
+    maxWidth: 124,
+    height: 66,
+    alignSelf: 'flex-start',
+  },
+  serviceTexts: {
+    marginTop: 6,
+  },
+  serviceMediaWide: {
+    marginRight: 12,
+  },
+  serviceLogoWrap: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,229,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.18)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  serviceLogo: {
+    width: '100%',
+    height: '100%',
+  },
+  serviceTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
+  serviceTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#ffffff',
+    lineHeight: 20,
+    letterSpacing: -0.2,
+  },
+  serviceSub: {
     fontSize: 11,
-    fontWeight: '700',
-    color: '#051A26',
-    marginRight: 2,
+    color: 'rgba(255,255,255,0.6)',
+    lineHeight: 14,
+  },
+  serviceCta: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#00E5FF',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   actionItem: { flex: 1, alignItems: 'center', paddingVertical: 12, paddingHorizontal: 4, borderRadius: 14 },
   actionIconWrap: { width: 56, height: 56, borderRadius: 14, backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.12)', justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
   actionLabel: { fontSize: 11, fontWeight: '500', color: 'rgba(255,255,255,0.7)', textAlign: 'center', lineHeight: 14 },
-  cardsOuter: { marginHorizontal: -H_PAD },
-  cardsContent: { paddingHorizontal: H_PAD, paddingBottom: 14 },
-  tplusCard: {
-    width: CARD_W,
-    minHeight: 240,
-    borderRadius: 24,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.2)',
-    marginRight: CARD_GAP,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(10,46,61,0.94)',
-  },
-  cardCarnet: { backgroundColor: 'rgba(10,46,61,0.94)' },
-  cardReservas: { backgroundColor: 'rgba(10,46,61,0.94)' },
-  cardHistorial: { backgroundColor: 'rgba(10,46,61,0.94)' },
-  cardTracking: { backgroundColor: 'rgba(10,46,61,0.94)' },
-  cardIconWrap: { width: 60, height: 60, borderRadius: 14, backgroundColor: 'rgba(0,229,255,0.15)', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
-  cardTitle: { fontSize: 18, fontWeight: '700', color: '#ffffff', letterSpacing: -0.3, marginBottom: 6 },
-  cardDesc: { fontSize: 13, lineHeight: 19, color: 'rgba(255,255,255,0.65)', flexShrink: 1, marginBottom: 12 },
-  cardAction: { flexDirection: 'row', alignItems: 'center' },
-  cardActionTxt: { fontSize: 13, fontWeight: '600', color: '#00E5FF', marginRight: 4 },
-  dotsRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 8, marginBottom: 16 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.15)', marginHorizontal: 4 },
-  dotActive: { width: 24, backgroundColor: '#00E5FF', borderRadius: 3 },
   promoCard: { borderRadius: 24, overflow: 'hidden', minHeight: 200, justifyContent: 'flex-end' },
   promoBgView: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#0D3B4F' },
   promoTexture: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, opacity: 0.55 },

@@ -54,6 +54,7 @@ import {
 import { useDriverTracking } from "@/hooks/useDriverTracking";
 import CountdownModal from "@/components/CountdownModal";
 import { roundPrice } from "@/hooks/roundPrice";
+import { useBottomSafePadding, useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 import originIcon from "../../assets/images/rsz_2red_pin.png";
 import destinationIcon from "../../assets/images/green_pin.png";
 import driverCarIcon from "../../assets/images/track_Car.png";
@@ -86,6 +87,8 @@ const { width, height } = Dimensions.get("window");
 const MAPBOX_ACCESS_TOKEN = getMapboxAccessToken();
 
 const BookingCabScreen = () => {
+  const backButtonTop = useHeaderTopPadding(4, 15);
+  const panelBottomPadding = useBottomSafePadding(20, 20);
   const route = useRoute() as any;
   const dispatch = useDispatch();
   const [currentBooking, setCurrentBooking] = useState(
@@ -1418,7 +1421,7 @@ const BookingCabScreen = () => {
         <View
           style={{
             position: "absolute",
-            top: 15,
+            top: backButtonTop,
             left: 15,
             zIndex: 10,
           }}
@@ -1568,7 +1571,7 @@ const BookingCabScreen = () => {
               </View>
 
               {/* Panel inferior estilo referencia */}
-              <View style={styles.waitingPanel}>
+              <View style={[styles.waitingPanel, { paddingBottom: panelBottomPadding }]}>
                 {/* Drag indicator bars */}
                 <View style={styles.dragIndicatorRow}>
                   <View style={styles.dragBar} />
@@ -2455,9 +2458,10 @@ const DetailsContainer = ({
   onServiceParametersChange,
 }: any) => {
   const styles = colorScheme === "dark" ? darkStyles : lightStyles; // Estilos din�micos
+  const panelBottomPadding = useBottomSafePadding(20, 20);
 
   return (
-    <View style={styles.detailsContainer}>
+    <View style={[styles.detailsContainer, { paddingBottom: panelBottomPadding }]}>
       {user?.usertype === 'customer' && 
        currentBooking?.status !== 'NEW' && 
        (currentBooking?.status === 'ACCEPTED' || currentBooking?.status === 'ARRIVED' || currentBooking?.status === 'STARTED') && (

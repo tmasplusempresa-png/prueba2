@@ -5,13 +5,14 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
-  SafeAreaView,
   ImageBackground,
   Image,
   ActivityIndicator,
   Modal,
   Linking,
+  Platform,
 } from "react-native";
+import { SafeAreaView, type Edge } from "react-native-safe-area-context";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import { RootState, AppDispatch } from "@/common/store";
@@ -24,6 +25,10 @@ import { useColorScheme } from "react-native";
 import { AntDesign } from '@expo/vector-icons';
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
 import { preferredConductorId } from "@/common/utils/driverIds";
+
+// El SafeAreaView de react-native no aplicaba padding en Android; se mantiene así.
+const SAFE_AREA_EDGES: Edge[] | undefined = Platform.OS === "ios" ? undefined : [];
+
 const NoMembershipScreen = () => {
   const dispatch = useDispatch<AppDispatch>();
   const navigation = useNavigation();
@@ -116,7 +121,7 @@ const NoMembershipScreen = () => {
   // embudo queda cubierto cualquiera que se haya pasado por alto.
   if (!PUEDE_COMPRAR_EN_APP) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#051A26" }}>
+      <SafeAreaView edges={SAFE_AREA_EDGES} style={{ flex: 1, backgroundColor: "#051A26" }}>
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 }}>
           <Icon name="information-circle-outline" size={64} color="#00E5FF" />
           <Text style={{ color: "#FFF", fontSize: 20, fontWeight: "800", textAlign: "center", marginTop: 18 }}>
@@ -157,7 +162,7 @@ const NoMembershipScreen = () => {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView edges={SAFE_AREA_EDGES} style={styles.container}>
        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
         <AntDesign name="arrow-left" size={24} color={colorScheme === "dark" ? "#fff" : "#000"} />
     </TouchableOpacity>

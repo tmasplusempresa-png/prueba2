@@ -29,10 +29,11 @@ import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
 import { useActiveTripBanner } from '@/hooks/useActiveTripBanner';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
 import { fetchAndSyncUserRating, countCompletedTrips } from '@/common/utils/userRating';
+import { useMyCompanies } from '@/hooks/useMyCompanies';
 
 const emptyProfile = {
   firstName: null as string | null,
@@ -80,7 +81,7 @@ const LiquidGlass = ({
 );
 
 const ProfileScreen = ({ navigation }: Props) => {
-  const insets = useSafeAreaInsets();
+  const headerTopPadding = useHeaderTopPadding();
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const profile = useSelector((state: RootState) => state.auth.profile) as any;
   const dispatch = useDispatch();
@@ -101,6 +102,7 @@ const ProfileScreen = ({ navigation }: Props) => {
   const [dbProfile, setDbProfile] = useState({ ...emptyProfile });
   // Código de referido PROPIO (AAA-XXXXX) + conteo. null = aún generándose.
   const [ownReferral, setOwnReferral] = useState<DriverReferralCode | null>(null);
+  const { companies, loading: companiesLoading } = useMyCompanies();
   const currentUserType = String(
     dbProfile.userType ||
       user?.usertype ||
@@ -551,7 +553,6 @@ const ProfileScreen = ({ navigation }: Props) => {
   const isCustomer = currentUserType === "customer";
   const isDriverUser = useIsDriverUser();
   const hideNavBack = isCustomer || isDriverUser;
-  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
   const customerNavPad = useCustomerNavBottomPad();
   const driverNavPad = useDriverNavBottomPad();
   const { hasActiveTrip } = useActiveTripBanner();
@@ -712,6 +713,56 @@ const ProfileScreen = ({ navigation }: Props) => {
             </LiquidGlass>
           </View>
         </View>
+
+        {currentUserType === "customer" && (
+          <View style={styles.menuSection}>
+            <Text style={styles.menuSectionTitle}>Empresa</Text>
+            <View style={styles.menuCard}>
+              {companiesLoading && companies.length === 0 ? (
+                <View style={styles.companyRow}>
+                  <View style={styles.menuIconWrap}>
+                    <Ionicons name="business-outline" size={18} color="rgba(0,229,255,0.85)" />
+                  </View>
+                  <Text style={styles.companyHint}>Consultando vinculación…</Text>
+                </View>
+              ) : companies.length === 0 ? (
+                <View style={styles.companyRow}>
+                  <View style={styles.menuIconWrap}>
+                    <Ionicons name="business-outline" size={18} color="rgba(255,255,255,0.4)" />
+                  </View>
+                  <View style={styles.companyTextWrap}>
+                    <Text style={styles.companyName}>Sin empresa vinculada</Text>
+                    <Text style={styles.companyHint}>
+                      Si tu empresa usa T+plus, pídele que te agregue como colaborador.
+                    </Text>
+                  </View>
+                </View>
+              ) : (
+                companies.map((company, index) => (
+                  <View
+                    key={company.id}
+                    style={[styles.companyRow, index < companies.length - 1 ? styles.menuItemBorder : null]}
+                  >
+                    <View style={styles.menuIconWrap}>
+                      {company.logoUrl ? (
+                        <Image source={{ uri: company.logoUrl }} style={styles.companyLogo} />
+                      ) : (
+                        <Ionicons name="business" size={18} color="rgba(0,229,255,0.85)" />
+                      )}
+                    </View>
+                    <View style={styles.companyTextWrap}>
+                      <Text style={styles.companyName} numberOfLines={1}>{company.name}</Text>
+                      <Text style={styles.companyHint}>Colaborador · servicio empresarial activo</Text>
+                    </View>
+                    <View style={styles.companyBadge}>
+                      <Text style={styles.companyBadgeText}>Vinculado</Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+          </View>
+        )}
 
         {menuSections.map((section) => (
           <View key={section.title} style={styles.menuSection}>
@@ -1080,6 +1131,46 @@ const styles = StyleSheet.create({
   menuTextSOS: {
     color: "#E91E63",
     fontWeight: "600",
+  },
+  companyRow: {
+    minHeight: 56,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  companyTextWrap: {
+    flex: 1,
+    marginRight: 8,
+  },
+  companyName: {
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  companyHint: {
+    marginTop: 2,
+    color: "rgba(220,230,240,0.55)",
+    fontSize: 11,
+  },
+  companyLogo: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+  },
+  companyBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(0,229,255,0.35)",
+    backgroundColor: "rgba(0,229,255,0.12)",
+  },
+  companyBadgeText: {
+    color: "#00E5FF",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.4,
   },
   logoutBtn: {
     height: 46,

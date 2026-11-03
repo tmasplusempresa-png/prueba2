@@ -63,6 +63,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import DriverReservationsScreen from "./DriverReservationsScreen";
 import { ActiveTripBannerStack } from "@/components/ActiveTripFloatingBanner";
 import { useActiveTripBanner } from "@/hooks/useActiveTripBanner";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 import DriverNotificationsModal from "@/components/DriverNotificationsModal";
 import { listServiceNotices } from "@/common/services/driverServiceNotices";
 import * as Speech from "expo-speech";
@@ -159,6 +160,8 @@ const calculateImmediateDistanceKm = (lat1: number, lng1: number, lat2: number, 
 
 
 const MapScreen = () => {
+  const topBarOffset = useHeaderTopPadding(4, 50);
+  const scrollTopPadding = useHeaderTopPadding(12, 60);
   const dispatch = useAppDispatch();
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const settings = useSelector(selectSettings);
@@ -2703,7 +2706,7 @@ const MapScreen = () => {
                 </TouchableOpacity>
               </View>
             )}
-            <View style={nS.driverTopBar}>
+            <View style={[nS.driverTopBar, { top: topBarOffset }]}>
               <View style={nS.driverEarningsPill}>
                 <Text style={nS.driverEarningsLabel}>Hoy</Text>
                 <Text style={nS.driverEarningsAmount}>$ {Number(balance || 0).toLocaleString('es-CO')}</Text>
@@ -2908,28 +2911,34 @@ const MapScreen = () => {
           <View pointerEvents="none" style={nS.orbBottomLeft} />
           <ScrollView
             style={nS.scroll}
-            contentContainerStyle={nS.scrollContent}
+            contentContainerStyle={[nS.scrollContent, { paddingTop: scrollTopPadding }]}
             showsVerticalScrollIndicator={false}
           >
             {/* --- HEADER --- */}
             <View style={nS.header}>
-              <View style={nS.avatarRing}>
-                {user?.profile_image ? (
-                  <Image source={{ uri: user.profile_image }} style={nS.avatarImg} />
-                ) : (
-                  <View style={nS.avatarFallback}>
-                    <Text style={nS.avatarInitial}>
-                      {(dbFirstName || user?.first_name || 'U')[0].toUpperCase()}
-                    </Text>
-                  </View>
-                )}
-              </View>
-              <View style={nS.headerMid}>
-                <Text style={nS.greetText}>
-                  {new Date().getHours() < 12 ? 'Buenos d�as' : new Date().getHours() < 18 ? 'Buenas tardes' : 'Buenas noches'}
-                </Text>
-                <Text style={nS.nameText}>{dbFirstName || user?.first_name || 'Usuario'}</Text>
-              </View>
+              <TouchableOpacity
+                style={nS.profileLink}
+                activeOpacity={0.75}
+                onPress={() => navigation.navigate('Profile')}
+              >
+                <View style={nS.avatarRing}>
+                  {user?.profile_image ? (
+                    <Image source={{ uri: user.profile_image }} style={nS.avatarImg} />
+                  ) : (
+                    <View style={nS.avatarFallback}>
+                      <Text style={nS.avatarInitial}>
+                        {(dbFirstName || user?.first_name || 'U')[0].toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <View style={nS.headerMid}>
+                  <Text style={nS.greetText}>
+                    {new Date().getHours() < 12 ? 'Buenos días' : new Date().getHours() < 18 ? 'Buenas tardes' : 'Buenas noches'}
+                  </Text>
+                  <Text style={nS.nameText}>{dbFirstName || user?.first_name || 'Usuario'}</Text>
+                </View>
+              </TouchableOpacity>
               <TouchableOpacity style={nS.mapBtn} onPress={() => setIsMapVisible(true)}>
                 <Ionicons name="map-outline" size={22} color="#00E5FF" />
               </TouchableOpacity>
@@ -3055,7 +3064,7 @@ const MapScreen = () => {
         <TouchableWithoutFeedback
           onPress={Platform.OS === "ios" ? Keyboard.dismiss : undefined}
         >
-          <ScrollView contentContainerStyle={styles.tourContainer}>
+          <ScrollView contentContainerStyle={[styles.tourContainer, { paddingTop: topBarOffset }]}>
             <View
               style={{
                 flexDirection: "row",
@@ -4687,6 +4696,11 @@ const nS = StyleSheet.create({
     color: '#00E5FF',
     fontSize: 20,
     fontWeight: '800' as const,
+  },
+  profileLink: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   headerMid: {
     flex: 1,

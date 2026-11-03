@@ -22,6 +22,7 @@ import { decode } from "base64-arraybuffer";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "@/config/SupabaseConfig";
 import { updateUserProfile } from "@/common/reducers/authReducer";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -52,6 +53,7 @@ const DOC_DEFS: DocDef[] = [
 ];
 
 const ImageGalleryComponent = ({ navigation, route }: Props) => {
+  const headerTopPadding = useHeaderTopPadding(8, 52);
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const profile = useSelector((state: RootState) => (state.auth as any).profile) as any;
   const dispatch = useDispatch();
@@ -441,7 +443,7 @@ const ImageGalleryComponent = ({ navigation, route }: Props) => {
         <View style={styles.bgGrid} />
       </View>
 
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
         <TouchableOpacity
           style={styles.headerBtn}
           onPress={() => {

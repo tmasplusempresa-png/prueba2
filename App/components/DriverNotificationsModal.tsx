@@ -22,6 +22,7 @@ import {
   formatCountdown,
   type ServiceNotice,
 } from '@/common/services/driverServiceNotices';
+import { isCorporatePayment } from '@/common/utils/paymentMode';
 
 const ACCENT = '#00E5FF';
 const GREEN = '#00E676';
@@ -177,13 +178,21 @@ const DriverNotificationsModal: React.FC<Props> = ({
     return (
       <View style={[styles.card, isTaken && styles.cardTaken]}>
         <View style={styles.cardTop}>
-          <View style={[styles.kindPill, item.bookingType === 'reservation' ? styles.kindRes : styles.kindImm]}>
-            <Ionicons
-              name={item.bookingType === 'reservation' ? 'calendar' : 'flash'}
-              size={11}
-              color={item.bookingType === 'reservation' ? '#FFB300' : ACCENT}
-            />
-            <Text {...FIXED_TEXT_PROPS} style={styles.kindTxt}>{kindLabel}</Text>
+          <View style={styles.cardTopTags}>
+            <View style={[styles.kindPill, item.bookingType === 'reservation' ? styles.kindRes : styles.kindImm]}>
+              <Ionicons
+                name={item.bookingType === 'reservation' ? 'calendar' : 'flash'}
+                size={11}
+                color={item.bookingType === 'reservation' ? '#FFB300' : ACCENT}
+              />
+              <Text {...FIXED_TEXT_PROPS} style={styles.kindTxt}>{kindLabel}</Text>
+            </View>
+            {isCorporatePayment(booking?.payment_mode) ? (
+              <View style={[styles.kindPill, styles.kindImm]}>
+                <Ionicons name="business" size={11} color={ACCENT} />
+                <Text {...FIXED_TEXT_PROPS} style={styles.kindTxt}>Empresarial</Text>
+              </View>
+            ) : null}
           </View>
           <View style={[styles.statusPill, isAvail ? styles.statusOk : styles.statusNo]}>
             <Text {...FIXED_TEXT_PROPS} style={[styles.statusTxt, isAvail ? styles.statusOkTxt : styles.statusNoTxt]}>
@@ -471,6 +480,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.1)',
   },
   cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  cardTopTags: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   kindPill: {
     flexDirection: 'row',
     alignItems: 'center',

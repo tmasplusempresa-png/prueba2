@@ -13,10 +13,12 @@ import {
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { Ionicons, AntDesign } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 type Props = NativeStackScreenProps<any>;
 
 const CustomerSupport = ({ navigation }: Props) => {
+  const headerTopPadding = useHeaderTopPadding(8, 14);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -122,7 +124,7 @@ const CustomerSupport = ({ navigation }: Props) => {
   });
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: headerTopPadding }]}>
       <StatusBar barStyle="light-content" />
 
       <View pointerEvents="none" style={styles.bgLayer}>
