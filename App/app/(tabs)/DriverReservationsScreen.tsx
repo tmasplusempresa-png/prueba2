@@ -23,7 +23,8 @@ import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { formatBookingFareRange, getBookingFareRange } from '@/constants/fare';
-import { isCorporatePayment } from '@/common/utils/paymentMode';
+import { isCorporatePayment, isRecommendedPayment } from '@/common/utils/paymentMode';
+import { fetchRecommendationInfo } from '@/common/services/recommendationsService';
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
 import { useActiveTripBanner } from '@/hooks/useActiveTripBanner';
@@ -307,6 +308,23 @@ const DriverReservationsScreen = ({
 
   const [immediateServices, setImmediateServices] = useState<Reservation[]>([]);
   const [searchingImmediate, setSearchingImmediate] = useState(false);
+
+  // Viajes recomendados que pidió este mismo conductor: no puede tomarlos (la BD también lo impide).
+  const [ownRequestIds, setOwnRequestIds] = useState<Set<string>>(() => new Set());
+  const checkedRecommendedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = [...reservations, ...immediateServices]
+      .filter((r: any) => isRecommendedPayment(r.payment_mode) && !checkedRecommendedRef.current.has(String(r.id)))
+      .map((r: any) => String(r.id));
+    if (pending.length === 0) return;
+    pending.forEach((id) => checkedRecommendedRef.current.add(id));
+    fetchRecommendationInfo(pending)
+      .then((info) => {
+        const mine = pending.filter((id) => info[id]?.viewerRole === 'solicitante');
+        if (mine.length) setOwnRequestIds((prev) => new Set([...prev, ...mine]));
+      })
+      .catch(() => pending.forEach((id) => checkedRecommendedRef.current.delete(id)));
+  }, [reservations, immediateServices]);
   const rangeKm = IMMEDIATE_RANGE_KM;
 
   /* ── Live GPS del conductor (para filtro estricto de 3km) ── */
@@ -518,7 +536,9 @@ const DriverReservationsScreen = ({
         const pickup = it.pickup_address || 'punto desconocido';
         const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
         const distTxt = formatTripKmSuffix(it.distance);
-        const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
+        const corpTag = isCorporatePayment(it.payment_mode)
+          ? ' · Empresarial'
+          : isRecommendedPayment(it.payment_mode) ? ' · Recomendado' : '';
         // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
         if (!isFirstScan) {
           notifyNewBooking(
@@ -725,7 +745,9 @@ const DriverReservationsScreen = ({
         const pickup = it.pickup_address || 'punto desconocido';
         // Km del viaje (estimate), no distancia conductor→recogida
         const distTxt = formatTripKmSuffix(it.distance);
-        const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
+        const corpTag = isCorporatePayment(it.payment_mode)
+          ? ' · Empresarial'
+          : isRecommendedPayment(it.payment_mode) ? ' · Recomendado' : '';
         if (!isFirstScan) {
           notifyNewBooking(
             `⚡ Nuevo servicio inmediato${corpTag}`,
@@ -1232,6 +1254,11 @@ const DriverReservationsScreen = ({
                       <Ionicons name="business" size={9} color="#051A26" />
                       <Text style={s.corporateTagTxt}>Empresarial</Text>
                     </View>
+                  ) : isRecommendedPayment(item.payment_mode) ? (
+                    <View style={s.corporateTag}>
+                      <Ionicons name="people" size={9} color="#051A26" />
+                      <Text style={s.corporateTagTxt}>Recomendado</Text>
+                    </View>
                   ) : null}
                 </View>
               </View>
@@ -1323,7 +1350,7 @@ const DriverReservationsScreen = ({
   const pinnedActiveTrip =
     activeTripIsDriver && activeTab === 'reservations' ? activeReservation : null;
 
-  const listData =
+  const allListData =
     activeTab === 'reservations'
       ? [
           ...reservations.map((r) => ({ ...r, __taken: false as const, __expiresAt: 0 })),
@@ -1343,6 +1370,9 @@ const DriverReservationsScreen = ({
       : activeTab === 'immediate'
         ? immediateServices
         : [];
+  const listData = ownRequestIds.size
+    ? allListData.filter((r: any) => !ownRequestIds.has(String(r.id)))
+    : allListData;
 
   const headerTitle =
     activeTab === 'reservations'
@@ -1778,6 +1808,17 @@ const DriverReservationsScreen = ({
                     </View>
                     <Text style={s.obsText}>
                       No cobres al pasajero: T+Plus factura el viaje a la empresa y te paga este servicio.
+                    </Text>
+                  </View>
+                ) : isRecommendedPayment(detailItem.payment_mode) ? (
+                  <View style={s.obsBlock}>
+                    <View style={s.obsHeader}>
+                      <Ionicons name="people-outline" size={13} color="#00E5FF" />
+                      <Text style={s.obsLabel}>Viaje Recomendado</Text>
+                    </View>
+                    <Text style={s.obsText}>
+                      Lo pidió otro conductor para su cliente. No cobres al pasajero: ese conductor te paga el valor
+                      del viaje dentro de las 24 h siguientes a completarlo.
                     </Text>
                   </View>
                 ) : null}

@@ -22,7 +22,7 @@ import {
   formatCountdown,
   type ServiceNotice,
 } from '@/common/services/driverServiceNotices';
-import { isCorporatePayment } from '@/common/utils/paymentMode';
+import { isCorporatePayment, isRecommendedPayment } from '@/common/utils/paymentMode';
 
 const ACCENT = '#00E5FF';
 const GREEN = '#00E676';
@@ -191,6 +191,11 @@ const DriverNotificationsModal: React.FC<Props> = ({
               <View style={[styles.kindPill, styles.kindImm]}>
                 <Ionicons name="business" size={11} color={ACCENT} />
                 <Text {...FIXED_TEXT_PROPS} style={styles.kindTxt}>Empresarial</Text>
+              </View>
+            ) : isRecommendedPayment(booking?.payment_mode) ? (
+              <View style={[styles.kindPill, styles.kindImm]}>
+                <Ionicons name="people" size={11} color={ACCENT} />
+                <Text {...FIXED_TEXT_PROPS} style={styles.kindTxt}>Recomendado</Text>
               </View>
             ) : null}
           </View>

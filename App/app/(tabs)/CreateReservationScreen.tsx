@@ -34,6 +34,7 @@ import {
   COST_CENTER_MAX_LENGTH,
   encodeCostCenterHeader,
 } from '@/common/services/companiesService';
+import { requestTripForClient } from '@/common/services/recommendationsService';
 
 const { height: SH } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = 'tmasplus_recent_destination_searches';
@@ -384,7 +385,15 @@ const CreateReservationScreen = () => {
   useEffect(() => {
     if (!companies.some((c) => c.id === companyId)) setCompanyId(companies[0]?.id ?? null);
   }, [companies, companyId]);
-  const canChooseCorporate = companies.length > 0;
+  /* ── Reserva recomendada: un conductor pide el viaje a nombre de un cliente de su cartera ── */
+  const recommendedClient: { id: string; name: string } | null = params.recommendedClient ?? null;
+  const isRecommended = !!recommendedClient;
+  const [fareSource, setFareSource] = useState<'recomendada' | 'manual'>('recomendada');
+  const [manualMin, setManualMin] = useState('');
+  const [manualMax, setManualMax] = useState('');
+  const [agreedValue, setAgreedValue] = useState('');
+
+  const canChooseCorporate = !isRecommended && companies.length > 0;
   const isCorporate = tripPurpose === 'empresarial' && canChooseCorporate && !!companyId;
   const selectedCompany = companies.find((c) => c.id === companyId) || null;
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -1417,6 +1426,65 @@ const CreateReservationScreen = () => {
   const canContinue = !!origin && !!destination && distance > 0 && !calculating;
   const canSubmit = canContinue && !saving;
 
+  /* ── Rango que verá el conductor que acepte el viaje recomendado ── */
+  const recommendedRange = useMemo(() => {
+    if (fareSource === 'manual') {
+      return { min: Number(manualMin) || 0, max: Number(manualMax) || 0 };
+    }
+    return { min: Math.round(driverPrice || 0), max: Math.round(clientPrice || 0) };
+  }, [fareSource, manualMin, manualMax, driverPrice, clientPrice]);
+  // Lo peor que le puede quedar al solicitante: acordado menos el máximo del rango.
+  const recommendedEarnings = agreedValue && recommendedRange.max > 0
+    ? Number(agreedValue) - recommendedRange.max
+    : null;
+
+  const submitRecommended = async () => {
+    if (!recommendedClient || !origin || !destination) return;
+    const { min, max } = recommendedRange;
+    if (min <= 0 || max < min) {
+      showAlert('error', 'Rango inválido', 'El máximo debe ser mayor o igual al mínimo y ambos mayores que cero.');
+      return;
+    }
+    if (max > min * 3) {
+      showAlert('error', 'Rango inválido', 'El máximo no puede superar tres veces el mínimo.');
+      return;
+    }
+    const categoryId = vehicleRates?.[carType]?.id;
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
+      showAlert('error', 'Vehículo', 'No se pudo identificar la categoría del vehículo. Intenta de nuevo.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const tripLabel = tripType === 'Ida y Vuelta' ? 'Ida y Vuelta' : 'Ida';
+      await requestTripForClient(recommendedClient.id, {
+        car_type_id: categoryId,
+        booking_type: serviceType === 'reservation' ? 'scheduled' : 'immediate',
+        ...(serviceType === 'reservation' && scheduledDate ? { booking_date: scheduledDate.toISOString() } : {}),
+        pickup: { lat: origin.latitude, lng: origin.longitude, address: origin.title || 'Origen' },
+        destination: { lat: destination.latitude, lng: destination.longitude, address: destination.title || 'Destino' },
+        distance_km: parseFloat(distance.toFixed(2)),
+        duration_min: Math.round(duration),
+        fare_source: fareSource,
+        fare_min: min,
+        fare_max: max,
+        agreed_value: agreedValue ? Number(agreedValue) : null,
+        observations: encodeTripTypeObservation(tripLabel, observations),
+      });
+      showAlert('success', '¡Viaje solicitado!',
+        `El viaje de ${recommendedClient.name} ya está buscando conductor. Síguelo en Mis Viajes › Solicitados por mí.`,
+        [{ text: 'Ver mis solicitudes', onPress: () => {
+          setAlertVisible(false);
+          nav.navigate('HomeScreen', { screen: 'Historial', params: { initialTab: 'requested' } });
+        } }],
+      );
+    } catch (e: any) {
+      showAlert('error', 'No se pudo solicitar el viaje', String(e?.message || 'Intenta de nuevo.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   /* ── Custom alert state ── */
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('info');
@@ -1480,6 +1548,10 @@ const CreateReservationScreen = () => {
     if (distance <= 0) { showAlert('error', 'Error', 'No se pudo calcular la ruta.'); return; }
     if (serviceType === 'reservation' && !scheduledDate) {
       showAlert('error', 'Fecha requerida', 'Selecciona la fecha y hora del servicio programado.');
+      return;
+    }
+    if (isRecommended) {
+      await submitRecommended();
       return;
     }
     setSaving(true);
@@ -1771,9 +1843,11 @@ const CreateReservationScreen = () => {
               <View style={st.sheetHandle} />
             </View>
             <Text style={st.panelTitle}>
-              {!canChooseCorporate
-                ? 'Asigna tu ruta'
-                : isCorporate ? 'Asigna tu ruta empresarial' : 'Asigna tu ruta personal'}
+              {isRecommended
+                ? `Viaje para ${recommendedClient?.name}`
+                : !canChooseCorporate
+                  ? 'Asigna tu ruta'
+                  : isCorporate ? 'Asigna tu ruta empresarial' : 'Asigna tu ruta personal'}
             </Text>
             <Text style={st.panelSubtitle}>
               {hasConfirmedRoute ? 'Desliza abajo para ver el trazado' : 'Ingresa tu dirección de destino'}
@@ -2036,8 +2110,10 @@ const CreateReservationScreen = () => {
               <View style={st.detailsSheetInner}>
                 <View {...detailsSheetPan.panHandlers}>
                   <View style={st.sheetHandle} />
-                  <Text style={st.detailsSheetTitle}>
-                    {isCorporate ? 'Detalles De Reserva Empresarial' : 'Detalles De Reserva'}
+                  <Text style={st.detailsSheetTitle} numberOfLines={1}>
+                    {isRecommended
+                      ? `Viaje para ${recommendedClient?.name}`
+                      : isCorporate ? 'Detalles De Reserva Empresarial' : 'Detalles De Reserva'}
                   </Text>
                 </View>
 
@@ -2219,6 +2295,71 @@ const CreateReservationScreen = () => {
                     </>
                   )}
 
+                  {isRecommended && (
+                    <>
+                      <Text style={st.label}>Tarifa del viaje</Text>
+                      <View style={st.optGroup}>
+                        <OptionRow
+                          icon="sparkles"
+                          title="Tarifa recomendada"
+                          subtitle={`$ ${Math.round(driverPrice || 0).toLocaleString('es-CO')} – $ ${Math.round(clientPrice || 0).toLocaleString('es-CO')} según la app`}
+                          selected={fareSource === 'recomendada'}
+                          onPress={() => { animateChipSelect(); setFareSource('recomendada'); }}
+                        />
+                        <View style={st.optDivider} />
+                        <OptionRow
+                          icon="create"
+                          title="Definir un rango"
+                          subtitle="Tú pones el mínimo y el máximo"
+                          selected={fareSource === 'manual'}
+                          onPress={() => { animateChipSelect(); setFareSource('manual'); }}
+                        />
+                      </View>
+                      {fareSource === 'manual' && (
+                        <View style={st.rangeRow}>
+                          {([
+                            ['Mínimo', manualMin, setManualMin],
+                            ['Máximo', manualMax, setManualMax],
+                          ] as const).map(([label, value, setter]) => (
+                            <View key={label} style={[st.obsGlass, st.costCenterGlass, st.rangeField]}>
+                              <BlurView intensity={18} tint="dark" style={st.segBlur} />
+                              <TextInput
+                                style={st.costCenterInput}
+                                placeholder={`${label} $`}
+                                placeholderTextColor="rgba(255,255,255,0.35)"
+                                keyboardType="number-pad"
+                                value={value}
+                                onChangeText={(v) => setter(v.replace(/\D/g, ''))}
+                              />
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                      <View style={st.labelRow}>
+                        <Text style={[st.label, st.labelInRow]}>Valor acordado con el cliente</Text>
+                        <Text style={st.labelHint}>Privado · opcional</Text>
+                      </View>
+                      <View style={[st.obsGlass, st.costCenterGlass]}>
+                        <BlurView intensity={18} tint="dark" style={st.segBlur} />
+                        <TextInput
+                          style={st.costCenterInput}
+                          placeholder="Ej.: 50000"
+                          placeholderTextColor="rgba(255,255,255,0.35)"
+                          keyboardType="number-pad"
+                          value={agreedValue}
+                          onChangeText={(v) => setAgreedValue(v.replace(/\D/g, ''))}
+                        />
+                      </View>
+                      <Text style={st.recommendedHint}>
+                        El conductor que acepte solo verá el rango. Al completar el viaje le pagas el valor final dentro
+                        de 24 h. El cliente no ve precios en la app; el valor acordado solo lo ves tú.
+                        {recommendedEarnings !== null
+                          ? ` Tu ganancia estimada: $ ${recommendedEarnings.toLocaleString('es-CO')}.`
+                          : ''}
+                      </Text>
+                    </>
+                  )}
+
                   {/* Notas para el conductor */}
                   <View style={st.labelRow}>
                     <Text style={[st.label, st.labelInRow]}>Notas para el conductor</Text>
@@ -2242,7 +2383,16 @@ const CreateReservationScreen = () => {
                 {/* Footer fijo: precio + pago + crear */}
                 <View style={st.detailsFooter}>
                   <View style={st.footerInner}>
-                    {isCorporate ? (
+                    {isRecommended ? (
+                      <View style={st.payHeaderRow}>
+                        <Text style={st.footerLabel}>Viaje recomendado</Text>
+                        <View style={st.pricePill}>
+                          <Text style={st.pricePillTxt}>$ {recommendedRange.min.toLocaleString('es-CO')}</Text>
+                          <Text style={st.pricePillSep}>–</Text>
+                          <Text style={st.pricePillTxt}>$ {recommendedRange.max.toLocaleString('es-CO')}</Text>
+                        </View>
+                      </View>
+                    ) : isCorporate ? (
                       <>
                         <View style={st.payHeaderRow}>
                           <Text style={st.footerLabel}>Método De Pago</Text>
@@ -2369,7 +2519,9 @@ const CreateReservationScreen = () => {
                       ) : (
                         <>
                           <Ionicons name="send" size={16} color="#051A26" />
-                          <Text style={st.submitTxt}>Crear Reserva con {carType}</Text>
+                          <Text style={st.submitTxt} numberOfLines={1}>
+                            {isRecommended ? `Pedir viaje para ${recommendedClient?.name}` : `Crear Reserva con ${carType}`}
+                          </Text>
                         </>
                       )}
                     </TouchableOpacity>
@@ -3140,6 +3292,20 @@ const st = StyleSheet.create({
   },
   costCenterGlass: {
     minHeight: 44,
+  },
+  rangeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  rangeField: {
+    flex: 1,
+  },
+  recommendedHint: {
+    marginTop: 8,
+    fontSize: 11,
+    lineHeight: 16,
+    color: 'rgba(255,255,255,0.55)',
   },
   costCenterInput: {
     minHeight: 44,

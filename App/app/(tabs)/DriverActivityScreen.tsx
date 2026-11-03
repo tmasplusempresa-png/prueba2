@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, RefreshControl, Platform, Animated,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useFocusEffect, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import * as Animatable from 'react-native-animatable';
@@ -15,8 +15,20 @@ import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBotto
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { getBookingFareRange, formatBookingFareRange } from '@/constants/fare';
 import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
-import { isCorporatePayment } from '@/common/utils/paymentMode';
+import { isCorporatePayment, isRecommendedPayment } from '@/common/utils/paymentMode';
 import { BookingCompany, fetchBookingsCompanies } from '@/common/services/companiesService';
+import {
+  fetchMyRequests,
+  fetchRecommendationInfo,
+  RecommendationInfo,
+  RecommendedRequest,
+  reportSettlement,
+  Settlement,
+  SettlementAction,
+  settlementColor,
+  settlementLabel,
+} from '@/common/services/recommendationsService';
+import CustomAlert, { AlertButton, AlertType } from '@/components/CustomAlert';
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -109,8 +121,22 @@ const DriverActivityScreen = () => {
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('todos');
+  const route = useRoute<any>();
+  const [listTab, setListTab] = useState<'completed' | 'requested'>(
+    route.params?.initialTab === 'requested' ? 'requested' : 'completed',
+  );
+  useEffect(() => {
+    if (route.params?.initialTab === 'requested') setListTab('requested');
+  }, [route.params?.initialTab]);
   const [completas, setCompletas] = useState<Reservation[]>([]);
   const [corporateInfo, setCorporateInfo] = useState<Record<string, BookingCompany>>({});
+  // Viajes recomendados que hice yo (me paga quien los pidió) y los que pedí para mis clientes.
+  const [recommendedInfo, setRecommendedInfo] = useState<Record<string, RecommendationInfo>>({});
+  const [requests, setRequests] = useState<RecommendedRequest[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [busySettlement, setBusySettlement] = useState<string | null>(null);
+  const [alert, setAlert] = useState<{ type: AlertType; title: string; message: string; buttons?: AlertButton[] } | null>(null);
+  const closeAlert = () => setAlert(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dayFilter, setDayFilter] = useState<Date | null>(null);
@@ -173,6 +199,10 @@ const DriverActivityScreen = () => {
           .filter((b: Reservation) => isCorporatePayment(b.payment_mode))
           .map((b: Reservation) => String(b.id));
         setCorporateInfo(await fetchBookingsCompanies(corporateIds));
+        const recommendedIds = (data || [])
+          .filter((b: Reservation) => isRecommendedPayment(b.payment_mode))
+          .map((b: Reservation) => String(b.id));
+        setRecommendedInfo(await fetchRecommendationInfo(recommendedIds).catch(() => ({})));
       } else {
         const errorText = await completasRes.text();
         console.error('📡 [DriverActivity] Error:', errorText);
@@ -185,12 +215,51 @@ const DriverActivityScreen = () => {
     }
   }, [resolveDriverId]);
 
+  const loadRequests = useCallback(async () => {
+    setRequestsLoading(true);
+    try {
+      setRequests(await fetchMyRequests(150));
+    } catch (e: any) {
+      console.warn('[DriverActivity] solicitudes:', e?.message);
+    } finally {
+      setRequestsLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       setLoading(true);
       fetchReservations();
-    }, [fetchReservations])
+      loadRequests();
+    }, [fetchReservations, loadRequests])
   );
+
+  const settle = useCallback((bookingId: string, action: SettlementAction, confirmText: string, detail: string) => {
+    setAlert({
+      type: 'confirm',
+      title: confirmText,
+      message: detail,
+      buttons: [
+        { text: 'Cancelar', style: 'cancel', onPress: closeAlert },
+        {
+          text: 'Confirmar',
+          onPress: async () => {
+            closeAlert();
+            setBusySettlement(bookingId);
+            try {
+              await reportSettlement(bookingId, action);
+              await Promise.all([fetchReservations(), loadRequests()]);
+            } catch (e: any) {
+              setAlert({ type: 'error', title: 'No se pudo actualizar', message: e?.message || 'Intenta de nuevo.' });
+            } finally {
+              setBusySettlement(null);
+            }
+          },
+        },
+      ],
+    });
+  }, [fetchReservations, loadRequests]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
@@ -263,10 +332,74 @@ const DriverActivityScreen = () => {
     nav.navigate('ReservationDetail', { reservation });
   };
 
+  /** Estado de la liquidación entre conductores y la acción que le toca a quien mira. */
+  const renderSettlement = (
+    bookingId: string,
+    settlement: Settlement,
+    role: 'pagador' | 'receptor',
+    counterpart: string,
+  ) => {
+    const closed = settlement.status === 'confirmado' || settlement.status === 'resuelto';
+    const busy = busySettlement === bookingId;
+    const due = new Date(settlement.dueAt);
+    const dueTxt = `${due.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' })} ${due.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}`;
+    return (
+      <View style={st.settleBox}>
+        <View style={st.settleHead}>
+          <View style={[st.settleDot, { backgroundColor: settlementColor(settlement) }]} />
+          <Text style={[st.settleStatus, { color: settlementColor(settlement) }]}>{settlementLabel(settlement)}</Text>
+          <Text style={st.settleAmount}>{fmtMoney(settlement.amount)}</Text>
+        </View>
+        <Text style={st.settleTxt}>
+          {role === 'pagador' ? `Debes pagarle a ${counterpart}` : `Te paga ${counterpart}`}
+          {closed ? '' : settlement.overdue ? ` · el plazo venció el ${dueTxt}` : ` · plazo hasta ${dueTxt}`}
+        </Text>
+        {settlement.status === 'resuelto' && settlement.resolutionNote ? (
+          <Text style={st.settleTxt}>Soporte: {settlement.resolutionNote}</Text>
+        ) : null}
+        {!closed && role === 'pagador' && !settlement.paidReportedAt ? (
+          <TouchableOpacity
+            style={st.settleBtn}
+            disabled={busy}
+            onPress={() => settle(bookingId, 'pague', 'Confirmar pago',
+              `Confirmas que ya le pagaste ${fmtMoney(settlement.amount)} a ${counterpart}. Él deberá confirmarlo.`)}
+          >
+            {busy ? <ActivityIndicator color="#051A26" size="small" /> : <Text style={st.settleBtnTxt}>Ya le pagué</Text>}
+          </TouchableOpacity>
+        ) : null}
+        {!closed && role === 'receptor' ? (
+          <View style={st.settleActions}>
+            <TouchableOpacity
+              style={[st.settleBtn, { flex: 1 }]}
+              disabled={busy}
+              onPress={() => settle(bookingId, 'recibi', 'Confirmar que recibiste',
+                `Confirmas que ${counterpart} ya te pagó ${fmtMoney(settlement.amount)}.`)}
+            >
+              {busy ? <ActivityIndicator color="#051A26" size="small" /> : <Text style={st.settleBtnTxt}>Recibí el pago</Text>}
+            </TouchableOpacity>
+            {settlement.received !== false ? (
+              <TouchableOpacity
+                style={[st.settleBtnGhost, { flex: 1 }]}
+                disabled={busy}
+                onPress={() => settle(bookingId, 'no_recibi', 'Aún no recibes el pago',
+                  settlement.paidReportedAt
+                    ? `${counterpart} reportó que ya te pagó. Si no es así, soporte de T+Plus revisará el caso.`
+                    : `Quedará registrado que aún no recibes el pago de ${counterpart}.`)}
+              >
+                <Text style={st.settleBtnGhostTxt}>Aún no lo recibo</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+    );
+  };
+
   const renderCompletaItem = ({ item, index }: { item: Reservation; index: number }) => {
     const corporate = isCorporatePayment(item.payment_mode);
     const company = corporate ? corporateInfo[String(item.id)] : undefined;
     const paid = company?.driverPaymentStatus === 'pagado';
+    const rec = isRecommendedPayment(item.payment_mode) ? recommendedInfo[String(item.id)] : undefined;
     return (
     <Animatable.View animation="fadeInUp" duration={400} delay={index * 50} useNativeDriver>
       <TouchableOpacity style={st.miniCard} onPress={() => handleViewDetail(item)} activeOpacity={0.8}>
@@ -286,6 +419,14 @@ const DriverActivityScreen = () => {
                   {company?.name ? ` · ${company.name}` : ''}
                 </Text>
               </View>
+            ) : rec ? (
+              <View style={st.corpRow}>
+                <View style={st.corpTag}>
+                  <Ionicons name="people" size={10} color="#051A26" />
+                  <Text style={st.corpTagTxt}>Recomendado</Text>
+                </View>
+                <Text style={st.corpPayTxt} numberOfLines={1}>de {rec.requesterName}</Text>
+              </View>
             ) : null}
           </View>
         </View>
@@ -294,9 +435,60 @@ const DriverActivityScreen = () => {
           <Text style={st.miniPrice}>{formatBookingFareRange(item)}</Text>
         </View>
       </TouchableOpacity>
+      {rec?.settlement && rec.viewerRole === 'conductor'
+        ? renderSettlement(String(item.id), rec.settlement, 'receptor', rec.requesterName)
+        : null}
     </Animatable.View>
     );
   };
+
+  const REQUEST_STATUS: Record<string, string> = {
+    NEW: 'Buscando conductor', PENDING: 'Buscando conductor', ACCEPTED: 'Conductor asignado',
+    ARRIVED: 'Conductor en el punto', STARTED: 'En viaje', REACHED: 'En viaje',
+    COMPLETE: 'Completado', PAID: 'Completado', CANCELLED: 'Cancelado',
+  };
+
+  const renderRequestItem = ({ item, index }: { item: RecommendedRequest; index: number }) => (
+    <Animatable.View animation="fadeInUp" duration={400} delay={Math.min(index, 8) * 50} useNativeDriver>
+      <View style={st.reqCard}>
+        <View style={st.reqHead}>
+          <Text style={st.miniRef}>{item.reference || item.id.slice(0, 8).toUpperCase()}</Text>
+          <Text style={st.reqStatus}>{REQUEST_STATUS[item.status] ?? item.status}</Text>
+        </View>
+        <Text style={st.reqClient} numberOfLines={1}>{item.clientName}</Text>
+        <Text style={st.reqRoute} numberOfLines={1}>{item.pickupAddress} → {item.dropAddress}</Text>
+        <Text style={st.reqMeta}>
+          {formatDate(item.requestedAt)} · {item.category || 'Servicio'}
+          {item.driverName ? ` · ${item.driverName}${item.plate ? ` (${item.plate})` : ''}` : ''}
+        </Text>
+        <View style={st.reqNumbers}>
+          <View style={st.reqNum}>
+            <Text style={st.reqNumLabel}>{item.finalPrice !== null ? 'Precio final' : 'Rango'}</Text>
+            <Text style={st.reqNumValue}>
+              {item.finalPrice !== null ? fmtMoney(item.finalPrice) : `${fmtMoney(item.fareMin)} – ${fmtMoney(item.fareMax)}`}
+            </Text>
+          </View>
+          {item.agreedValue !== null ? (
+            <View style={st.reqNum}>
+              <Text style={st.reqNumLabel}>Acordado</Text>
+              <Text style={st.reqNumValue}>{fmtMoney(item.agreedValue)}</Text>
+            </View>
+          ) : null}
+          {item.estimatedEarnings !== null && item.status !== 'CANCELLED' ? (
+            <View style={st.reqNum}>
+              <Text style={st.reqNumLabel}>Tu ganancia</Text>
+              <Text style={[st.reqNumValue, { color: item.estimatedEarnings >= 0 ? '#00E676' : '#FF5252' }]}>
+                {fmtMoney(item.estimatedEarnings)}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+        {item.settlement
+          ? renderSettlement(item.id, item.settlement, 'pagador', item.driverName || 'el conductor')
+          : null}
+      </View>
+    </Animatable.View>
+  );
 
   const EmptyState = ({ icon, text }: { icon: string; text: string }) => (
     <View style={st.emptyWrap}>
@@ -396,14 +588,33 @@ const DriverActivityScreen = () => {
 
       {/* Day search + Completadas tab */}
       <View style={st.tabBar}>
-        <View style={[st.tabItem, st.tabItemActive]}>
-          <Text style={[st.tabLabel, st.tabLabelActive]}>Completadas</Text>
+        <TouchableOpacity
+          style={[st.tabItem, listTab === 'completed' && st.tabItemActive]}
+          onPress={() => setListTab('completed')}
+          activeOpacity={0.8}
+        >
+          <Text style={[st.tabLabel, listTab === 'completed' && st.tabLabelActive]}>Completadas</Text>
           {currentData.length > 0 && (
-            <View style={[st.tabBadge, st.tabBadgeActive]}>
+            <View style={[st.tabBadge, listTab === 'completed' && st.tabBadgeActive]}>
               <Text style={st.tabBadgeTxt}>{currentData.length}</Text>
             </View>
           )}
-        </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[st.tabItem, listTab === 'requested' && st.tabItemActive]}
+          onPress={() => setListTab('requested')}
+          activeOpacity={0.8}
+        >
+          <Text style={[st.tabLabel, listTab === 'requested' && st.tabLabelActive]} numberOfLines={1}>
+            Solicitados por mí
+          </Text>
+        </TouchableOpacity>
+        {listTab === 'requested' ? (
+          <TouchableOpacity style={st.daySearchBtn} onPress={() => nav.navigate('DriverClients')} activeOpacity={0.75}>
+            <Ionicons name="add" size={14} color="#00E5FF" />
+            <Text style={st.daySearchTxt} numberOfLines={1}>Pedir viaje</Text>
+          </TouchableOpacity>
+        ) : (
         <TouchableOpacity
           style={st.daySearchBtn}
           onPress={() => setShowPicker(true)}
@@ -423,9 +634,10 @@ const DriverActivityScreen = () => {
             </TouchableOpacity>
           )}
         </TouchableOpacity>
+        )}
       </View>
 
-      {dayFilter && (
+      {listTab === 'completed' && dayFilter && (
         <View style={st.dayTotalRow}>
           <Ionicons name="calendar-outline" size={14} color="#00E5FF" />
           <Text style={st.dayTotalTxt}>
@@ -445,7 +657,35 @@ const DriverActivityScreen = () => {
       )}
 
       {/* Content */}
-      {loading ? (
+      {listTab === 'requested' ? (
+        requestsLoading && requests.length === 0 ? (
+          <View style={st.loadingWrap}>
+            <ActivityIndicator size="large" color="#00E5FF" />
+          </View>
+        ) : (
+          <FlatList
+            data={requests}
+            keyExtractor={(item) => item.id}
+            renderItem={renderRequestItem}
+            contentContainerStyle={[st.list, { paddingBottom: isDriverUser ? driverNavPad + 24 : insets.bottom + 30 }]}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={
+              <EmptyState
+                icon="people-outline"
+                text="Aún no has pedido viajes para clientes. Toca «Pedir viaje» para registrar o elegir un cliente."
+              />
+            }
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => { setRefreshing(true); loadRequests(); }}
+                tintColor="#00E5FF"
+                colors={['#00E5FF']}
+              />
+            }
+          />
+        )
+      ) : loading ? (
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color="#00E5FF" />
           <Text style={st.loadingTxt}>Cargando reservas...</Text>
@@ -473,6 +713,14 @@ const DriverActivityScreen = () => {
           }
         />
       )}
+      <CustomAlert
+        visible={!!alert}
+        type={alert?.type}
+        title={alert?.title || ''}
+        message={alert?.message || ''}
+        buttons={alert?.buttons || [{ text: 'OK', onPress: closeAlert }]}
+        onDismiss={closeAlert}
+      />
     </View>
   );
 };
@@ -682,6 +930,39 @@ const st = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(0,229,255,0.12)',
   },
   corpPendingTxt: { flex: 1, fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.75)' },
+  settleBox: {
+    marginTop: -4, marginBottom: 10, padding: 12, borderRadius: 14,
+    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)',
+  },
+  settleHead: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  settleDot: { width: 8, height: 8, borderRadius: 4 },
+  settleStatus: { flex: 1, fontSize: 12, fontWeight: '800' },
+  settleAmount: { fontSize: 13, fontWeight: '800', color: '#FFF' },
+  settleTxt: { marginTop: 4, fontSize: 12, color: 'rgba(255,255,255,0.65)', lineHeight: 17 },
+  settleActions: { flexDirection: 'row', gap: 8 },
+  settleBtn: {
+    marginTop: 10, minHeight: 38, borderRadius: 10, backgroundColor: '#00E5FF',
+    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12,
+  },
+  settleBtnTxt: { fontSize: 13, fontWeight: '700', color: '#051A26' },
+  settleBtnGhost: {
+    marginTop: 10, minHeight: 38, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,82,82,0.5)',
+    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12,
+  },
+  settleBtnGhostTxt: { fontSize: 13, fontWeight: '700', color: '#FF8A80' },
+  reqCard: {
+    padding: 14, borderRadius: 16, marginBottom: 10,
+    backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)',
+  },
+  reqHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  reqStatus: { fontSize: 11, fontWeight: '700', color: '#00E5FF' },
+  reqClient: { marginTop: 4, fontSize: 15, fontWeight: '700', color: '#FFF' },
+  reqRoute: { marginTop: 2, fontSize: 12, color: 'rgba(255,255,255,0.65)' },
+  reqMeta: { marginTop: 2, fontSize: 11, color: 'rgba(255,255,255,0.45)' },
+  reqNumbers: { flexDirection: 'row', gap: 16, marginTop: 10 },
+  reqNum: { minWidth: 0 },
+  reqNumLabel: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase' },
+  reqNumValue: { fontSize: 13, fontWeight: '800', color: '#FFF', marginTop: 2 },
   /* Empty */
   emptyWrap: { alignItems: 'center', paddingTop: 60 },
   emptyIconWrap: {

@@ -28,7 +28,10 @@ import {
   isCashPayment,
   isCorporatePayment,
   isPassengerFareHidden,
+  isRecommendedPayment,
 } from '@/common/utils/paymentMode';
+import { useRecommendationInfo } from '@/hooks/useRecommendationInfo';
+import { RecommendedByRow } from '@/components/RecommendedByRow';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 const GOOGLE_MAPS_APIKEY = API_KEY;
@@ -185,10 +188,14 @@ const ReservationDetailScreen = () => {
     .trim()
     .toLowerCase();
   const isDriverAccount = accountType === 'driver' || isDriverOnTrip;
-  // Viajes empresariales: el colaborador no ve precios (los ve la empresa en la web); el conductor sí.
+  // Viajes empresariales o recomendados: el pasajero no ve precios; el conductor sí.
   const isCorporateTrip = isCorporatePayment(reservation?.payment_mode);
   const hideFareFromCustomer = !isDriverAccount && isPassengerFareHidden(reservation?.payment_mode);
   const billedCompany = useBookingCompany(reservation?.id, isCorporateTrip);
+  const { info: recommendation } = useRecommendationInfo(
+    reservation?.id,
+    isRecommendedPayment(reservation?.payment_mode),
+  );
 
   const statusMeta = getStatusMeta(reservation?.status);
   const driverId = reservation?.driver || reservation?.driver_id || null;
@@ -872,6 +879,9 @@ ${hideFareFromCustomer ? `*Pago:* ${getPaymentModeLabel(reservation.payment_mode
 
             {isCorporateTrip && billedCompany ? (
               <BilledCompanyRow company={billedCompany} style={s.paymentRow} />
+            ) : null}
+            {recommendation ? (
+              <RecommendedByRow info={recommendation} style={s.paymentRow} />
             ) : null}
 
             <View style={s.paymentRow}>

@@ -6,12 +6,14 @@
  *   - "transfer"                       (reservas creadas antes de guardar la billetera exacta)
  *   - "Daviplata" / "Nequi" / "wallet" / "card" (flujos legacy)
  *   - "empresarial"                    (lo paga la empresa del colaborador; el pasajero no paga ni ve precios)
+ *   - "recomendado"                    (lo pidió otro conductor a nombre del cliente; el cliente le paga a ese
+ *                                       conductor y este le paga al que hace el viaje. El pasajero no ve precios)
  *
  * Nunca se cae a "Efectivo" para un valor desconocido: un pago digital mostrado
  * como efectivo hace que el conductor cobre de forma distinta a lo que eligió el cliente.
  */
 export type PaymentModeKey =
-  | 'cash' | 'nequi' | 'daviplata' | 'transfer' | 'wallet' | 'card' | 'corp' | 'empresarial';
+  | 'cash' | 'nequi' | 'daviplata' | 'transfer' | 'wallet' | 'card' | 'corp' | 'empresarial' | 'recomendado';
 
 export const NEQUI_LOGO_URI = 'https://img.logo.dev/nequi.com.co?token=pk_c_F6FSsGSaKey4lkmcDLNw';
 export const DAVIPLATA_LOGO_URI = 'https://img.logo.dev/daviplata.com?token=pk_c_F6FSsGSaKey4lkmcDLNw';
@@ -25,6 +27,7 @@ const LABELS: Record<PaymentModeKey, string> = {
   card: 'Tarjeta',
   corp: 'Corporativo',
   empresarial: 'Empresarial',
+  recomendado: 'Recomendado',
 };
 
 export const normalizePaymentMode = (value?: string | null): PaymentModeKey => {
@@ -36,6 +39,7 @@ export const normalizePaymentMode = (value?: string | null): PaymentModeKey => {
   if (raw === 'card') return 'card';
   if (raw === 'corp' || raw === 'corporate') return 'corp';
   if (raw === 'empresarial' || raw === 'empresa') return 'empresarial';
+  if (raw === 'recomendado') return 'recomendado';
   return 'transfer';
 };
 
@@ -55,8 +59,13 @@ export const isTransferPayment = (value?: string | null): boolean => {
 export const isCorporatePayment = (value?: string | null): boolean =>
   normalizePaymentMode(value) === 'empresarial';
 
+/** Viaje pedido por otro conductor a nombre del cliente: quien lo hace no cobra al pasajero. */
+export const isRecommendedPayment = (value?: string | null): boolean =>
+  normalizePaymentMode(value) === 'recomendado';
+
 /** El pasajero nunca ve el valor del viaje (pantallas, notificaciones ni voz). El conductor sí. */
-export const isPassengerFareHidden = (value?: string | null): boolean => isCorporatePayment(value);
+export const isPassengerFareHidden = (value?: string | null): boolean =>
+  isCorporatePayment(value) || isRecommendedPayment(value);
 
 export const getPaymentModeLogoUri = (value?: string | null): string | null => {
   const mode = normalizePaymentMode(value);
@@ -72,6 +81,7 @@ export const getPaymentModeIonicon = (value?: string | null): string => {
     case 'card': return 'card-outline';
     case 'transfer': return 'swap-horizontal-outline';
     case 'empresarial': return 'business-outline';
+    case 'recomendado': return 'people-outline';
     default: return 'wallet-outline';
   }
 };

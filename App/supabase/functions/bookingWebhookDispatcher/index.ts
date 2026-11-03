@@ -118,7 +118,12 @@ async function decidePayload(evt: WebhookPayload): Promise<PushPayload | null> {
 
   // ─── INSERT reserva SIN conductor → fan-out a conductores elegibles ─────
   if (evt.type === "INSERT" && !record.id_conductor && esProgramado && esEstadoAbierto(record.estado)) {
-    const driverIds = await getEligibleDriverIds(record.id_categoria, carTypeName);
+    let driverIds = await getEligibleDriverIds(record.id_categoria, carTypeName);
+    if (isRecomendado(record)) {
+      // El conductor que pidió el viaje para su cliente no puede tomarlo: no se le avisa.
+      const { data: rr } = await admin.from("reserva_recomendada").select("id_solicitante").eq("id_reserva", record.id).maybeSingle();
+      if (rr?.id_solicitante) driverIds = driverIds.filter((id) => id !== rr.id_solicitante);
+    }
     if (driverIds.length === 0) {
       console.log("[bookingWebhookDispatcher] reserva nueva sin conductores elegibles", {
         bookingId: record.id, id_categoria: record.id_categoria,
@@ -208,8 +213,13 @@ function isEmpresarial(record: Record<string, any>): boolean {
   return String(record.modo_pago ?? "").toLowerCase() === "empresarial";
 }
 
+function isRecomendado(record: Record<string, any>): boolean {
+  return String(record.modo_pago ?? "").toLowerCase() === "recomendado";
+}
+
 function buildDriverBody(record: Record<string, any>, carTypeName: string | null, tipo: "inmediato" | "programado"): string {
-  const car = `${carTypeName ?? "Servicio"}${isEmpresarial(record) ? " · Empresarial" : ""}`;
+  const tag = isEmpresarial(record) ? " · Empresarial" : isRecomendado(record) ? " · Recomendado" : "";
+  const car = `${carTypeName ?? "Servicio"}${tag}`;
   const pickup = truncate(record.origen_direccion ?? "Ubicación por definir", 60);
   if (tipo === "programado") {
     const when = record.solicitado_en ? formatShortDate(record.solicitado_en) : "";
@@ -227,6 +237,8 @@ function buildAcceptedBody(_record: Record<string, any>): string {
 function buildCompleteBody(record: Record<string, any>): string {
   // El colaborador nunca ve el precio de un viaje empresarial: solo lo ven la empresa y el conductor.
   if (isEmpresarial(record)) return "Gracias por viajar con T+Plus. Este viaje se factura a tu empresa.";
+  // Recomendado: el pasajero ya acordó el pago con el conductor que solicitó el viaje.
+  if (isRecomendado(record)) return "Gracias por viajar con T+Plus.";
   const total = record.costo_total;
   if (total == null) return "Gracias por viajar con T+Plus";
   return `Total: $${Number(total).toLocaleString("es-CO")}`;

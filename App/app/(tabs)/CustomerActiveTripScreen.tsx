@@ -46,10 +46,13 @@ import {
   getPaymentModeIonicon,
   isCorporatePayment,
   isPassengerFareHidden,
+  isRecommendedPayment,
   isTransferPayment,
 } from '@/common/utils/paymentMode';
 import { useBookingCompany } from '@/hooks/useBookingCompany';
 import { BilledCompanyRow } from '@/components/BilledCompanyRow';
+import { useRecommendationInfo } from '@/hooks/useRecommendationInfo';
+import { RecommendedByRow } from '@/components/RecommendedByRow';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
 
@@ -224,6 +227,10 @@ const CustomerActiveTripScreen = () => {
   const billedCompany = useBookingCompany(
     booking?.id || bookingId,
     isCorporatePayment(booking?.payment_mode)
+  );
+  const { info: recommendation } = useRecommendationInfo(
+    booking?.id || bookingId,
+    isRecommendedPayment(booking?.payment_mode)
   );
   const [chatVisible, setChatVisible] = useState(false);
   const fadeAnimAlert = useRef(new Animated.Value(0)).current;
@@ -1510,6 +1517,7 @@ const CustomerActiveTripScreen = () => {
 
               <View style={s.payContactBlock}>
                 {billedCompany ? <BilledCompanyRow company={billedCompany} style={{ marginBottom: 10 }} /> : null}
+                {recommendation ? <RecommendedByRow info={recommendation} style={{ marginBottom: 10 }} /> : null}
                 {booking.payment_mode && (
                   <View style={s.payModeRow}>
                     <Ionicons

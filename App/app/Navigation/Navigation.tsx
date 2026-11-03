@@ -51,6 +51,7 @@ import DriverActiveReservationsScreen from '../(tabs)/DriverActiveReservationsSc
 import NotificationsScreen from '../(tabs)/NotificationsScreen';
 import PlateTrackingScreen from '../Booking/PlateTrackingScreen';
 import ChangePasswordScreen from '../(tabs)/ChangePasswordScreen';
+import DriverClientsScreen from '../(tabs)/DriverClientsScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -119,6 +120,7 @@ const Navigation = () => {
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="PlateTracking" component={PlateTrackingScreen} />
           <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
+          <Stack.Screen name="DriverClients" component={DriverClientsScreen} />
         </Stack.Group>
       ) : (
         <Stack.Group screenOptions={{ headerShown: false }}>

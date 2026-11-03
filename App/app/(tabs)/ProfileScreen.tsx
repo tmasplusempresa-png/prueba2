@@ -503,6 +503,12 @@ const ProfileScreen = ({ navigation }: Props) => {
           { key: "insurance", label: "Aseguradora", icon: "shield-checkmark-outline", onPress: () => navigation.navigate("Insurance") },
         ],
       });
+      sections.push({
+        title: "Reservas recomendadas",
+        items: [
+          { key: "driver-clients", label: "Pedir viaje para un cliente", icon: "people-outline", onPress: () => navigation.navigate("DriverClients") },
+        ],
+      });
     }
 
     sections.push(

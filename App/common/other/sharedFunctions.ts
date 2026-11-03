@@ -6,6 +6,7 @@ import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from "../../constants/fare";
 import { colors } from "@/scripts/theme";
 import supabase from "@/config/SupabaseConfig";
 import { getLocalTrackingBackup, clearLocalTrackingBackup } from "@/common/services/driverLocationTask";
+import { isRecommendedPayment } from "@/common/utils/paymentMode";
 
 export const MAIN_COLOR = colors.TAXIPRIMARY;
 
@@ -380,7 +381,12 @@ export const addActualsToBooking = async (
     // mínimo cotizado. Si el recálculo real es mayor (viaje más largo), se
     // cobra el recálculo; si es menor (viaje corto / no se llegó al destino),
     // se cobra el mínimo cotizado.
-    const finalCost = Math.max(totalCost, quotedMinFare);
+    // Viaje recomendado: el conductor que lo pidió fijó el rango con el cliente; el precio final no lo excede.
+    const recommended = isRecommendedPayment(booking.payment_mode ?? booking.paymentMode);
+    const quotedMaxFare = parseFloat(booking.estimate) || parseFloat(booking.price) || 0;
+    const finalCost = recommended && quotedMaxFare > 0
+      ? Math.min(Math.max(totalCost, quotedMinFare), Math.max(quotedMaxFare, quotedMinFare))
+      : Math.max(totalCost, quotedMinFare);
     const floorApplied = finalCost > totalCost;
     if (floorApplied) {
       console.log(
@@ -400,9 +406,12 @@ export const addActualsToBooking = async (
     booking.distance = parseFloat(distance).toFixed(settings.decimal);
     // Si se aplicó el piso, conservar la comisión cotizada originalmente para
     // que el total tampoco baje; si el recálculo mandó, usar la recalculada.
-    booking.convenience_fees = floorApplied
-      ? (parseFloat(booking.convenience_fees) || convenience_fees)
-      : convenience_fees;
+    // En recomendados no se suma comisión: el total es exactamente el rango acordado entre conductores.
+    booking.convenience_fees = recommended
+      ? (parseFloat(booking.convenience_fees) || 0)
+      : floorApplied
+        ? (parseFloat(booking.convenience_fees) || convenience_fees)
+        : convenience_fees;
     booking.driver_share = finalCost;
     booking.coords = res.coords;
   }

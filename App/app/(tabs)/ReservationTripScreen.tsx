@@ -42,9 +42,12 @@ import {
   getPaymentModeLogoUri,
   getPaymentModeIonicon,
   isCorporatePayment,
+  isRecommendedPayment,
 } from '@/common/utils/paymentMode';
 import { useBookingCompany } from '@/hooks/useBookingCompany';
 import { BilledCompanyRow } from '@/components/BilledCompanyRow';
+import { useRecommendationInfo } from '@/hooks/useRecommendationInfo';
+import { RecommendedByRow } from '@/components/RecommendedByRow';
 
 const ROUTE_LINE_BLUE = '#00E5FF';
 const TIP_BASE_ZOOM = 17;
@@ -429,6 +432,7 @@ const ReservationTripScreen = () => {
     dropAddress: reservation?.drop_address,
   });
   const billedCompany = useBookingCompany(reservation?.id, isCorporatePayment(reservation?.payment_mode));
+  const { info: recommendation } = useRecommendationInfo(reservation?.id, isRecommendedPayment(reservation?.payment_mode));
 
   if (!reservation) {
     return (
@@ -613,6 +617,8 @@ const ReservationTripScreen = () => {
     let voiceMsg = `Estás llegando al punto de recogida de ${reservation.customer_name}. `;
     if (paymentMode === 'empresarial') {
       voiceMsg += `Es un servicio empresarial por ${priceFormatted} pesos estimados. No cobres al pasajero: T más Plus te paga este viaje.`;
+    } else if (paymentMode === 'recomendado') {
+      voiceMsg += `Es un servicio recomendado por ${priceFormatted} pesos estimados. No cobres al pasajero: te paga el conductor que lo solicitó.`;
     } else if (paymentMode === 'cash') {
       voiceMsg += `El pago estimado mínimo es en efectivo por ${priceFormatted} pesos.`;
     } else {
@@ -1154,6 +1160,13 @@ const ReservationTripScreen = () => {
             reservation.customer_token,
             `${reservation.customer_name}, servicio empresarial`,
             'Este viaje lo paga tu empresa. El viaje comenzará pronto.',
+          );
+        } else if (paymentMode === 'recomendado') {
+          // El pasajero ya acordó el pago con el conductor que solicitó el viaje: no se le menciona valor.
+          sendPushNotification(
+            reservation.customer_token,
+            `${reservation.customer_name}, tu conductor llegó`,
+            'El viaje comenzará pronto.',
           );
         } else if (paymentMode === 'cash') {
           sendPushNotification(
@@ -1972,6 +1985,7 @@ const ReservationTripScreen = () => {
           {billedCompany ? (
             <BilledCompanyRow company={billedCompany} hidePaymentStatus style={{ marginTop: 10 }} />
           ) : null}
+          {recommendation ? <RecommendedByRow info={recommendation} style={{ marginTop: 10 }} /> : null}
         </View>
 
         {/* Navigation buttons */}
@@ -2011,12 +2025,19 @@ const ReservationTripScreen = () => {
                 <Text style={s.priceCardPaymentText}>
                   {paymentMode === 'cash'
                     ? 'Pago en Efectivo'
-                    : paymentMode === 'empresarial' ? 'Pago Empresarial' : `Pago por ${paymentLabel}`}
+                    : paymentMode === 'empresarial'
+                      ? 'Pago Empresarial'
+                      : paymentMode === 'recomendado' ? 'Viaje Recomendado' : `Pago por ${paymentLabel}`}
                 </Text>
               </View>
               {paymentMode === 'empresarial' ? (
                 <Text style={s.priceCardNote}>
                   No cobres al pasajero: este servicio lo factura T+Plus a la empresa y te lo paga a ti
+                </Text>
+              ) : paymentMode === 'recomendado' ? (
+                <Text style={s.priceCardNote}>
+                  No cobres al pasajero: te paga {recommendation?.requesterName || 'el conductor que lo solicitó'} dentro
+                  de las 24 h siguientes a completar el viaje
                 </Text>
               ) : paymentMode !== 'cash' && (
                 <Text style={s.priceCardNote}>
@@ -2265,7 +2286,9 @@ const ReservationTripScreen = () => {
             <Text style={s.ratingHint}>
               {paymentMode === 'empresarial'
                 ? 'Servicio empresarial: no cobres al pasajero. Este es el valor que T+Plus le factura a la empresa.'
-                : 'Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.'}
+                : paymentMode === 'recomendado'
+                  ? `Viaje recomendado: no cobres al pasajero. ${recommendation?.requesterName || 'El conductor que lo solicitó'} debe pagarte este valor en las próximas 24 h; confírmalo en Mis Viajes.`
+                  : 'Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.'}
             </Text>
 
             <TouchableOpacity
