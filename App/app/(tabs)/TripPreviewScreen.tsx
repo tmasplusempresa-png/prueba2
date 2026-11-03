@@ -30,6 +30,7 @@ import { API_KEY } from "@/config/AppConfig";
 import * as Animatable from "react-native-animatable";
 import { LinearGradient } from "expo-linear-gradient";
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const { width, height } = Dimensions.get("window");
 const GOOGLE_MAPS_APIKEY_PROD = API_KEY;
@@ -112,6 +113,7 @@ interface RecentTrip {
 }
 
 const TripPreviewScreen = () => {
+  const headerTopPadding = useHeaderTopPadding(4, StatusBar.currentHeight ?? 30);
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const colorScheme = useColorScheme();
@@ -894,7 +896,7 @@ const TripPreviewScreen = () => {
             {/* Header with gradient */}
             <LinearGradient
               colors={isDark ? ["#020E18", "#051A26", "#0A2436"] : ["#E8F8FE", "#F0FBFF", "#F5F9FB"]}
-              style={styles.headerGradient}
+              style={[styles.headerGradient, { paddingTop: headerTopPadding }]}
             >
               <Animatable.View animation="slideInDown" duration={400} style={styles.header}>
                 <TouchableOpacity style={styles.headerBackBtn} onPress={() => navigation.goBack()}>

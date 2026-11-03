@@ -148,11 +148,11 @@ export default function CustomerBottomNav({ state, navigation }: MaterialTopTabB
 
           <TouchableOpacity style={styles.navItem} onPress={() => goTab('lugares')} activeOpacity={0.7}>
             <Ionicons
-              name={active === 'lugares' ? 'location' : 'location-outline'}
+              name={active === 'lugares' ? 'heart' : 'heart-outline'}
               size={22}
               color={active === 'lugares' ? ACTIVE : INACTIVE}
             />
-            <Text style={[styles.navLbl, active === 'lugares' && styles.navLblActive]}>Lugares</Text>
+            <Text style={[styles.navLbl, active === 'lugares' && styles.navLblActive]}>Favoritos</Text>
             {active === 'lugares' && <View style={styles.navInd} />}
           </TouchableOpacity>
 

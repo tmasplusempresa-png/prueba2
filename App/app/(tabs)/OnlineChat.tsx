@@ -30,12 +30,15 @@ import {
 } from '@/common/services/chatService';
 // Imagen del administrador para mensajes del sistema
 import adminIcon from '../../assets/images/logo1024x1024.png';
+import { StatusBar } from 'expo-status-bar';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 
 type Props = NativeStackScreenProps<any>;
 
 const POLL_INTERVAL_MS = 3000;
 
 const ChatScreen = ({ navigation }: Props) => {
+  const topPadding = useHeaderTopPadding(0, 0);
   const [newMessage, setNewMessage] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -237,7 +240,8 @@ const ChatScreen = ({ navigation }: Props) => {
       keyboardVerticalOffset={90}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={{ flex: 1, backgroundColor: colorScheme === 'dark' ? '#000' : '#fff' }}>
+        <View style={{ flex: 1, backgroundColor: colorScheme === 'dark' ? '#000' : '#fff', paddingTop: topPadding }}>
+          <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
           <View
             style={{
               height: 60,

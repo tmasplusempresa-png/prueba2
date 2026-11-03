@@ -14,6 +14,9 @@ import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader } from '@/confi
 import { useDriverNavBottomPad, useIsDriverUser } from '@/components/DriverBottomNav';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { getBookingFareRange, formatBookingFareRange } from '@/constants/fare';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
+import { isCorporatePayment } from '@/common/utils/paymentMode';
+import { BookingCompany, fetchBookingsCompanies } from '@/common/services/companiesService';
 
 const isUuid = (value?: string | null) => {
   if (!value) return false;
@@ -101,12 +104,13 @@ const DriverActivityScreen = () => {
   const insets = useSafeAreaInsets();
   const isDriverUser = useIsDriverUser();
   const driverNavPad = useDriverNavBottomPad();
-  const topPad = Platform.OS === 'android' ? Math.max(insets.top, 10) + 8 : 10;
+  const topPad = useHeaderTopPadding();
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('todos');
   const [completas, setCompletas] = useState<Reservation[]>([]);
+  const [corporateInfo, setCorporateInfo] = useState<Record<string, BookingCompany>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dayFilter, setDayFilter] = useState<Date | null>(null);
@@ -165,6 +169,10 @@ const DriverActivityScreen = () => {
         const data = await completasRes.json();
         console.log('📡 [DriverActivity] Total completed trips:', data?.length || 0);
         setCompletas(data || []);
+        const corporateIds = (data || [])
+          .filter((b: Reservation) => isCorporatePayment(b.payment_mode))
+          .map((b: Reservation) => String(b.id));
+        setCorporateInfo(await fetchBookingsCompanies(corporateIds));
       } else {
         const errorText = await completasRes.text();
         console.error('📡 [DriverActivity] Error:', errorText);
@@ -215,6 +223,19 @@ const DriverActivityScreen = () => {
     return { day, week, month };
   }, [typeFiltered]);
 
+  // Viajes empresariales que T+Plus aún no le ha pagado al conductor (los cobra a la empresa).
+  const corporatePending = useMemo(() => {
+    let total = 0;
+    let count = 0;
+    for (const b of completas) {
+      if (!isCorporatePayment(b.payment_mode)) continue;
+      if (corporateInfo[String(b.id)]?.driverPaymentStatus === 'pagado') continue;
+      total += getBookingFareRange(b).min;
+      count += 1;
+    }
+    return { total, count };
+  }, [completas, corporateInfo]);
+
   const currentData = useMemo(() => {
     if (!dayFilter) return typeFiltered;
     return typeFiltered.filter((b: Reservation) => {
@@ -242,7 +263,11 @@ const DriverActivityScreen = () => {
     nav.navigate('ReservationDetail', { reservation });
   };
 
-  const renderCompletaItem = ({ item, index }: { item: Reservation; index: number }) => (
+  const renderCompletaItem = ({ item, index }: { item: Reservation; index: number }) => {
+    const corporate = isCorporatePayment(item.payment_mode);
+    const company = corporate ? corporateInfo[String(item.id)] : undefined;
+    const paid = company?.driverPaymentStatus === 'pagado';
+    return (
     <Animatable.View animation="fadeInUp" duration={400} delay={index * 50} useNativeDriver>
       <TouchableOpacity style={st.miniCard} onPress={() => handleViewDetail(item)} activeOpacity={0.8}>
         <View style={st.miniLeft}>
@@ -250,6 +275,18 @@ const DriverActivityScreen = () => {
           <View style={st.miniInfo}>
             <Text style={st.miniRef}>{item.reference}</Text>
             <Text style={st.miniClient} numberOfLines={1}>{item.customer_name}</Text>
+            {corporate ? (
+              <View style={st.corpRow}>
+                <View style={st.corpTag}>
+                  <Ionicons name="business" size={10} color="#051A26" />
+                  <Text style={st.corpTagTxt}>Empresarial</Text>
+                </View>
+                <Text style={[st.corpPayTxt, paid ? st.corpPaid : st.corpPending]} numberOfLines={1}>
+                  {paid ? 'Pagado por T+Plus' : 'Por pagar'}
+                  {company?.name ? ` · ${company.name}` : ''}
+                </Text>
+              </View>
+            ) : null}
           </View>
         </View>
         <View style={st.miniRight}>
@@ -258,7 +295,8 @@ const DriverActivityScreen = () => {
         </View>
       </TouchableOpacity>
     </Animatable.View>
-  );
+    );
+  };
 
   const EmptyState = ({ icon, text }: { icon: string; text: string }) => (
     <View style={st.emptyWrap}>
@@ -345,6 +383,15 @@ const DriverActivityScreen = () => {
             </Text>
           </View>
         </View>
+        {corporatePending.count > 0 ? (
+          <View style={st.corpPendingRow}>
+            <Ionicons name="business-outline" size={13} color="#FFB300" />
+            <Text style={st.corpPendingTxt} numberOfLines={2}>
+              Empresariales por pagarte: {fmtMoney(corporatePending.total)} ({corporatePending.count}{' '}
+              {corporatePending.count === 1 ? 'viaje' : 'viajes'})
+            </Text>
+          </View>
+        ) : null}
       </Animatable.View>
 
       {/* Day search + Completadas tab */}
@@ -621,6 +668,20 @@ const st = StyleSheet.create({
   miniRight: { alignItems: 'flex-end' },
   miniDate: { fontSize: 11, color: 'rgba(255,255,255,0.45)' },
   miniPrice: { fontSize: 13, fontWeight: '700', color: '#FFF', marginTop: 2 },
+  corpRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  corpTag: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: '#00E5FF',
+  },
+  corpTagTxt: { fontSize: 9, fontWeight: '800', color: '#051A26' },
+  corpPayTxt: { flexShrink: 1, fontSize: 10, fontWeight: '700' },
+  corpPaid: { color: '#00E676' },
+  corpPending: { color: '#FFB300' },
+  corpPendingRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(0,229,255,0.12)',
+  },
+  corpPendingTxt: { flex: 1, fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.75)' },
   /* Empty */
   emptyWrap: { alignItems: 'center', paddingTop: 60 },
   emptyIconWrap: {

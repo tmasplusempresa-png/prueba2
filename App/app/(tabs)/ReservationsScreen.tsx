@@ -21,6 +21,7 @@ import { RootState } from '@/common/store';
 import { SUPABASE_URL, getSupabaseAuthHeaders, hasUserAuthHeader, refreshAuthSession } from '@/config/SupabaseConfig';
 import { useCustomerNavBottomPad } from '@/components/CustomerBottomNav';
 import { formatBookingFareRange } from '@/constants/fare';
+import { getPaymentModeLabel, isPassengerFareHidden } from '@/common/utils/paymentMode';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
@@ -156,7 +157,9 @@ const ReservationCard = React.memo(({ item, onPress }: { item: Reservation; onPr
 
       <View style={styles.resFooter}>
         <Text style={styles.resPriceTxt}>
-          {formatBookingFareRange(item)}
+          {isPassengerFareHidden(item.payment_mode)
+            ? `Pago ${getPaymentModeLabel(item.payment_mode).toLowerCase()}`
+            : formatBookingFareRange(item)}
         </Text>
         <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.4)" />
       </View>

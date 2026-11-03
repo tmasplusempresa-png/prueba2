@@ -36,8 +36,10 @@ import {
   selectSettings,
 } from "@/common/reducers/settingsSlice";
 import { setProfile } from "@/common/store/authSlice";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 const DocumentsScreen = ({ navigation }: Props) => {
+  const headerTopPadding = useHeaderTopPadding(8, 40);
   const colorScheme = useColorScheme();
   const isDarkMode = colorScheme === "dark";
 
@@ -612,7 +614,7 @@ const DocumentsScreen = ({ navigation }: Props) => {
         <View style={styles.bgGrid} />
       </View>
 
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
         <TouchableOpacity style={styles.headerBtn} onPress={() => navigation.goBack()}>
           <AntDesign name="arrow-left" size={22} color="#E9F6FF" />
         </TouchableOpacity>

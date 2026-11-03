@@ -6,9 +6,7 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
-  StatusBar,
   StyleSheet,
   Switch,
   Text,
@@ -21,6 +19,7 @@ import { useSelector } from "react-redux";
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useIsFocused } from "@react-navigation/native";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 
 import { RootState } from "@/common/store";
 import { VEHICLE_RULES } from "@/common/utils/vehicleRules";
@@ -156,7 +155,7 @@ const CarsScreen = ({ navigation }: Props) => {
   const headerOpacity = useRef(new Animated.Value(0)).current;
   const heroScale = useRef(new Animated.Value(0.96)).current;
 
-  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
+  const headerTopPadding = useHeaderTopPadding();
   const contentBottomPadding = isDriverUser
     ? driverNavPad + 24
     : Platform.OS === "android"
@@ -404,9 +403,7 @@ const CarsScreen = ({ navigation }: Props) => {
   const countLabel = vehicles.length === 1 ? '1 vehículo' : `${vehicles.length} vehículos`;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar hidden />
-
+    <View style={styles.safeArea}>
       <Image source={BG_IMAGE} style={styles.bgImage} resizeMode="cover" />
       <View pointerEvents="none" style={styles.bgOverlay} />
       <View pointerEvents="none" style={styles.bgGlowTop} />
@@ -665,7 +662,7 @@ const CarsScreen = ({ navigation }: Props) => {
         buttons={alertButtons}
         onDismiss={() => setAlertVisible(false)}
       />
-    </SafeAreaView>
+    </View>
   );
 };
 

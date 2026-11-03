@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { Text, TextInput, LogBox } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
 import Navigation from './Navigation/Navigation';
 import { Provider } from 'react-redux';
@@ -267,6 +268,7 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
+      <StatusBar style="light" />
       <Provider store={store}>
         <GlobalServices />
         <Navigation />

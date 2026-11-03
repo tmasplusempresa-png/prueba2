@@ -23,6 +23,7 @@ import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { formatBookingFareRange, getBookingFareRange } from '@/constants/fare';
+import { isCorporatePayment } from '@/common/utils/paymentMode';
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
 import { useActiveTripBanner } from '@/hooks/useActiveTripBanner';
@@ -517,10 +518,11 @@ const DriverReservationsScreen = ({
         const pickup = it.pickup_address || 'punto desconocido';
         const when = it.booking_date ? ` · ${formatDate(it.booking_date)}` : '';
         const distTxt = formatTripKmSuffix(it.distance);
+        const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
         // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
         if (!isFirstScan) {
           notifyNewBooking(
-            '📅 Nueva reserva programada',
+            `📅 Nueva reserva programada${corpTag}`,
             `Recogida: ${pickup}${when}${distTxt}`,
             { bookingId: it.id, bookingType: 'reservation' },
           ).catch(() => {});
@@ -528,7 +530,7 @@ const DriverReservationsScreen = ({
         recordServiceNotice({
           bookingId: id,
           bookingType: 'reservation',
-          title: 'Nueva reserva programada',
+          title: `Nueva reserva programada${corpTag}`,
           body: `Recogida: ${pickup}${when}${distTxt}`,
           pickup: it.pickup_address,
           drop: it.drop_address,
@@ -723,9 +725,10 @@ const DriverReservationsScreen = ({
         const pickup = it.pickup_address || 'punto desconocido';
         // Km del viaje (estimate), no distancia conductor→recogida
         const distTxt = formatTripKmSuffix(it.distance);
+        const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
         if (!isFirstScan) {
           notifyNewBooking(
-            '⚡ Nuevo servicio inmediato',
+            `⚡ Nuevo servicio inmediato${corpTag}`,
             `Recogida: ${pickup}${distTxt}`,
             { bookingId: it.id, bookingType: 'immediate' },
           ).catch(() => {});
@@ -733,7 +736,7 @@ const DriverReservationsScreen = ({
         recordServiceNotice({
           bookingId: id,
           bookingType: 'immediate',
-          title: 'Nuevo servicio inmediato',
+          title: `Nuevo servicio inmediato${corpTag}`,
           body: `Recogida: ${pickup}${distTxt}`,
           pickup: it.pickup_address,
           drop: it.drop_address,
@@ -1228,7 +1231,15 @@ const DriverReservationsScreen = ({
               )}
               <View style={s.clientMeta}>
                 <Text style={s.clientName} numberOfLines={1}>{item.customer_name || 'Cliente'}</Text>
-                <Text style={s.tripTypeTxt} numberOfLines={1}>{tripLabel}</Text>
+                <View style={s.tripTypeRow}>
+                  <Text style={s.tripTypeTxt} numberOfLines={1}>{tripLabel}</Text>
+                  {isCorporatePayment(item.payment_mode) ? (
+                    <View style={s.corporateTag}>
+                      <Ionicons name="business" size={9} color="#051A26" />
+                      <Text style={s.corporateTagTxt}>Empresarial</Text>
+                    </View>
+                  ) : null}
+                </View>
               </View>
             </View>
 
@@ -1765,6 +1776,18 @@ const DriverReservationsScreen = ({
                   </View>
                 ) : null}
 
+                {isCorporatePayment(detailItem.payment_mode) ? (
+                  <View style={s.obsBlock}>
+                    <View style={s.obsHeader}>
+                      <Ionicons name="business-outline" size={13} color="#00E5FF" />
+                      <Text style={s.obsLabel}>Servicio Empresarial</Text>
+                    </View>
+                    <Text style={s.obsText}>
+                      No cobres al pasajero: T+Plus factura el viaje a la empresa y te paga este servicio.
+                    </Text>
+                  </View>
+                ) : null}
+
                 <View style={s.modalStatsRow}>
                   <View style={s.modalStat}>
                     <Text style={s.statLabel}>Valor</Text>
@@ -2034,6 +2057,17 @@ const s = StyleSheet.create({
   clientMeta: { flex: 1, minWidth: 0 },
   clientName: { fontSize: 12, fontWeight: '700', color: '#FFF', lineHeight: 15 },
   tripTypeTxt: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.45)', marginTop: 0 },
+  tripTypeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  corporateTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 999,
+    backgroundColor: '#00E5FF',
+  },
+  corporateTagTxt: { fontSize: 9, fontWeight: '800', color: '#051A26', letterSpacing: 0.2 },
   routeBlock: { marginBottom: 5, paddingLeft: 1, gap: 2 },
   routeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dotStart: {

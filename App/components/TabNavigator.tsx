@@ -71,7 +71,7 @@ const CustomerTabNavigator: React.FC = () => {
       >
         <CustomerTabs.Screen name="Home" component={CustomerHomeStack} options={{ title: "Inicio" }} />
         <CustomerTabs.Screen name="Historial" component={ReservationsScreen} options={{ title: "Historial" }} />
-        <CustomerTabs.Screen name="Lugares" component={SearchScreen} options={{ title: "Lugares" }} />
+        <CustomerTabs.Screen name="Lugares" component={SearchScreen} options={{ title: "Favoritos" }} />
         <CustomerTabs.Screen name="Profile" component={ProfileScreen} options={{ title: "Perfil" }} />
       </CustomerTabs.Navigator>
     </View>

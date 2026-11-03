@@ -41,7 +41,10 @@ import {
   getPaymentModeLabel,
   getPaymentModeLogoUri,
   getPaymentModeIonicon,
+  isCorporatePayment,
 } from '@/common/utils/paymentMode';
+import { useBookingCompany } from '@/hooks/useBookingCompany';
+import { BilledCompanyRow } from '@/components/BilledCompanyRow';
 
 const ROUTE_LINE_BLUE = '#00E5FF';
 const TIP_BASE_ZOOM = 17;
@@ -425,6 +428,7 @@ const ReservationTripScreen = () => {
     pickupAddress: reservation?.pickup_address,
     dropAddress: reservation?.drop_address,
   });
+  const billedCompany = useBookingCompany(reservation?.id, isCorporatePayment(reservation?.payment_mode));
 
   if (!reservation) {
     return (
@@ -607,7 +611,9 @@ const ReservationTripScreen = () => {
     const priceFormatted = price.toLocaleString('es-CO');
 
     let voiceMsg = `Estás llegando al punto de recogida de ${reservation.customer_name}. `;
-    if (paymentMode === 'cash') {
+    if (paymentMode === 'empresarial') {
+      voiceMsg += `Es un servicio empresarial por ${priceFormatted} pesos estimados. No cobres al pasajero: T más Plus te paga este viaje.`;
+    } else if (paymentMode === 'cash') {
       voiceMsg += `El pago estimado mínimo es en efectivo por ${priceFormatted} pesos.`;
     } else {
       voiceMsg += `El pago estimado mínimo es por ${paymentLabel} por ${priceFormatted} pesos. Recuerda confirmar la transferencia al finalizar el viaje.`;
@@ -1142,7 +1148,14 @@ const ReservationTripScreen = () => {
           Number(reservation.estimate) ||
           0;
         const quoteMinTxt = quoteMin.toLocaleString('es-CO');
-        if (paymentMode === 'cash') {
+        if (paymentMode === 'empresarial') {
+          // El colaborador no ve precios: el viaje se le factura a su empresa.
+          sendPushNotification(
+            reservation.customer_token,
+            `${reservation.customer_name}, servicio empresarial`,
+            'Este viaje lo paga tu empresa. El viaje comenzará pronto.',
+          );
+        } else if (paymentMode === 'cash') {
           sendPushNotification(
             reservation.customer_token,
             `${reservation.customer_name}, pago en efectivo`,
@@ -1956,6 +1969,9 @@ const ReservationTripScreen = () => {
               <Text style={[s.metaItem, { color: paymentMode === 'cash' ? '#00E676' : '#00E5FF' }]}>{paymentLabel}</Text>
             </View>
           </View>
+          {billedCompany ? (
+            <BilledCompanyRow company={billedCompany} hidePaymentStatus style={{ marginTop: 10 }} />
+          ) : null}
         </View>
 
         {/* Navigation buttons */}
@@ -1993,10 +2009,16 @@ const ReservationTripScreen = () => {
                   {renderPaymentIcon(14)}
                 </View>
                 <Text style={s.priceCardPaymentText}>
-                  {paymentMode === 'cash' ? 'Pago en Efectivo' : `Pago por ${paymentLabel}`}
+                  {paymentMode === 'cash'
+                    ? 'Pago en Efectivo'
+                    : paymentMode === 'empresarial' ? 'Pago Empresarial' : `Pago por ${paymentLabel}`}
                 </Text>
               </View>
-              {paymentMode !== 'cash' && (
+              {paymentMode === 'empresarial' ? (
+                <Text style={s.priceCardNote}>
+                  No cobres al pasajero: este servicio lo factura T+Plus a la empresa y te lo paga a ti
+                </Text>
+              ) : paymentMode !== 'cash' && (
                 <Text style={s.priceCardNote}>
                   Recuerda confirmar la recepción del pago al finalizar el viaje
                 </Text>
@@ -2241,7 +2263,9 @@ const ReservationTripScreen = () => {
             </View>
 
             <Text style={s.ratingHint}>
-              Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.
+              {paymentMode === 'empresarial'
+                ? 'Servicio empresarial: no cobres al pasajero. Este es el valor que T+Plus le factura a la empresa.'
+                : 'Este es el valor que le fue cobrado al pasajero — el mismo que verás reflejado en tu balance.'}
             </Text>
 
             <TouchableOpacity

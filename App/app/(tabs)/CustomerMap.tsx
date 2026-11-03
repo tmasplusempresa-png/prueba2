@@ -5,7 +5,6 @@ import {
   Text,
   StyleSheet,
   Image,
-  StatusBar,
   Modal,
   ScrollView,
   KeyboardAvoidingView,
@@ -48,11 +47,16 @@ import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "fire
 import { getUserVerification } from "@/common/topus-integration";
 import { ActivityIndicator } from "react-native"; // Asegúrate de importar ActivityIndicator
 import axios from "axios";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 const markerIcon = require("../../assets/images/green_pin.png");
 const tourImage = require("../../assets/images/icon.png");
 const GOOGLE_MAPS_APIKEY_PROD = API_KEY; // Asignar la clave API
 const CustomerMap = ({ navigation: propsNavigation }: Props) => {
   const navigation = useNavigation<any>();
+  const insets = useSafeAreaInsets();
+  const headerTopPadding = useHeaderTopPadding();
+  const tourTopPadding = useHeaderTopPadding(4, 50);
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude] = useState<number | null>(null);
   const [origin, setOrigin] = useState<any>(null);
@@ -1407,12 +1411,10 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
 
     <View style={styles.container}>
       <>
-        <StatusBar hidden={true} />
-
         {isMapVisible && (
           <View style={{ flex: 1 }}>
             {/* Map Header - Botón de Cambiar Origen y otros controles */}
-            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, padding: 20, paddingTop: 30 }}>
+            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, padding: 20, paddingTop: headerTopPadding }}>
               <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
                 {/* Botón de Back */}
                 <TouchableOpacity
@@ -1609,7 +1611,7 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
     style={{ flex: 1 }}
   >
     <ScrollView
-      contentContainerStyle={{ flexGrow: 1, ...styles.tourContainer }}
+      contentContainerStyle={{ flexGrow: 1, ...styles.tourContainer, paddingTop: tourTopPadding }}
       keyboardShouldPersistTaps="handled"
     >
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
@@ -1804,9 +1806,7 @@ const CustomerMap = ({ navigation: propsNavigation }: Props) => {
         {!isMapVisible && ( // Mostrar el mapa solo si isMapVisible es verdadero
 
           <View style={{ flex: 1 }}>
-            <ScrollView style={styles.homeScroll} contentContainerStyle={styles.homeScrollContent}>
-
-              <StatusBar hidden={true} />
+            <ScrollView style={styles.homeScroll} contentContainerStyle={[styles.homeScrollContent, { paddingTop: insets.top }]}>
               <View style={styles.notificationCard}>
                 <View style={styles.headerControls}>
                   <TouchableOpacity

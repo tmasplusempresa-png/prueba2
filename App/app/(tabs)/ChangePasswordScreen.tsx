@@ -20,6 +20,7 @@ import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { supabase } from '@/config/SupabaseConfig';
 import { RootState } from '@/common/store';
 import { logout } from '@/common/reducers/authReducer';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 
 type Props = NativeStackScreenProps<any>;
 
@@ -42,6 +43,7 @@ type AlertState = {
 };
 
 const ChangePasswordScreen: React.FC<Props> = ({ navigation }) => {
+  const headerTopPadding = useHeaderTopPadding(8, 58);
   const user = useSelector((state: RootState) => state.auth.user) as any;
   const dispatch = useDispatch();
 
@@ -148,7 +150,7 @@ const ChangePasswordScreen: React.FC<Props> = ({ navigation }) => {
 
   return (
     <View style={styles.background}>
-      <View style={styles.headerArea}>
+      <View style={[styles.headerArea, { paddingTop: headerTopPadding }]}>
         <TouchableOpacity style={styles.headerBackBtn} onPress={goBack} activeOpacity={0.85}>
           <Ionicons name="arrow-back" size={20} color={THEME.primaryCyan} />
         </TouchableOpacity>

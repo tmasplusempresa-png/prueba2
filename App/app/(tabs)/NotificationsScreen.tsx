@@ -15,6 +15,7 @@ import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import BookingRealtimeService from '@/common/services/BookingRealtimeService';
 import supabase from '@/config/SupabaseConfig';
 import { useBookingRequestTimer } from '@/hooks/useBookingRequestTimer';
+import { isPassengerFareHidden } from '@/common/utils/paymentMode';
 
 const REQUEST_STATUSES = new Set(['NEW', 'PENDING']);
 
@@ -177,7 +178,7 @@ const BookingCard = ({
 
         {/* Info grid */}
         <View style={st.infoGrid}>
-          {price > 0 && (
+          {price > 0 && (isDriver || !isPassengerFareHidden(booking?.payment_mode)) && (
             <View style={st.infoItem}>
               <Ionicons name="cash-outline" size={14} color="#00E676" />
               <Text style={st.infoLabel}>Valor</Text>

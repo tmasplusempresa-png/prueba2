@@ -5,8 +5,11 @@ import { useDispatch } from 'react-redux';
 import { useNavigation } from '@react-navigation/native';
 import { createMembership } from '@/common/reducers/membershipSlice';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert'; // Import the createMembership action
+import { StatusBar } from 'expo-status-bar';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 
 export default function WebViewLayout({ route }) {
+  const topPadding = useHeaderTopPadding(0, 0);
   const webViewRef = useRef(null);
   const { payData } = route.params;
   const [payUUrl, setPayUUrl] = useState(null);
@@ -77,7 +80,8 @@ export default function WebViewLayout({ route }) {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: topPadding }]}>
+      <StatusBar style="dark" />
       <Text style={styles.header}>Procesando Pago con PayU</Text>
       {payUUrl ? (
         <WebView

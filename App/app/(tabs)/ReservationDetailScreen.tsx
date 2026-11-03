@@ -19,11 +19,15 @@ import { resolveCarTypeLabel, resolveTripTypeLabel } from '@/common/store/bookin
 import { API_KEY } from '@/config/AppConfig';
 import { GOOGLE_MAPS_DARK_STYLE } from '@/config/googleMapsDarkStyle';
 import { ClientRouteMarker } from '@/components/ClientOriginMapMarker';
+import { useBookingCompany } from '@/hooks/useBookingCompany';
+import { BilledCompanyRow } from '@/components/BilledCompanyRow';
 import {
   getPaymentModeLabel,
   getPaymentModeLogoUri,
   getPaymentModeIonicon,
   isCashPayment,
+  isCorporatePayment,
+  isPassengerFareHidden,
 } from '@/common/utils/paymentMode';
 
 const BG_IMAGE = require('../../assets/images/bg.png');
@@ -181,6 +185,10 @@ const ReservationDetailScreen = () => {
     .trim()
     .toLowerCase();
   const isDriverAccount = accountType === 'driver' || isDriverOnTrip;
+  // Viajes empresariales: el colaborador no ve precios (los ve la empresa en la web); el conductor sí.
+  const isCorporateTrip = isCorporatePayment(reservation?.payment_mode);
+  const hideFareFromCustomer = !isDriverAccount && isPassengerFareHidden(reservation?.payment_mode);
+  const billedCompany = useBookingCompany(reservation?.id, isCorporateTrip);
 
   const statusMeta = getStatusMeta(reservation?.status);
   const driverId = reservation?.driver || reservation?.driver_id || null;
@@ -573,7 +581,7 @@ Te confirmo, estos son los datos de tu servicio:
 *Destino:* ${reservation.drop_address}
 *Cliente:* ${reservation.customer_name}
 *Categoría:* ${categoryLabel || 'N/A'}
-*Valor estimado:* ${formatBookingFareRange(reservation)}
+${hideFareFromCustomer ? `*Pago:* ${getPaymentModeLabel(reservation.payment_mode)}${billedCompany ? ` (${billedCompany.name})` : ''}` : `*Valor estimado:* ${formatBookingFareRange(reservation)}`}
 *Distancia estimada:* ${reservation.distance?.toFixed?.(2) ?? reservation.distance} km
 *Tiempo Estimado:* ${reservation.duration} min
 *Recorrido:* ${tripTypeLabel}
@@ -851,11 +859,20 @@ Te confirmo, estos son los datos de tu servicio:
                 <MetaItem label="Cliente" value={reservation.customer_name || 'N/A'} />
               ) : null}
               <MetaItem label="Categoría" value={categoryLabel || 'N/A'} />
-              <MetaItem label="Valor" value={formatBookingFareRange(reservation)} />
+              {!hideFareFromCustomer ? (
+                <MetaItem
+                  label={isCorporateTrip ? 'Valor facturado' : 'Valor'}
+                  value={formatBookingFareRange(reservation)}
+                />
+              ) : null}
               <MetaItem label="Distancia" value={distanceLabel} />
               <MetaItem label="Tiempo" value={durationLabel} />
               <MetaItem label="Recorrido" value={tripTypeLabel} />
             </View>
+
+            {isCorporateTrip && billedCompany ? (
+              <BilledCompanyRow company={billedCompany} style={s.paymentRow} />
+            ) : null}
 
             <View style={s.paymentRow}>
               <View style={s.payLogoBox}>
@@ -1244,7 +1261,6 @@ const s = StyleSheet.create({
     flex: 1,
   },
   paymentValue: { fontSize: 13, fontWeight: '700', color: '#00E5FF' },
-
   personHeader: {
     flexDirection: 'row',
     alignItems: 'center',

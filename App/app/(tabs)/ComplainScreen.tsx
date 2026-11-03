@@ -23,6 +23,7 @@ import { Ionicons, AntDesign } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '@/config/SupabaseConfig';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
+import { useHeaderTopPadding } from '@/hooks/useHeaderTopPadding';
 
 const MAX_EVIDENCE_IMAGES = 5;
 
@@ -31,6 +32,7 @@ type ComplaintType = "queja" | "reclamo" | "sugerencia" | "otro";
 type PriorityType = "baja" | "media" | "alta";
 
 const Complain = ({ navigation }: Props) => {
+  const headerTopPadding = useHeaderTopPadding(8, 48);
   const dispatch = useDispatch<AppDispatch>();
   const user = useSelector((state: RootState) => state.auth.user);
   const userAny = user as any;
@@ -322,7 +324,7 @@ const Complain = ({ navigation }: Props) => {
         <View style={styles.bgGrid} />
       </View>
 
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
         <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()}>
           <AntDesign name="arrow-left" size={22} color="#EAFBFF" />
         </TouchableOpacity>

@@ -10,9 +10,8 @@ import {
   Image,
   Linking,
   ActivityIndicator,
-  Platform,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useHeaderTopPadding } from "@/hooks/useHeaderTopPadding";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons, MaterialIcons, FontAwesome, Feather } from "@expo/vector-icons";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -39,8 +38,7 @@ type Props = NativeStackScreenProps<any>;
 const WalletDetails = ({ navigation }: Props) => {
   const isDriverUser = useIsDriverUser();
   const driverNavPad = useDriverNavBottomPad();
-  const insets = useSafeAreaInsets();
-  const headerTopPadding = Platform.OS === "android" ? Math.max(insets.top, 10) + 8 : 10;
+  const headerTopPadding = useHeaderTopPadding();
   const user = useSelector((state: RootState) => state.auth.user);
   const profile = useSelector((state: RootState) => state.auth.profile);
   const walletHistory = useSelector(selectWalletHistory);

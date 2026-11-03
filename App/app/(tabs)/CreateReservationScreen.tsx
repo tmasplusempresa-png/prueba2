@@ -27,8 +27,15 @@ import { BlurView } from 'expo-blur';
 import { getGoogleMapStyle, GoogleMapTheme } from '@/config/googleMapsDarkStyle';
 import { RouteMapPin, ROUTE_PIN_WIDTH, ROUTE_PIN_HEIGHT } from '@/components/RouteMapPin';
 import { ClientRouteMarker } from '@/components/ClientOriginMapMarker';
+import { useMyCompanies } from '@/hooks/useMyCompanies';
+import {
+  CORPORATE_COMPANY_HEADER,
+  CORPORATE_COST_CENTER_HEADER,
+  COST_CENTER_MAX_LENGTH,
+  encodeCostCenterHeader,
+} from '@/common/services/companiesService';
 
-const { width: SW, height: SH } = Dimensions.get('window');
+const { height: SH } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = 'tmasplus_recent_destination_searches';
 const MAX_RECENT_SEARCHES = 4;
 
@@ -42,6 +49,35 @@ const animateChipSelect = () => {
 
 const GOOGLE_MAPS_KEY = API_KEY;
 
+type OptionRowProps = {
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  title: string;
+  subtitle: string;
+  selected: boolean;
+  onPress: () => void;
+};
+
+const OptionRow = ({ icon, title, subtitle, selected, onPress }: OptionRowProps) => (
+  <TouchableOpacity
+    style={[st.optRow, selected && st.optRowOn]}
+    onPress={onPress}
+    activeOpacity={0.8}
+    accessibilityRole="radio"
+    accessibilityState={{ selected }}
+  >
+    <View style={[st.optIcon, selected && st.optIconOn]}>
+      <Ionicons name={icon} size={18} color={selected ? '#051A26' : '#00E5FF'} />
+    </View>
+    <View style={st.optTextWrap}>
+      <Text style={[st.optTitle, selected && st.optTitleOn]} numberOfLines={1}>{title}</Text>
+      <Text style={st.optSub} numberOfLines={1}>{subtitle}</Text>
+    </View>
+    <View style={[st.radio, selected && st.radioOn]}>
+      {selected && <View style={st.radioDot} />}
+    </View>
+  </TouchableOpacity>
+);
+
 type VehicleType = {
   key: string;
   label: string;
@@ -49,6 +85,7 @@ type VehicleType = {
   description: string;
   /** URL de imagen desde car_types.image (DB) */
   imageUri: string;
+  capacity: number;
 };
 
 const VEHICLE_ICON_MAP: Record<string, VehicleType['icon']> = {
@@ -58,22 +95,23 @@ const VEHICLE_ICON_MAP: Record<string, VehicleType['icon']> = {
   TaxiPlus:    'car-outline',
 };
 
-/** Orden fijo en UI; categorías nuevas de la DB se agregan al final (scroll horizontal). */
+/** Orden fijo en UI; categorías nuevas de la DB se agregan al final de la lista. */
 const VEHICLE_DISPLAY_ORDER = ['XPlus', 'ConfortPlus', 'VanPlus', 'TaxiPlus'] as const;
 
-/** Ancho de card: caben ~4 visibles; la 5ª+ se alcanza con scroll a la derecha. */
-const VEHICLE_CARD_GAP = 8;
-const VEHICLE_ROW_H_PAD = 0;
-const VEHICLE_CARD_W = Math.floor(
-  (SW - 32 - VEHICLE_ROW_H_PAD * 2 - VEHICLE_CARD_GAP * 3) / 4,
-);
+/** Capacidad por defecto si la categoría no trae `capacidad` en la DB. */
+const VEHICLE_DEFAULT_CAPACITY: Record<string, number> = {
+  XPlus: 4,
+  ConfortPlus: 4,
+  VanPlus: 11,
+  TaxiPlus: 4,
+};
 
 // Fallback mientras Supabase carga — sin descripción/imagen hasta que llegue de car_types
 const DEFAULT_VEHICLE_TYPES: VehicleType[] = [
-  { key: 'XPlus',       label: 'XPlus',       icon: 'car',        description: '', imageUri: '' },
-  { key: 'ConfortPlus', label: 'ConfortPlus', icon: 'car-sport',  description: '', imageUri: '' },
-  { key: 'VanPlus',     label: 'VanPlus',     icon: 'bus',        description: '', imageUri: '' },
-  { key: 'TaxiPlus',    label: 'TaxiPlus',    icon: 'car-outline',description: '', imageUri: '' },
+  { key: 'XPlus',       label: 'XPlus',       icon: 'car',        description: '', imageUri: '', capacity: 4 },
+  { key: 'ConfortPlus', label: 'ConfortPlus', icon: 'car-sport',  description: '', imageUri: '', capacity: 4 },
+  { key: 'VanPlus',     label: 'VanPlus',     icon: 'bus',        description: '', imageUri: '', capacity: 11 },
+  { key: 'TaxiPlus',    label: 'TaxiPlus',    icon: 'car-outline',description: '', imageUri: '', capacity: 4 },
 ];
 
 /** Fallback local si car_types.image está vacío */
@@ -329,6 +367,26 @@ const CreateReservationScreen = () => {
   ]).current;
   const [observations, setObservations] = useState('');
   const [paymentMode, setPaymentMode] = useState<'cash' | 'nequi' | 'daviplata'>('cash');
+
+  /* ── Servicio empresarial: solo para colaboradores; el cliente no ve precios ── */
+  const { companies } = useMyCompanies();
+  const [tripPurpose, setTripPurpose] = useState<'personal' | 'empresarial'>(
+    params.corporate ? 'empresarial' : 'personal',
+  );
+  const [companyId, setCompanyId] = useState<string | null>(null);
+  const [costCenter, setCostCenter] = useState('');
+  useEffect(() => {
+    setTripPurpose(params.corporate ? 'empresarial' : 'personal');
+  }, [params.corporate]);
+  useEffect(() => {
+    if (params.carType) setCarType(params.carType);
+  }, [params.carType]);
+  useEffect(() => {
+    if (!companies.some((c) => c.id === companyId)) setCompanyId(companies[0]?.id ?? null);
+  }, [companies, companyId]);
+  const canChooseCorporate = companies.length > 0;
+  const isCorporate = tripPurpose === 'empresarial' && canChooseCorporate && !!companyId;
+  const selectedCompany = companies.find((c) => c.id === companyId) || null;
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const detailsHeightAnim = useRef(new Animated.Value(DETAILS_SHEET_COLLAPSED)).current;
   const detailsExpandLock = useRef(false);
@@ -410,7 +468,7 @@ const CreateReservationScreen = () => {
         const cat = await supabase
           .from('categoria_vehiculo' as any)
           .select(
-            'id,nombre,descripcion,imagen_url,tarifa_base,tarifa_base_inter,valor_km,valor_km_inter,valor_hora,valor_hora_inter,tarifa_minima,tarifa_minima_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_tipo,umbral_intermunicipal_km',
+            'id,nombre,descripcion,imagen_url,capacidad,tarifa_base,tarifa_base_inter,valor_km,valor_km_inter,valor_hora,valor_hora_inter,tarifa_minima,tarifa_minima_inter,delta_aeropuerto,delta_aeropuerto_prog,convenience_fee,convenience_fee_tipo,umbral_intermunicipal_km',
           )
           .eq('activo', true)
           .order('id', { ascending: true });
@@ -421,6 +479,7 @@ const CreateReservationScreen = () => {
             name: c.nombre,
             description: c.descripcion,
             image: c.imagen_url,
+            capacity: c.capacidad,
             base_price: c.tarifa_base,
             base_price_inter: c.tarifa_base_inter,
             price_per_km: c.valor_km,
@@ -486,6 +545,7 @@ const CreateReservationScreen = () => {
             icon: VEHICLE_ICON_MAP[name] ?? 'car',
             description: String(car.description ?? '').trim(),
             imageUri: String(car.image ?? '').trim(),
+            capacity: Number(car.capacity) || VEHICLE_DEFAULT_CAPACITY[name] || 0,
           });
         });
 
@@ -1459,15 +1519,23 @@ const CreateReservationScreen = () => {
         trip_cost: driverPrice || 0,
         driver_share: driverPrice || 0,
         min_fare_snapshot: vehicleRates?.[carType]?.min_fare || 0,
-        payment_mode:
-          paymentMode === 'nequi' || paymentMode === 'daviplata' ? paymentMode : 'cash',
+        payment_mode: isCorporate
+          ? 'empresarial'
+          : paymentMode === 'nequi' || paymentMode === 'daviplata' ? paymentMode : 'cash',
         prepaid: false,
         observations: encodeTripTypeObservation(tripLabel, observations),
         waypoints: [{ trip_type: tripLabel }],
       };
       const resp = await fetch(`${SUPABASE_URL}/rest/v1/bookings`, {
         method: 'POST',
-        headers: { ...headers, Prefer: 'return=representation' },
+        headers: {
+          ...headers,
+          Prefer: 'return=representation',
+          ...(isCorporate && companyId ? { [CORPORATE_COMPANY_HEADER]: companyId } : {}),
+          ...(isCorporate && costCenter.trim()
+            ? { [CORPORATE_COST_CENTER_HEADER]: encodeCostCenterHeader(costCenter) }
+            : {}),
+        },
         body: JSON.stringify(body),
       });
       if (!resp.ok) throw new Error(await resp.text());
@@ -1480,7 +1548,9 @@ const CreateReservationScreen = () => {
         id: created?.id 
       });
       showAlert('success', '¡Reserva Creada!',
-        `Tu reserva ${created?.reference || ''} ha sido enviada.\nTe notificaremos cuando un conductor la acepte.`,
+        isCorporate
+          ? `Tu reserva empresarial ${created?.reference || ''} ha sido enviada a nombre de ${selectedCompany?.name || 'tu empresa'}.\nTe notificaremos cuando un conductor la acepte.`
+          : `Tu reserva ${created?.reference || ''} ha sido enviada.\nTe notificaremos cuando un conductor la acepte.`,
         [{ text: 'Ver estado del viaje', onPress: () => { 
           setAlertVisible(false); 
           nav.navigate('CustomerActiveTrip', { bookingId: created?.id, booking: created }); 
@@ -1665,7 +1735,7 @@ const CreateReservationScreen = () => {
               <View {...sheetPanResponder.panHandlers}>
                 <View style={st.sheetHandle} />
               </View>
-              <Text style={st.panelTitle}>Mi Viaje</Text>
+              <Text style={st.panelTitle}>{isCorporate ? 'Mi viaje empresarial' : 'Mi Viaje'}</Text>
               <TouchableOpacity style={st.routeAddrRow} onPress={() => openFormToEdit('origin')} activeOpacity={0.8}>
                 <View style={[st.inputDot, { backgroundColor: '#00E676' }]} />
                 <Text style={st.routeAddrTxt} numberOfLines={2}>{origin?.title || 'Origen'}</Text>
@@ -1700,10 +1770,41 @@ const CreateReservationScreen = () => {
             <View {...sheetPanResponder.panHandlers}>
               <View style={st.sheetHandle} />
             </View>
-            <Text style={st.panelTitle}>Asigna tu ruta</Text>
+            <Text style={st.panelTitle}>
+              {!canChooseCorporate
+                ? 'Asigna tu ruta'
+                : isCorporate ? 'Asigna tu ruta empresarial' : 'Asigna tu ruta personal'}
+            </Text>
             <Text style={st.panelSubtitle}>
               {hasConfirmedRoute ? 'Desliza abajo para ver el trazado' : 'Ingresa tu dirección de destino'}
             </Text>
+
+            {canChooseCorporate && (
+              <View style={[st.segRow, st.purposeRow]}>
+                {([
+                  { key: 'personal' as const, label: 'Personal', icon: 'person' as const },
+                  { key: 'empresarial' as const, label: 'Empresarial', icon: 'business' as const },
+                ]).map((opt) => {
+                  const on = (opt.key === 'empresarial') === isCorporate;
+                  return (
+                    <TouchableOpacity
+                      key={opt.key}
+                      style={[st.segItem, st.purposeItem, on && st.segItemOn]}
+                      onPress={() => { animateChipSelect(); setTripPurpose(opt.key); }}
+                      activeOpacity={0.85}
+                    >
+                      <BlurView intensity={on ? 28 : 18} tint="dark" style={st.segBlur} />
+                      <View style={st.segInner}>
+                        <View style={st.segIconWrap}>
+                          <Ionicons name={opt.icon} size={15} color="#051A26" />
+                        </View>
+                        <Text style={[st.segTxt, on && st.segTxtOn]} numberOfLines={1}>{opt.label}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
             {/* Origen */}
             <View style={st.fieldWrap}>
@@ -1935,7 +2036,9 @@ const CreateReservationScreen = () => {
               <View style={st.detailsSheetInner}>
                 <View {...detailsSheetPan.panHandlers}>
                   <View style={st.sheetHandle} />
-                  <Text style={st.detailsSheetTitle}>Detalles De Reserva</Text>
+                  <Text style={st.detailsSheetTitle}>
+                    {isCorporate ? 'Detalles De Reserva Empresarial' : 'Detalles De Reserva'}
+                  </Text>
                 </View>
 
                 <ScrollView
@@ -1978,39 +2081,24 @@ const CreateReservationScreen = () => {
                     </View>
                   </View>
 
-                  {/* Tipo De Servicio */}
-                  <Text style={st.label}>Tipo De Servicio</Text>
-                  <View style={st.segRow}>
-                    <TouchableOpacity
-                      style={[st.segItem, serviceType === 'immediate' && st.segItemOn]}
+                  {/* Tipo de servicio */}
+                  <Text style={st.label}>Tipo de servicio</Text>
+                  <View style={st.optGroup}>
+                    <OptionRow
+                      icon="flash"
+                      title="Servicio inmediato"
+                      subtitle="Te asignamos un conductor ahora"
+                      selected={serviceType === 'immediate'}
                       onPress={() => { animateChipSelect(); setServiceType('immediate'); }}
-                      activeOpacity={0.85}
-                    >
-                      <BlurView intensity={serviceType === 'immediate' ? 28 : 18} tint="dark" style={st.segBlur} />
-                      <View style={st.segInner}>
-                        <View style={st.segIconWrap}>
-                          <Ionicons name="flash" size={17} color="#051A26" />
-                        </View>
-                        <Text style={[st.segTxt, serviceType === 'immediate' && st.segTxtOn]} numberOfLines={1}>
-                          Inmediato
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[st.segItem, serviceType === 'reservation' && st.segItemOn]}
+                    />
+                    <View style={st.optDivider} />
+                    <OptionRow
+                      icon="calendar"
+                      title="Programar viaje"
+                      subtitle="Reserva para una fecha y hora"
+                      selected={serviceType === 'reservation'}
                       onPress={() => { animateChipSelect(); setServiceType('reservation'); }}
-                      activeOpacity={0.85}
-                    >
-                      <BlurView intensity={serviceType === 'reservation' ? 28 : 18} tint="dark" style={st.segBlur} />
-                      <View style={st.segInner}>
-                        <View style={st.segIconWrap}>
-                          <Ionicons name="calendar" size={17} color="#051A26" />
-                        </View>
-                        <Text style={[st.segTxt, serviceType === 'reservation' && st.segTxtOn]} numberOfLines={1}>
-                          Programar Viaje
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
+                    />
                   </View>
                   {serviceType === 'reservation' && (
                     <TouchableOpacity
@@ -2028,47 +2116,29 @@ const CreateReservationScreen = () => {
                     </TouchableOpacity>
                   )}
 
-                  {/* Tipo De Recorrido (debajo de servicio) */}
-                  <Text style={st.label}>Tipo De Recorrido</Text>
-                  <View style={st.segRow}>
-                    <TouchableOpacity
-                      style={[st.segItem, tripType === 'Ida' && st.segItemOn]}
+                  {/* Tipo de recorrido */}
+                  <Text style={st.label}>Tipo de recorrido</Text>
+                  <View style={st.optGroup}>
+                    <OptionRow
+                      icon="arrow-forward"
+                      title="Solo ida"
+                      subtitle="Un trayecto hasta tu destino"
+                      selected={tripType === 'Ida'}
                       onPress={() => { animateChipSelect(); setTripType('Ida'); }}
-                      activeOpacity={0.85}
-                    >
-                      <BlurView intensity={tripType === 'Ida' ? 28 : 18} tint="dark" style={st.segBlur} />
-                      <View style={st.segInner}>
-                        <View style={st.segIconWrap}>
-                          <Ionicons name="arrow-forward" size={17} color="#051A26" />
-                        </View>
-                        <Text style={[st.segTxt, tripType === 'Ida' && st.segTxtOn]}>Ida</Text>
-                      </View>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[st.segItem, tripType === 'Ida y Vuelta' && st.segItemOn]}
+                    />
+                    <View style={st.optDivider} />
+                    <OptionRow
+                      icon="swap-horizontal"
+                      title="Ida y vuelta"
+                      subtitle="Incluye el regreso al punto de origen"
+                      selected={tripType === 'Ida y Vuelta'}
                       onPress={() => { animateChipSelect(); setTripType('Ida y Vuelta'); }}
-                      activeOpacity={0.85}
-                    >
-                      <BlurView intensity={tripType === 'Ida y Vuelta' ? 28 : 18} tint="dark" style={st.segBlur} />
-                      <View style={st.segInner}>
-                        <View style={st.segIconWrap}>
-                          <Ionicons name="swap-horizontal" size={17} color="#051A26" />
-                        </View>
-                        <Text style={[st.segTxt, tripType === 'Ida y Vuelta' && st.segTxtOn]} numberOfLines={1}>
-                          Ida Y Vuelta
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
+                    />
                   </View>
 
                   {/* Vehículo de preferencia */}
-                  <Text style={st.label}>Selecciona Vehiculo De Preferencia</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    nestedScrollEnabled
-                    contentContainerStyle={st.vehicleRow}
-                  >
+                  <Text style={st.label}>Elige tu vehículo</Text>
+                  <View style={st.vehicleList}>
                     {vehicleTypes.map(v => {
                       const active = carType === v.key;
                       const fare = vehicleFareRanges[v.key];
@@ -2079,55 +2149,86 @@ const CreateReservationScreen = () => {
                       return (
                         <TouchableOpacity
                           key={v.key}
-                          style={[st.vehicleBtn, active && st.vehicleBtnActive]}
+                          style={[st.vehicleItem, active && st.vehicleItemActive]}
                           onPress={() => setCarType(v.key)}
                           activeOpacity={0.8}
+                          accessibilityRole="radio"
+                          accessibilityState={{ selected: active }}
                         >
-                          <BlurView intensity={active ? 30 : 16} tint="dark" style={st.segBlur} />
-                          <View style={st.vehicleBtnInner}>
+                          <View style={st.vehicleImgBox}>
                             {imgSource ? (
-                              <Image
-                                source={imgSource}
-                                style={[st.vehicleImg, active && st.vehicleImgActive]}
-                                resizeMode="contain"
-                              />
+                              <Image source={imgSource} style={st.vehicleImg} resizeMode="contain" />
                             ) : (
-                              <Ionicons name={v.icon} size={22} color={active ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+                              <Ionicons
+                                name={v.icon}
+                                size={30}
+                                color={active ? '#00E5FF' : 'rgba(255,255,255,0.6)'}
+                              />
                             )}
-                            <Text style={[st.vehicleTxt, active && st.vehicleTxtActive]} numberOfLines={1}>
-                              {v.label}
-                            </Text>
-                            <Text
-                              style={[st.vehicleDesc, active && st.vehicleDescActive]}
-                              numberOfLines={2}
-                            >
-                              {desc || ' '}
-                            </Text>
-                            {fare ? (
-                              <View style={[st.vehiclePricePill, active && st.vehiclePricePillActive]}>
-                                <Text
-                                  style={st.vehiclePriceTxt}
-                                  numberOfLines={1}
-                                  adjustsFontSizeToFit
-                                  minimumFontScale={0.6}
-                                >
-                                  {`$ ${fare.low.toLocaleString('es-CO')} – $ ${fare.high.toLocaleString('es-CO')}`}
-                                </Text>
-                              </View>
+                          </View>
+                          <View style={st.vehicleInfo}>
+                            <View style={st.vehicleTitleRow}>
+                              <Text style={[st.vehicleTxt, active && st.vehicleTxtActive]} numberOfLines={1}>
+                                {v.label}
+                              </Text>
+                              {v.capacity > 0 && (
+                                <View style={st.vehicleSeats}>
+                                  <Ionicons name="person" size={11} color="rgba(255,255,255,0.6)" />
+                                  <Text style={st.vehicleSeatsTxt}>{v.capacity}</Text>
+                                </View>
+                              )}
+                            </View>
+                            {desc ? (
+                              <Text style={st.vehicleDesc} numberOfLines={1}>{desc}</Text>
                             ) : null}
                           </View>
+                          {fare && !isCorporate ? (
+                            <Text
+                              style={[st.vehiclePriceTxt, active && st.vehiclePriceTxtActive]}
+                              numberOfLines={1}
+                              adjustsFontSizeToFit
+                              minimumFontScale={0.8}
+                            >
+                              {`$ ${fare.low.toLocaleString('es-CO')} – ${fare.high.toLocaleString('es-CO')}`}
+                            </Text>
+                          ) : active ? (
+                            <Ionicons name="checkmark-circle" size={22} color="#00E5FF" />
+                          ) : null}
                         </TouchableOpacity>
                       );
                     })}
-                  </ScrollView>
+                  </View>
 
-                  {/* Observaciones */}
-                  <Text style={st.label}>Observaciones (Opcional)</Text>
+                  {isCorporate && (
+                    <>
+                      <View style={st.labelRow}>
+                        <Text style={[st.label, st.labelInRow]}>Centro de costo o motivo</Text>
+                        <Text style={st.labelHint}>Opcional</Text>
+                      </View>
+                      <View style={[st.obsGlass, st.costCenterGlass]}>
+                        <BlurView intensity={18} tint="dark" style={st.segBlur} />
+                        <TextInput
+                          style={st.costCenterInput}
+                          placeholder="Ej.: Ventas, visita a cliente"
+                          placeholderTextColor="rgba(255,255,255,0.35)"
+                          value={costCenter}
+                          onChangeText={setCostCenter}
+                          maxLength={COST_CENTER_MAX_LENGTH}
+                        />
+                      </View>
+                    </>
+                  )}
+
+                  {/* Notas para el conductor */}
+                  <View style={st.labelRow}>
+                    <Text style={[st.label, st.labelInRow]}>Notas para el conductor</Text>
+                    <Text style={st.labelHint}>Opcional</Text>
+                  </View>
                   <View style={st.obsGlass}>
                     <BlurView intensity={18} tint="dark" style={st.segBlur} />
                     <TextInput
                       style={st.obsInput}
-                      placeholder="Instrucciones adicionales..."
+                      placeholder="Ej.: punto de encuentro, referencias o paradas"
                       placeholderTextColor="rgba(255,255,255,0.35)"
                       value={observations}
                       onChangeText={setObservations}
@@ -2141,6 +2242,51 @@ const CreateReservationScreen = () => {
                 {/* Footer fijo: precio + pago + crear */}
                 <View style={st.detailsFooter}>
                   <View style={st.footerInner}>
+                    {isCorporate ? (
+                      <>
+                        <View style={st.payHeaderRow}>
+                          <Text style={st.footerLabel}>Método De Pago</Text>
+                          <Text style={st.corporateHint} numberOfLines={1}>Lo factura tu empresa</Text>
+                        </View>
+                        <View style={st.segRow}>
+                          {companies.map((c) => {
+                            const selected = c.id === companyId;
+                            return (
+                              <TouchableOpacity
+                                key={c.id}
+                                style={[
+                                  st.paySeg,
+                                  { flex: selected ? 2.4 : 1 },
+                                  selected && { borderColor: '#00E5FF' },
+                                ]}
+                                onPress={() => { animateChipSelect(); setCompanyId(c.id); }}
+                                activeOpacity={0.85}
+                              >
+                                <BlurView intensity={selected ? 32 : 16} tint="dark" style={st.segBlur} />
+                                <View style={st.paySegInner}>
+                                  <View style={[st.payIconBox, selected && { borderColor: '#00E5FF' }]}>
+                                    {c.logoUrl ? (
+                                      <Image source={{ uri: c.logoUrl }} style={st.payLogo} resizeMode="contain" />
+                                    ) : (
+                                      <Ionicons name="business" size={17} color="#00E5FF" />
+                                    )}
+                                  </View>
+                                  {selected && (
+                                    <View style={st.corporatePayTxtWrap}>
+                                      <Text style={[st.paySegTxt, { color: '#00E5FF' }]} numberOfLines={1}>
+                                        Empresa
+                                      </Text>
+                                      <Text style={st.corporatePaySub} numberOfLines={1}>{c.name}</Text>
+                                    </View>
+                                  )}
+                                </View>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </>
+                    ) : (
+                      <>
                       <View style={st.payHeaderRow}>
                         <Text style={st.footerLabel}>Selecciona Método De Pago</Text>
                         <View style={st.pricePill}>
@@ -2209,6 +2355,8 @@ const CreateReservationScreen = () => {
                         );
                       })}
                     </View>
+                      </>
+                    )}
 
                     <TouchableOpacity
                       style={[st.submitBtn, !canSubmit && { opacity: 0.5 }]}
@@ -2762,6 +2910,12 @@ const st = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
   },
+  purposeRow: {
+    marginBottom: 14,
+  },
+  purposeItem: {
+    minHeight: 42,
+  },
   segItem: {
     flex: 1,
     minHeight: 48,
@@ -2812,85 +2966,160 @@ const st = StyleSheet.create({
   dynIconBox: { width: 32, height: 32, borderRadius: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: 'rgba(0,0,0,0.08)', alignItems: 'center', justifyContent: 'center' },
   dynIconBoxOn: { borderColor: 'rgba(5,26,38,0.2)' },
   dynChipTxt: { flexShrink: 1, fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
-  vehicleRow: {
+  labelRow: {
     flexDirection: 'row',
-    gap: VEHICLE_CARD_GAP,
-    paddingRight: 4,
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginTop: 14,
+    marginBottom: 8,
   },
-  vehicleBtn: {
-    width: VEHICLE_CARD_W,
-    minHeight: 118,
+  labelInRow: {
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  labelHint: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.4)',
+  },
+  /* Lista de opciones (servicio / recorrido) */
+  optGroup: {
     borderRadius: 16,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.10)',
     backgroundColor: 'rgba(255,255,255,0.04)',
   },
-  vehicleBtnActive: {
-    borderColor: 'rgba(0,229,255,0.55)',
-    backgroundColor: 'rgba(0,229,255,0.12)',
-  },
-  vehicleBtnInner: {
-    flex: 1,
+  optRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-start',
-    gap: 3,
-    paddingTop: 6,
-    paddingBottom: 8,
-    paddingHorizontal: 4,
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  optRowOn: {
+    backgroundColor: 'rgba(0,229,255,0.08)',
+  },
+  optIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,229,255,0.10)',
+  },
+  optIconOn: {
+    backgroundColor: '#00E5FF',
+  },
+  optTextWrap: {
+    flex: 1,
+  },
+  optTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.85)',
+  },
+  optTitleOn: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  optSub: {
+    marginTop: 2,
+    fontSize: 11.5,
+    color: 'rgba(255,255,255,0.45)',
+  },
+  optDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    marginLeft: 60,
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioOn: {
+    borderColor: '#00E5FF',
+  },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#00E5FF',
+  },
+  /* Lista de vehículos */
+  vehicleList: {
+    gap: 4,
+  },
+  vehicleItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  vehicleItemActive: {
+    borderColor: 'rgba(0,229,255,0.55)',
+    backgroundColor: 'rgba(0,229,255,0.08)',
+  },
+  vehicleImgBox: {
+    width: 72,
+    height: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   vehicleImg: {
-    width: 52,
-    height: 36,
-    marginTop: 0,
-    opacity: 0.95,
+    width: 72,
+    height: 46,
   },
-  vehicleImgActive: {
-    opacity: 1,
+  vehicleInfo: {
+    flex: 1,
+  },
+  vehicleTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   vehicleTxt: {
-    fontSize: 10,
+    flexShrink: 1,
+    fontSize: 15,
     fontWeight: '700',
-    color: 'rgba(255,255,255,0.5)',
-    textAlign: 'center',
-    marginTop: 1,
+    color: '#FFFFFF',
   },
   vehicleTxtActive: {
     color: '#00E5FF',
   },
-  vehicleDesc: {
-    fontSize: 8,
-    fontWeight: '500',
-    lineHeight: 10,
-    minHeight: 20, // siempre 2 líneas → precios alineados
-    color: 'rgba(255,255,255,0.38)',
-    textAlign: 'center',
-    paddingHorizontal: 2,
-  },
-  vehicleDescActive: {
-    color: 'rgba(0,229,255,0.72)',
-  },
-  vehiclePricePill: {
+  vehicleSeats: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 'auto',
-    paddingHorizontal: 5,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: 'rgba(0,229,255,0.12)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(0,229,255,0.35)',
-    maxWidth: '100%',
+    gap: 2,
   },
-  vehiclePricePillActive: {
-    backgroundColor: 'rgba(0,229,255,0.18)',
-    borderColor: 'rgba(0,229,255,0.5)',
+  vehicleSeatsTxt: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  vehicleDesc: {
+    marginTop: 2,
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.5)',
   },
   vehiclePriceTxt: {
-    fontSize: 8,
+    maxWidth: '42%',
+    fontSize: 14,
     fontWeight: '700',
+    color: '#FFFFFF',
+    textAlign: 'right',
+  },
+  vehiclePriceTxtActive: {
     color: '#00E5FF',
-    textAlign: 'center',
   },
   tripRow: { flexDirection: 'row', gap: 10 },
   tripBtn: {
@@ -2908,6 +3137,16 @@ const st = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.10)',
     backgroundColor: 'rgba(255,255,255,0.04)',
     minHeight: 56,
+  },
+  costCenterGlass: {
+    minHeight: 44,
+  },
+  costCenterInput: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    fontSize: 13,
+    color: '#FFF',
+    backgroundColor: 'transparent',
   },
   obsInput: {
     minHeight: 56,
@@ -2963,6 +3202,20 @@ const st = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: 'rgba(0,229,255,0.55)',
+  },
+  corporateHint: {
+    flexShrink: 1,
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(0,229,255,0.75)',
+  },
+  corporatePayTxtWrap: {
+    flexShrink: 1,
+  },
+  corporatePaySub: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.6)',
   },
   paySeg: {
     flex: 1,

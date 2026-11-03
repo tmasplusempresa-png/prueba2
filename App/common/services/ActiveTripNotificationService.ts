@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import * as Location from 'expo-location';
+import { isCorporatePayment } from '@/common/utils/paymentMode';
 
 const ACTIVE_TRIP_CHANNEL_ID = 'tmasplus-active-trip';
 const BACKGROUND_LOCATION_TASK_NAME = 'background-location-task';
@@ -53,18 +54,26 @@ const buildBody = (booking: any, role: 'customer' | 'driver'): string => {
   }
 
   if (role === 'customer') {
+    // Viaje empresarial: el pasajero nunca ve el valor (lo ven la empresa y el conductor).
+    const corporate = isCorporatePayment(booking.payment_mode);
     if (booking.status === 'ACCEPTED') {
       const driverName = booking.driver_name || 'Tu conductor';
-      return `${driverName} en camino. Precio: $${displayPrice}. Abre app para ver.`;
+      return corporate
+        ? `${driverName} en camino. Viaje empresarial. Abre app para ver.`
+        : `${driverName} en camino. Precio: $${displayPrice}. Abre app para ver.`;
     }
     if (booking.status === 'ARRIVED') {
       return `¡Llegó! ${otp ? `Muestra código: ${otp}` : 'Presenta tu código'}. ¡Comienza tu viaje!`;
     }
     if (booking.status === 'STARTED' || booking.status === 'IN_PROGRESS' || booking.status === 'TRIP_STARTED') {
-      return `En camino. ${booking.reference || ''} | $${displayPrice}. Abre para tracking.`;
+      return corporate
+        ? `En camino. ${booking.reference || ''}. Abre para tracking.`
+        : `En camino. ${booking.reference || ''} | $${displayPrice}. Abre para tracking.`;
     }
     if (booking.status === 'COMPLETE' || booking.status === 'COMPLETED') {
-      return `Tu viaje terminó. Total: $${displayPrice}. ¡Gracias por viajar con T+Plus!`;
+      return corporate
+        ? 'Tu viaje terminó. Se factura a tu empresa. ¡Gracias por viajar con T+Plus!'
+        : `Tu viaje terminó. Total: $${displayPrice}. ¡Gracias por viajar con T+Plus!`;
     }
     return `Viaje activo. Abre la app para ver detalles.`;
   }
