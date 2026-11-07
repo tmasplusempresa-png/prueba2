@@ -18,7 +18,7 @@ import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
-import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
+import { updateDriverNotification, notifyNewBooking, claimNewBookingNotice } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
@@ -520,7 +520,7 @@ const DriverReservationsScreen = ({
         const distTxt = formatTripKmSuffix(it.distance);
         const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
         // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
-        if (!isFirstScan) {
+        if (!isFirstScan && claimNewBookingNotice(id)) {
           notifyNewBooking(
             `📅 Nueva reserva programada${corpTag}`,
             `Recogida: ${pickup}${when}${distTxt}`,
@@ -726,7 +726,7 @@ const DriverReservationsScreen = ({
         // Km del viaje (estimate), no distancia conductor→recogida
         const distTxt = formatTripKmSuffix(it.distance);
         const corpTag = isCorporatePayment(it.payment_mode) ? ' · Empresarial' : '';
-        if (!isFirstScan) {
+        if (!isFirstScan && claimNewBookingNotice(id)) {
           notifyNewBooking(
             `⚡ Nuevo servicio inmediato${corpTag}`,
             `Recogida: ${pickup}${distTxt}`,

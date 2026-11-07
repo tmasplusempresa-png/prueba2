@@ -18,6 +18,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  ADMIN_CHAT_NAME,
   ChatMessage,
   ChatRole,
   fetchMessages,
@@ -287,6 +288,9 @@ const FloatingChatModal: React.FC<FloatingChatModalProps> = ({
             !mine && !isAdmin && showTail && styles.bubbleOtherTail,
           ]}
         >
+          {isAdmin ? (
+            <Text style={styles.adminLabel}>{item.sender_name || ADMIN_CHAT_NAME}</Text>
+          ) : null}
           <Text
             selectable
             style={[
@@ -681,6 +685,12 @@ const styles = StyleSheet.create({
   bubbleTextAdmin: {
     color: '#E8FFFF',
     fontWeight: '600',
+  },
+  adminLabel: {
+    color: '#00E5FF',
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 2,
   },
   bubbleMeta: {
     marginTop: 4,

@@ -1,5 +1,6 @@
 
 import Constants from 'expo-constants';
+import { foregroundNotificationBehavior } from '@/hooks/DriverNotificationService';
 /* import messaging from "@react-native-firebase/messaging"; */
 
 let firebaseMessagingModule: any = null;
@@ -20,13 +21,7 @@ export const setupNotificationHandler = async () => {
     // expo-notifications >= 0.28; los legacy (shouldShowAlert) se mantienen
     // para compatibilidad con versiones previas.
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: true,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      } as any),
+      handleNotification: async (notification) => foregroundNotificationBehavior(notification) as any,
     });
   } catch (e) {
     console.warn('setupNotificationHandler: expo-notifications not available', e);

@@ -116,6 +116,27 @@ async function decidePayload(evt: WebhookPayload): Promise<PushPayload | null> {
     };
   }
 
+  // ─── INSERT servicio inmediato SIN conductor → conductores elegibles (en línea si se sabe) ─
+  // La app solo avisaba con una notificación local mientras la cartelera estaba abierta; con la app en
+  // segundo plano el conductor no se enteraba.
+  if (evt.type === "INSERT" && !record.id_conductor && !esProgramado && esEstadoAbierto(record.estado)) {
+    const driverIds = await onlyOnlineDrivers(await getEligibleDriverIds(record.id_categoria, carTypeName));
+    if (driverIds.length === 0) {
+      console.log("[bookingWebhookDispatcher] servicio inmediato sin conductores elegibles", {
+        bookingId: record.id, id_categoria: record.id_categoria,
+      });
+      return null;
+    }
+    return {
+      user_ids: driverIds,
+      title: `⚡ Nuevo servicio inmediato${isEmpresarial(record) ? " · Empresarial" : ""}`,
+      body: buildDriverBody(record, carTypeName, "inmediato"),
+      data: { type: "new-service-loop", bookingId: record.id },
+      sound: "default",
+      channelId: "bookings-v2",
+    };
+  }
+
   // ─── INSERT reserva SIN conductor → fan-out a conductores elegibles ─────
   if (evt.type === "INSERT" && !record.id_conductor && esProgramado && esEstadoAbierto(record.estado)) {
     const driverIds = await getEligibleDriverIds(record.id_categoria, carTypeName);
@@ -202,6 +223,24 @@ async function getEligibleDriverIds(idCategoria: any, carTypeName: string | null
     .map((c: any) => c.driver_id)
     .filter((id: any): id is string => Boolean(id));
   return [...new Set(ids)];
+}
+
+// Conductores con GO activo (users.driver_active_status). Hoy la app guarda el GO solo en Firebase, así que el
+// campo suele estar en false para todos: si nadie aparece en línea (o la consulta falla) se avisa a todos los
+// elegibles. Es preferible un aviso de más a que nadie se entere del servicio.
+async function onlyOnlineDrivers(driverIds: string[]): Promise<string[]> {
+  if (driverIds.length === 0) return [];
+  const { data, error } = await admin
+    .from("users")
+    .select("id")
+    .in("id", driverIds)
+    .eq("driver_active_status", true);
+  if (error) {
+    console.error("[bookingWebhookDispatcher] users (en línea) query failed:", error);
+    return driverIds;
+  }
+  const online = (data ?? []).map((u: any) => u.id).filter(Boolean);
+  return online.length > 0 ? online : driverIds;
 }
 
 function isEmpresarial(record: Record<string, any>): boolean {

@@ -26,7 +26,6 @@ import { OtpService } from '@/common/services/OtpService';
 import { useOtpTimer } from '@/hooks/useOtpTimer';
 // import AgoraCallModal from '@/components/AgoraCallModal'; // COMENTADO PARA EXPO GO
 // import { useAgoraCall } from '@/hooks/useAgoraCall'; // COMENTADO PARA EXPO GO
-import { notifyIncomingCall } from '@/common/services/NotificationService';
 import { shareTrip } from '@/common/utils/tripShare';
 import { addActualsToBooking } from '@/common/other/sharedFunctions';
 import { formatBookingFareRange } from '@/constants/fare';
@@ -45,6 +44,7 @@ import {
 } from '@/common/utils/paymentMode';
 import { useBookingCompany } from '@/hooks/useBookingCompany';
 import { BilledCompanyRow } from '@/components/BilledCompanyRow';
+import { useTripNotes } from '@/hooks/useTripNotes';
 
 const ROUTE_LINE_BLUE = '#00E5FF';
 const TIP_BASE_ZOOM = 17;
@@ -429,6 +429,8 @@ const ReservationTripScreen = () => {
     dropAddress: reservation?.drop_address,
   });
   const billedCompany = useBookingCompany(reservation?.id, isCorporatePayment(reservation?.payment_mode));
+  const tripNotes = useTripNotes(reservation?.id, reservation?.observations);
+  const [notesExpanded, setNotesExpanded] = useState(false);
 
   if (!reservation) {
     return (
@@ -1654,45 +1656,17 @@ const ReservationTripScreen = () => {
     );
   };
 
-  // Call customer - Usando Agora UIKit
-  const callCustomer = async () => {
-    if (!reservation.customer_contact) {
+  // Llamada telefónica normal, igual que en los servicios inmediatos (BookingCabScren).
+  const callCustomer = () => {
+    const phone = String(reservation.customer_contact || '').replace(/[^\d+]/g, '');
+    if (!phone) {
       showAlert('error', 'Error', 'No hay número de contacto disponible');
       return;
     }
-
-    try {
-      console.log('📞 [CALL] Iniciando llamada P2P a cliente...');
-      
-      const customerData = {
-        userId: reservation.customer_id || reservation.customer,
-        name: reservation.customer_name || 'Cliente',
-        phone: reservation.customer_contact,
-        image: undefined,
-      };
-
-      // Generar canal de llamada
-      const driverId = user?.id || user?.auth_id || '0';
-      const customerId = reservation.customer_id || reservation.customer;
-      const parts = [driverId, customerId].sort().join('_');
-      const channelName = `call_${parts}`;
-
-      // Notificar al cliente sobre la llamada entrante
-      await notifyIncomingCall({
-        customerId,
-        driverId,
-        driverName: user?.first_name || user?.name || 'Conductor',
-        channelName,
-      });
-
-      // callManager.makeCall(customerData); // COMENTADO - EXPO GO
-      showAlert('success', '✅ Llamada iniciada', 'Notificación enviada al cliente');
-    } catch (error) {
-      console.error('❌ Agora call error:', error);
-      // Fallback a llamada nativa
-      const prefix = Platform.OS === 'android' ? 'tel:' : 'telprompt:';
-      Linking.openURL(prefix + reservation.customer_contact);
-    }
+    const prefix = Platform.OS === 'android' ? 'tel:' : 'telprompt:';
+    Linking.openURL(prefix + phone).catch(() => {
+      showAlert('error', 'Error', 'No se pudo abrir el marcador del teléfono');
+    });
   };
 
   const openChat = () => {
@@ -1948,6 +1922,21 @@ const ReservationTripScreen = () => {
               <Text style={s.routeText} numberOfLines={1}>{reservation.drop_address}</Text>
             </View>
           </View>
+
+          {tripNotes ? (
+            <TouchableOpacity
+              style={s.notesBox}
+              activeOpacity={0.8}
+              onPress={() => setNotesExpanded((v) => !v)}
+              accessibilityLabel="Indicaciones del viaje"
+            >
+              <Ionicons name="document-text-outline" size={15} color="#00E5FF" style={{ marginTop: 1 }} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.notesLabel}>Indicaciones del viaje</Text>
+                <Text style={s.notesText} numberOfLines={notesExpanded ? undefined : 3}>{tripNotes}</Text>
+              </View>
+            </TouchableOpacity>
+          ) : null}
 
           <View style={s.metaRow}>
             {/* 🆕 Precio más prominente - Dinámico según estado */}
@@ -2499,6 +2488,19 @@ const s = StyleSheet.create({
   },
   routeText: { fontSize: 13, color: 'rgba(255,255,255,0.75)', flex: 1, fontWeight: '500' },
   routeDash: { width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.15)', marginLeft: 3.5, marginVertical: 2 },
+  notesBox: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+  },
+  notesLabel: { fontSize: 11, fontWeight: '700', color: '#00E5FF', marginBottom: 2 },
+  notesText: { fontSize: 13, color: 'rgba(255,255,255,0.85)', lineHeight: 18 },
   metaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' },
   metaItem: { fontSize: 12, color: '#00E5FF', fontWeight: '600' },
   metaDivider: { fontSize: 12, color: 'rgba(255,255,255,0.2)', marginHorizontal: 8 },
