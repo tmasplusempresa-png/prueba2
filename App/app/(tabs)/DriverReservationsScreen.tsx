@@ -18,7 +18,7 @@ import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
-import { updateDriverNotification, notifyNewBooking } from '@/hooks/DriverNotificationService';
+import { updateDriverNotification, notifyNewBooking, claimNewBookingNotice } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
 import { toCanonicalCarType } from '@/common/utils/carType';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
@@ -540,7 +540,7 @@ const DriverReservationsScreen = ({
           ? ' · Empresarial'
           : isRecommendedPayment(it.payment_mode) ? ' · Recomendado' : '';
         // Primera carga: solo registrar en modal (sin push spam). Después: notificar + registrar.
-        if (!isFirstScan) {
+        if (!isFirstScan && claimNewBookingNotice(id)) {
           notifyNewBooking(
             `📅 Nueva reserva programada${corpTag}`,
             `Recogida: ${pickup}${when}${distTxt}`,
@@ -748,7 +748,7 @@ const DriverReservationsScreen = ({
         const corpTag = isCorporatePayment(it.payment_mode)
           ? ' · Empresarial'
           : isRecommendedPayment(it.payment_mode) ? ' · Recomendado' : '';
-        if (!isFirstScan) {
+        if (!isFirstScan && claimNewBookingNotice(id)) {
           notifyNewBooking(
             `⚡ Nuevo servicio inmediato${corpTag}`,
             `Recogida: ${pickup}${distTxt}`,
@@ -824,6 +824,12 @@ const DriverReservationsScreen = ({
 
   const handleAccept = async (reservation: Reservation) => {
     const isImmmediate = reservation.booking_type === 'immediate';
+
+    // La BD tambien lo exige (trigger reserva_requiere_conductor_aprobado); esto evita el viaje de ida y vuelta.
+    if (user?.approved === false) {
+      showAlert('warning', 'Cuenta no verificada', 'Tu cuenta aún no ha sido verificada. Podrás tomar servicios y reservas cuando el equipo apruebe tu documentación.');
+      return;
+    }
 
     // Regla de negocio: el conductor solo puede tomar servicios cuya categoría
     // coincida con la del vehículo que tiene actualmente activo.

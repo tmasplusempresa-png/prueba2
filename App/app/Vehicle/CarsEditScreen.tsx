@@ -346,16 +346,19 @@ const CarsEditScreen = ({ navigation }: any) => {
     { label: "Zotye", value: "Zotye" },
     { label: "Otra", value: "Otra" },
   ];
-  // Marcas locales (hardcodeadas) + marcas activas administradas desde la web
-  // (tabla car_brands). Si el fetch falla o no hay marcas remotas, se usa solo
-  // la lista local, por lo que el comportamiento actual nunca se rompe.
+  // Core valida `make` contra su catalogo (trigger web_cars_write) y la lista local
+  // trae modelos ("Kia Rio") y duplicados, asi que se usa SOLO el catalogo remoto
+  // (vista web_car_brands) si cargo. Si el fetch falla, se cae a la lista local.
   const marcasDeVehiculos = useMemo(() => {
-    const seen = new Set(LOCAL_BRANDS.map((b) => b.value.toLowerCase()));
-    const merged = [
-      ...LOCAL_BRANDS,
-      ...remoteBrands.filter((b) => !seen.has(b.value.toLowerCase())),
-    ];
-    return merged.sort((a, b) => a.label.localeCompare(b.label));
+    const source = remoteBrands.length > 0 ? remoteBrands : LOCAL_BRANDS;
+    const unique = new Map<string, string>();
+    source.forEach((b) => {
+      const value = b.value.trim();
+      if (value && !unique.has(value.toLowerCase())) unique.set(value.toLowerCase(), value);
+    });
+    return Array.from(unique.values())
+      .map((value) => ({ label: value, value }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }, [remoteBrands]);
   const CilindrajesDeVehiculos = [
     { label: "Menos de 1.0L", value: "Menos de 1.0L" },
@@ -407,9 +410,9 @@ const CarsEditScreen = ({ navigation }: any) => {
     let cancelled = false;
     (async () => {
       try {
-        const url = `${SUPABASE_URL}/rest/v1/car_brands?is_active=eq.true&select=name&order=name.asc`;
+        const url = `${SUPABASE_URL}/rest/v1/web_car_brands?is_active=eq.true&select=name&order=name.asc`;
         const res = await fetch(url, {
-          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+          headers: await getSupabaseAuthHeaders(true),
         });
         if (!res.ok || cancelled) return;
         const rows = await res.json();
@@ -864,7 +867,15 @@ const CarsEditScreen = ({ navigation }: any) => {
       // Build payload with only valid fields
       const carPayload: Partial<CarInsert> = {};
       carPayload.driver_id = driverId;
-      carPayload.make = vehicleData.vehicleMake || "Sin marca";
+      // Normaliza a la marca exacta del catalogo ("Kia Rio" -> "Kia")
+      const rawMake = (vehicleData.vehicleMake || "").trim();
+      const rawMakeLower = rawMake.toLowerCase();
+      const canonicalMake =
+        marcasDeVehiculos.find((b) => b.value.toLowerCase() === rawMakeLower) ||
+        marcasDeVehiculos
+          .filter((b) => rawMakeLower.startsWith(`${b.value.toLowerCase()} `))
+          .sort((a, b) => b.value.length - a.value.length)[0];
+      carPayload.make = canonicalMake?.value || rawMake || "Sin marca";
       carPayload.model = vehicleData.vehicleModel || "Sin modelo";
       carPayload.plate = (vehicleData.vehicleNumber || "").toUpperCase().trim();
       if (vehicleData.vehicleColor) carPayload.color = vehicleData.vehicleColor;

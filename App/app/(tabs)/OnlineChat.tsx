@@ -27,6 +27,7 @@ import {
   markChatRead,
   ChatMessage,
   ChatRole,
+  ADMIN_CHAT_NAME,
 } from '@/common/services/chatService';
 // Imagen del administrador para mensajes del sistema
 import adminIcon from '../../assets/images/logo1024x1024.png';
@@ -187,7 +188,7 @@ const ChatScreen = ({ navigation }: Props) => {
                 style={{ width: 20, height: 20, marginRight: 5, borderRadius: 9999 }}
               />
               <Text style={{ color: messageTextColor, fontWeight: 'bold' }}>
-                T+Plus Admin
+                {item.sender_name || ADMIN_CHAT_NAME}
               </Text>
             </View>
           )}

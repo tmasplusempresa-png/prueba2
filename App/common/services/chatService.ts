@@ -7,19 +7,23 @@
 // fetchMessages() y envían con sendMessage().
 //
 // Esquema aplicacioncore: tabla `mensaje_chat`
-//   id_reserva, id_remitente, rol_remitente (cliente|conductor), mensaje,
+//   id_reserva, id_remitente, rol_remitente (cliente|conductor|admin), mensaje,
 //   remitente_nombre, creado_en
 // ============================================================================
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 
 export type ChatRole = 'driver' | 'customer';
+/** 'admin': mensaje del soporte T+Plus escrito desde la web; la app solo lo muestra. */
+export type ChatSenderRole = ChatRole | 'admin';
+
+export const ADMIN_CHAT_NAME = 'Admin T+Plus';
 
 export interface ChatMessage {
   id: string;
   booking_id: string;
   sender_id: string | null;
-  sender_role: ChatRole;
+  sender_role: ChatSenderRole;
   sender_name: string | null;
   message: string;
   created_at: string;
@@ -41,8 +45,12 @@ const lastReadKey = (bookingId: string, role: ChatRole) =>
 const toDbRole = (role: ChatRole): 'cliente' | 'conductor' =>
   role === 'driver' ? 'conductor' : 'cliente';
 
-const fromDbRole = (rol: string | null | undefined): ChatRole =>
-  String(rol || '').toLowerCase() === 'conductor' ? 'driver' : 'customer';
+const fromDbRole = (rol: string | null | undefined): ChatSenderRole => {
+  const r = String(rol || '').toLowerCase();
+  if (r === 'conductor' || r === 'driver') return 'driver';
+  if (r === 'admin') return 'admin';
+  return 'customer';
+};
 
 const mapRow = (row: any): ChatMessage => ({
   id: String(row.id),

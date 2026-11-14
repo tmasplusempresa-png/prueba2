@@ -55,6 +55,38 @@ export async function setupDriverNotificationChannel() {
   });
 }
 
+/* ── Un solo aviso por servicio nuevo ──
+ * El backend envía push (new-service-loop / booking-scheduled) y la cartelera, si está abierta, lanza una
+ * notificación local del mismo servicio. Quien llegue primero "reclama" el bookingId y el otro se omite.
+ */
+const NEW_BOOKING_PUSH_TYPES = new Set(['new-service-loop', 'booking-scheduled']);
+const DEDUPE_MS = 10 * 60 * 1000;
+const claimedBookings = new Map<string, number>();
+
+export function claimNewBookingNotice(bookingId: unknown): boolean {
+  const id = String(bookingId ?? '').trim();
+  if (!id) return true;
+  const now = Date.now();
+  for (const [key, at] of claimedBookings) if (now - at > DEDUPE_MS) claimedBookings.delete(key);
+  if (claimedBookings.has(id)) return false;
+  claimedBookings.set(id, now);
+  return true;
+}
+
+/** Comportamiento en primer plano: oculta el push de un servicio que la cartelera ya avisó. */
+export function foregroundNotificationBehavior(notification: any) {
+  const data = notification?.request?.content?.data as Record<string, unknown> | undefined;
+  const show =
+    !data || !NEW_BOOKING_PUSH_TYPES.has(String(data.type)) || claimNewBookingNotice(data.bookingId);
+  return {
+    shouldShowAlert: show,
+    shouldPlaySound: show,
+    shouldSetBadge: false,
+    shouldShowBanner: show,
+    shouldShowList: show,
+  };
+}
+
 /* ── Notify the driver about a brand-new booking that just appeared ── */
 export async function notifyNewBooking(
   title: string,

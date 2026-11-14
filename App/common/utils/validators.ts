@@ -32,6 +32,18 @@ export const validatePhoneFormat = (phone: string): boolean => {
 };
 
 /**
+ * Formato único del código de referido: AAA-XXXXX (3 letras, guion, 5 letras/dígitos, mayúsculas)
+ * Limpia el texto y inserta el guion después del tercer carácter mientras se escribe.
+ */
+export const formatReferralCode = (raw: string | null | undefined): string => {
+  const clean = (raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return clean.length > 3 ? `${clean.slice(0, 3)}-${clean.slice(3)}` : clean;
+};
+
+export const isValidReferralCodeFormat = (raw: string | null | undefined): boolean =>
+  /^[A-Z]{3}-[A-Z0-9]{5}$/.test(formatReferralCode(raw));
+
+/**
  * Normaliza email: trim + lowercase
  * @param email - Email sin normalizar
  * @returns Email normalizado

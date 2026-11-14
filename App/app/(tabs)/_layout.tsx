@@ -28,7 +28,8 @@ import {
   cancelActiveTripNotification 
 } from '@/common/services/ActiveTripNotificationService';
 import { 
-  dismissDriverNotification 
+  dismissDriverNotification,
+  foregroundNotificationBehavior,
 } from '@/hooks/DriverNotificationService';
 // AsyncStorage/router/auth helper imports removed (no longer needed here)
 
@@ -330,13 +331,7 @@ const RootLayout = () => {
       try {
         const Notifications = await import('expo-notifications');
         Notifications.setNotificationHandler({
-          handleNotification: async () => ({
-            shouldShowAlert: true,
-            shouldPlaySound: true,
-            shouldSetBadge: false,
-            shouldShowBanner: true,
-            shouldShowList: true,
-          }),
+          handleNotification: async (notification) => foregroundNotificationBehavior(notification),
         });
 
         foregroundSubscription = Notifications.addNotificationReceivedListener(() => {});
