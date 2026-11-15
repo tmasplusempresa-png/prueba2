@@ -20,6 +20,140 @@ const LAST_INSERT_KEY = 'driver_tracking_last_insert';
 // igual que antes, esto es solo respaldo.
 const LOCAL_BACKUP_PREFIX = 'driver_tracking_local_backup_';
 const MAX_LOCAL_BACKUP_POINTS = 500;
+// Cola de reintento: puntos cuyo POST falló. Se suben en lote con el siguiente
+// insert exitoso o al volver la app a primer plano. Ver `flushPendingTrackingPoints`.
+const PENDING_PREFIX = 'driver_tracking_pending_';
+const MAX_PENDING_POINTS = 500;
+
+type PendingPoint = {
+  lat: number;
+  lng: number;
+  speed: number | null;
+  heading: number | null;
+  ts: number;
+};
+
+async function enqueuePendingPoint(bookingId: string, point: PendingPoint): Promise<void> {
+  try {
+    const key = PENDING_PREFIX + bookingId;
+    const raw = await AsyncStorage.getItem(key);
+    const arr: PendingPoint[] = raw ? JSON.parse(raw) : [];
+    arr.push(point);
+    if (arr.length > MAX_PENDING_POINTS) arr.splice(0, arr.length - MAX_PENDING_POINTS);
+    await AsyncStorage.setItem(key, JSON.stringify(arr));
+  } catch (e) {
+    console.warn('[driverLocationTask] error encolando punto pendiente:', e);
+  }
+}
+
+let flushing = false;
+// Reintentos acotados: backoff exponencial y tope de fallos seguidos. Pasado el
+// tope, solo los intentos forzados (primer plano / fin de viaje) vuelven a probar.
+const FLUSH_CHUNK = 100;
+const FLUSH_BACKOFF_BASE_MS = 30_000;
+const FLUSH_BACKOFF_MAX_MS = 5 * 60_000;
+const FLUSH_MAX_AUTO_FAILS = 6;
+const flushState = { fails: 0, nextAt: 0 };
+
+/**
+ * Sube en lote los puntos pendientes de un viaje, conservando su hora original
+ * (`created_at`) para que el recorrido quede en orden. Un punto solo sale de la
+ * cola si el servidor respondió OK a su lote; si falla, se queda y se reintenta
+ * con backoff. Nunca lanza: no debe afectar al insert normal de la task.
+ * `force` ignora el backoff y el tope (UI en primer plano, fin del viaje).
+ */
+export async function flushPendingTrackingPoints(
+  bookingId: string,
+  driverId: string,
+  force = false,
+): Promise<void> {
+  if (flushing || !bookingId || !driverId) return;
+  if (!force && (flushState.fails >= FLUSH_MAX_AUTO_FAILS || Date.now() < flushState.nextAt)) return;
+  flushing = true;
+  try {
+    const key = PENDING_PREFIX + bookingId;
+    const raw = await AsyncStorage.getItem(key);
+    const pending: PendingPoint[] = raw ? JSON.parse(raw) : [];
+    if (pending.length === 0) return;
+
+    let accessToken = SUPABASE_ANON_KEY;
+    const session = await getSafeSession();
+    if (session?.access_token) accessToken = session.access_token;
+
+    let sent = 0;
+    let failed = false;
+    for (let i = 0; i < pending.length; i += FLUSH_CHUNK) {
+      const chunk = pending.slice(i, i + FLUSH_CHUNK);
+      let ok = false;
+      try {
+        const resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal',
+          },
+          body: JSON.stringify(
+            chunk.map((p) => ({
+              booking_id: bookingId,
+              driver_id: driverId,
+              lat: p.lat,
+              lng: p.lng,
+              ...(p.speed != null ? { speed: p.speed } : {}),
+              ...(p.heading != null ? { heading: p.heading } : {}),
+              created_at: new Date(p.ts).toISOString(),
+            })),
+          ),
+        });
+        ok = resp.ok;
+        if (!ok) console.warn('[driverLocationTask] flush pendientes falló:', resp.status);
+      } catch (e) {
+        console.warn('[driverLocationTask] flush pendientes red:', e);
+      }
+      if (!ok) {
+        failed = true;
+        break;
+      }
+      sent += chunk.length;
+    }
+
+    if (sent > 0) {
+      // Solo se quitan los confirmados; la task puede haber encolado otros mientras tanto.
+      const rawNow = await AsyncStorage.getItem(key);
+      const now: PendingPoint[] = rawNow ? JSON.parse(rawNow) : [];
+      const rest = now.slice(sent);
+      if (rest.length > 0) await AsyncStorage.setItem(key, JSON.stringify(rest));
+      else await AsyncStorage.removeItem(key);
+      console.log('[driverLocationTask] pendientes subidos:', sent);
+    }
+
+    if (failed) {
+      flushState.fails += 1;
+      flushState.nextAt =
+        Date.now() +
+        Math.min(FLUSH_BACKOFF_MAX_MS, FLUSH_BACKOFF_BASE_MS * 2 ** (flushState.fails - 1));
+    } else {
+      flushState.fails = 0;
+      flushState.nextAt = 0;
+    }
+  } catch (e) {
+    console.warn('[driverLocationTask] flush pendientes excepción:', e);
+  } finally {
+    flushing = false;
+  }
+}
+
+/** Reintenta lo pendiente del viaje activo (lo usa la UI al volver a primer plano). */
+export async function flushActiveTrackingPending(): Promise<void> {
+  try {
+    const [bookingId, driverId] = await Promise.all([
+      AsyncStorage.getItem(ACTIVE_BOOKING_KEY),
+      AsyncStorage.getItem(ACTIVE_DRIVER_KEY),
+    ]);
+    if (bookingId && driverId) await flushPendingTrackingPoints(bookingId, driverId, true);
+  } catch {}
+}
 
 const MIN_DISTANCE_METERS = 15;
 const SAFETY_INTERVAL_MS = 8000;
@@ -161,27 +295,37 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
       ? latest.coords.heading
       : null;
 
-  const resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
-    method: 'POST',
-    headers: {
-      'apikey': SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=minimal',
-    },
-    body: JSON.stringify({
-      booking_id: bookingId,
-      driver_id: driverId,
-      lat,
-      lng,
-      ...(speed != null ? { speed } : {}),
-      ...(heading != null ? { heading } : {}),
-    }),
-  });
+  const pointTs = Date.now();
+  let resp: Response;
+  try {
+    resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({
+        booking_id: bookingId,
+        driver_id: driverId,
+        lat,
+        lng,
+        ...(speed != null ? { speed } : {}),
+        ...(heading != null ? { heading } : {}),
+      }),
+    });
+  } catch (e) {
+    // Sin red: fetch lanza en lugar de devolver !ok.
+    console.warn('[driverLocationTask] insert network error:', e);
+    await enqueuePendingPoint(bookingId, { lat, lng, speed, heading, ts: pointTs });
+    return;
+  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     console.error('[driverLocationTask] insert failed:', resp.status, body);
+    await enqueuePendingPoint(bookingId, { lat, lng, speed, heading, ts: pointTs });
     return;
   }
 
@@ -195,6 +339,10 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
       JSON.stringify({ lat, lng, time: Date.now() }),
     );
   } catch {}
+
+  // Con red de nuevo: subir en lote lo pendiente. Va DESPUÉS del insert normal y
+  // de LAST_INSERT_KEY, y no lanza, para que un lote fallido no lo bloquee.
+  await flushPendingTrackingPoints(bookingId, driverId);
 });
 
 /**
@@ -330,6 +478,8 @@ export async function startDriverLocationTracking(
         notificationTitle: 'T+Plus está compartiendo tu ubicación',
         notificationBody: 'Tu pasajero puede ver tu ubicación mientras el viaje esté activo.',
         notificationColor: '#0099CC',
+        // Explícito: el servicio sigue vivo si el usuario quita la app de recientes.
+        killServiceOnDestroy: false,
       },
     });
     console.log('[driverLocationTask] startLocationUpdatesAsync OK for booking', bookingId);
@@ -358,6 +508,8 @@ export async function stopDriverLocationTracking(): Promise<void> {
     console.warn('[driverLocationTask] stop failed:', e);
   }
   activeSession = null;
+  // Último intento de subir lo pendiente antes de olvidar el viaje activo.
+  await flushActiveTrackingPending();
   try {
     await AsyncStorage.multiRemove([ACTIVE_BOOKING_KEY, ACTIVE_DRIVER_KEY, LAST_INSERT_KEY]);
   } catch {}

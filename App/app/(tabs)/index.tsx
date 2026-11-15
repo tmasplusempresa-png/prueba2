@@ -28,6 +28,7 @@ import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
 import { updateProfile } from "@/common/actions/authactions";
 import BookingsView from "@/components/BookingsView";
+import { startDriverLocationTracking } from "@/common/services/driverLocationTask";
 import {
   acceptBooking,
   listenForNewBookings,
@@ -923,8 +924,17 @@ const MapScreen = () => {
     dispatch(acceptBooking({ booking, driverProfile: user }))
       .unwrap()
       .then(() => {
+        // Arrancar el tracking ya, con la app en primer plano (Android 12+ no
+        // deja iniciar un foreground service desde segundo plano). El hook
+        // global lo mantiene después; si ya está activo, no hace nada.
+        const driverPublicId = String(user.id || '');
+        if (booking?.id && driverPublicId) {
+          startDriverLocationTracking(String(booking.id), driverPublicId).catch((e) =>
+            console.warn('[handleAccept] startDriverLocationTracking falló:', e),
+          );
+        }
         // Enviar notificaci�n
-       
+
         fetch(
           "https://us-central1-treasupdate.cloudfunctions.net/sendMassNotification",
           {

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { AppState } from 'react-native';
 import { useSelector } from 'react-redux';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { RootState } from '@/common/store/store';
@@ -9,9 +10,14 @@ import supabase, {
   hasUserAuthHeader,
 } from '@/config/SupabaseConfig';
 import {
+  flushActiveTrackingPending,
   startDriverLocationTracking,
   stopDriverLocationTracking,
 } from '@/common/services/driverLocationTask';
+import {
+  showBatteryOptimizationHintOnce,
+  showTrackingPermissionNotice,
+} from '@/common/services/trackingNotices';
 import {
   collectDriverIdCandidates,
 } from '@/common/utils/driverIds';
@@ -141,6 +147,11 @@ export function useGlobalDriverTracking() {
           const ok = await startDriverLocationTracking(activeBookingId, publicDriverId);
           if (!ok) {
             console.warn('[GlobalDriverTracking] tracking no iniciado: permisos/consentimiento de ubicación en segundo plano pendientes');
+            // Solo en primer plano: en segundo plano un Alert no se vería y el
+            // sistema no permite pedir permisos. Se reintenta al volver a la app.
+            if (AppState.currentState === 'active') showTrackingPermissionNotice();
+          } else {
+            showBatteryOptimizationHintOnce();
           }
         } else {
           await stopDriverLocationTracking();
@@ -212,10 +223,19 @@ export function useGlobalDriverTracking() {
       }
     }, WATCHDOG_INTERVAL_MS);
 
+    // Al volver a primer plano: subir pendientes y reevaluar (reinicia el
+    // tracking si hay hueco; aquí sí se puede iniciar un foreground service).
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active' || cancelled) return;
+      flushActiveTrackingPending();
+      reevaluate();
+    });
+
     setupChannel();
 
     return () => {
       cancelled = true;
+      appStateSub.remove();
       clearInterval(pollInterval);
       clearInterval(watchdogInterval);
       if (channel) supabase.removeChannel(channel);
