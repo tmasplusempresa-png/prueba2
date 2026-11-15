@@ -1,7 +1,12 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, getSafeSession } from '@/config/SupabaseConfig';
+import {
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
+  getSafeSession,
+  refreshAuthSession,
+} from '@/config/SupabaseConfig';
 import {
   getBackgroundLocationConsent,
   requestBackgroundLocationDisclosure,
@@ -46,6 +51,45 @@ async function enqueuePendingPoint(bookingId: string, point: PendingPoint): Prom
   }
 }
 
+/**
+ * POST a booking_tracking. Ante un 401 (JWT vencido) refresca la sesión UNA vez
+ * (`refreshAuthSession` ya tiene mutex) y reintenta con el token nuevo. Si el
+ * refresh falla, o ya se intentó en esta tanda (`refreshState.done`), devuelve
+ * la respuesta 401 tal cual para que el llamador encole el punto. Lanza solo si
+ * `fetch` lanza (sin red).
+ */
+async function postTracking(
+  body: unknown,
+  token: string,
+  refreshState: { done: boolean } = { done: false },
+): Promise<{ resp: Response; token: string }> {
+  const send = (t: string) =>
+    fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${t}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(body),
+    });
+
+  const resp = await send(token);
+  if (resp.status !== 401 || refreshState.done) return { resp, token };
+
+  refreshState.done = true;
+  let fresh: string | undefined;
+  try {
+    fresh = (await refreshAuthSession())?.access_token;
+  } catch {
+    fresh = undefined;
+  }
+  if (!fresh || fresh === token) return { resp, token };
+  console.log('[driverLocationTask] 401: sesión refrescada, reintentando envío');
+  return { resp: await send(fresh), token: fresh };
+}
+
 let flushing = false;
 // Reintentos acotados: backoff exponencial y tope de fallos seguidos. Pasado el
 // tope, solo los intentos forzados (primer plano / fin de viaje) vuelven a probar.
@@ -82,32 +126,28 @@ export async function flushPendingTrackingPoints(
 
     let sent = 0;
     let failed = false;
+    // Un solo refresh por tanda (no uno por lote ni por punto).
+    const refreshState = { done: false };
     for (let i = 0; i < pending.length; i += FLUSH_CHUNK) {
       const chunk = pending.slice(i, i + FLUSH_CHUNK);
       let ok = false;
       try {
-        const resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal',
-          },
-          body: JSON.stringify(
-            chunk.map((p) => ({
-              booking_id: bookingId,
-              driver_id: driverId,
-              lat: p.lat,
-              lng: p.lng,
-              ...(p.speed != null ? { speed: p.speed } : {}),
-              ...(p.heading != null ? { heading: p.heading } : {}),
-              created_at: new Date(p.ts).toISOString(),
-            })),
-          ),
-        });
-        ok = resp.ok;
-        if (!ok) console.warn('[driverLocationTask] flush pendientes falló:', resp.status);
+        const out = await postTracking(
+          chunk.map((p) => ({
+            booking_id: bookingId,
+            driver_id: driverId,
+            lat: p.lat,
+            lng: p.lng,
+            ...(p.speed != null ? { speed: p.speed } : {}),
+            ...(p.heading != null ? { heading: p.heading } : {}),
+            created_at: new Date(p.ts).toISOString(),
+          })),
+          accessToken,
+          refreshState,
+        );
+        accessToken = out.token;
+        ok = out.resp.ok;
+        if (!ok) console.warn('[driverLocationTask] flush pendientes falló:', out.resp.status);
       } catch (e) {
         console.warn('[driverLocationTask] flush pendientes red:', e);
       }
@@ -298,23 +338,17 @@ TaskManager.defineTask(DRIVER_LOCATION_TASK, async ({ data, error }) => {
   const pointTs = Date.now();
   let resp: Response;
   try {
-    resp = await fetch(`${SUPABASE_URL}/rest/v1/booking_tracking`, {
-      method: 'POST',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=minimal',
-      },
-      body: JSON.stringify({
+    ({ resp } = await postTracking(
+      {
         booking_id: bookingId,
         driver_id: driverId,
         lat,
         lng,
         ...(speed != null ? { speed } : {}),
         ...(heading != null ? { heading } : {}),
-      }),
-    });
+      },
+      accessToken,
+    ));
   } catch (e) {
     // Sin red: fetch lanza en lugar de devolver !ok.
     console.warn('[driverLocationTask] insert network error:', e);
