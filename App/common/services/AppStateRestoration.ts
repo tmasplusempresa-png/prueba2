@@ -9,7 +9,7 @@ import { supabase } from '@/config/SupabaseConfig';
 import { scheduleActiveTripNotification } from './ActiveTripNotificationService';
 import { showDriverActiveNotification, updateDriverNotification } from '@/hooks/DriverNotificationService';
 
-const ACTIVE_TRIP_STORAGE_KEY = 'active_trip_id';
+export const ACTIVE_TRIP_STORAGE_KEY = 'active_trip_id';
 const DRIVER_MODE_STORAGE_KEY = 'driver_mode_active';
 const DISPATCH_SYSTEM_LOG = 'restore_state_log';
 

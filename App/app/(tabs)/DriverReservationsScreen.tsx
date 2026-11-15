@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { evaluateAcceptGate, isDriverRegistrationIncomplete, requestOnboardingModal } from "@/common/services/onboardingGate";
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, RefreshControl, Platform, Dimensions, Modal, ScrollView,
@@ -801,10 +802,17 @@ const DriverReservationsScreen = ({
   }, [driverOnline, searchImmediateServices, emitAvailableCounts]);
 
   const handleAccept = async (reservation: Reservation) => {
+    // Primero el gate de registro: con pasos pendientes se abre el modal, antes de cualquier otra alerta.
+    const acceptGate = evaluateAcceptGate(isDriverRegistrationIncomplete(), user?.approved);
+    if (acceptGate === 'onboarding') {
+      requestOnboardingModal();
+      return;
+    }
+
     const isImmmediate = reservation.booking_type === 'immediate';
 
     // La BD tambien lo exige (trigger reserva_requiere_conductor_aprobado); esto evita el viaje de ida y vuelta.
-    if (user?.approved === false) {
+    if (acceptGate === 'unverified') {
       showAlert('warning', 'Cuenta no verificada', 'Tu cuenta aún no ha sido verificada. Podrás tomar servicios y reservas cuando el equipo apruebe tu documentación.');
       return;
     }

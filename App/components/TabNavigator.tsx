@@ -13,6 +13,7 @@ import ReservationsScreen from "@/app/(tabs)/ReservationsScreen";
 import DriverActivityScreen from "@/app/(tabs)/DriverActivityScreen";
 import CarsScreen from "@/app/Vehicle/carScreen";
 import { useSelector } from "react-redux";
+import OnboardingModal from "@/components/OnboardingModal";
 import { RootState } from "@/common/store";
 import { Platform, StyleSheet, View, ActivityIndicator } from "react-native";
 import CustomerBottomNav from "@/components/CustomerBottomNav";
@@ -138,11 +139,13 @@ const TabNavigator: React.FC = () => {
     );
   }
 
-  if (currentUserType === "customer") {
-    return <CustomerTabNavigator />;
-  }
-
-  return <DriverTabNavigator />;
+  // Un solo modal de pasos de registro pendientes para conductor y cliente.
+  return (
+    <>
+      {currentUserType === "customer" ? <CustomerTabNavigator /> : <DriverTabNavigator />}
+      <OnboardingModal />
+    </>
+  );
 };
 
 const styles = StyleSheet.create({
