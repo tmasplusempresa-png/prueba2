@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { useSelector } from 'react-redux';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { trackingGapMs } from '@/common/utils/trackingWatchdog';
 import type { RootState } from '@/common/store/store';
 import supabase, {
   SUPABASE_URL,
@@ -97,6 +98,8 @@ export function useGlobalDriverTracking() {
     let publicDriverId: string | null = profile?.id ? String(profile.id) : null;
     let currentActiveBookingId: string | null = null;
     let warnedNoSession = false;
+    // Desde cuándo se vigila el viaje actual (el watchdog cuenta el hueco desde aquí si no hay puntos).
+    let watchStartedAt = Date.now();
 
     const reevaluate = async () => {
       if (cancelled) return;
@@ -140,6 +143,7 @@ export function useGlobalDriverTracking() {
         if (cancelled) return;
 
         const activeBookingId: string | undefined = rows?.[0]?.id;
+        if (activeBookingId && activeBookingId !== currentActiveBookingId) watchStartedAt = Date.now();
         currentActiveBookingId = activeBookingId ?? null;
         console.log('[GlobalDriverTracking] bookings query rows:', rows?.length ?? 0, rows?.[0] ?? 'none');
         if (activeBookingId) {
@@ -195,12 +199,9 @@ export function useGlobalDriverTracking() {
       if (!currentActiveBookingId || !publicDriverId) return;
       try {
         const raw = await AsyncStorage.getItem(LAST_INSERT_KEY);
-        if (!raw) {
-          return;
-        }
-        const last = JSON.parse(raw) as { lat: number; lng: number; time: number };
-        const gap = Date.now() - (last?.time ?? 0);
+        const gap = trackingGapMs(raw, watchStartedAt, Date.now());
         if (gap > WATCHDOG_GAP_MS) {
+          watchStartedAt = Date.now();
           console.warn(
             '[GlobalDriverTracking] watchdog: gap de ' + Math.round(gap / 1000) +
             's sin puntos GPS con booking activo ' + currentActiveBookingId +
