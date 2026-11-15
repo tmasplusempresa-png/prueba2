@@ -26,6 +26,8 @@ import {
   sendMessage as sendChatMessage,
 } from '@/common/services/chatService';
 
+import { KeyboardStickyView, keyboardControllerAvailable } from '@/common/utils/keyboardCompat';
+
 const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get('window');
 const SHEET_H = Math.min(SCREEN_H * 0.72, 620);
 const POLL_MS = 3000;
@@ -77,6 +79,8 @@ const FloatingChatModal: React.FC<FloatingChatModalProps> = ({
     const onShow = (e: any) => {
       const h = Math.max(0, Number(e?.endCoordinates?.height) || 0);
       setKeyboardH(h);
+      // Con keyboard-controller sube la hoja KeyboardStickyView; sin él, a mano.
+      if (keyboardControllerAvailable) return;
       Animated.timing(keyboardLift, {
         toValue: -Math.max(h - Math.max(insets.bottom, 0), 0),
         duration: Platform.OS === 'ios' ? Math.min(Number(e?.duration) || 250, 280) : 140,
@@ -85,6 +89,7 @@ const FloatingChatModal: React.FC<FloatingChatModalProps> = ({
     };
     const onHide = () => {
       setKeyboardH(0);
+      if (keyboardControllerAvailable) return;
       Animated.timing(keyboardLift, {
         toValue: 0,
         duration: 140,
@@ -335,11 +340,18 @@ const FloatingChatModal: React.FC<FloatingChatModalProps> = ({
         keyboardVerticalOffset={0}
         pointerEvents="box-none"
       >
+        <KeyboardStickyView offset={{ opened: insets.bottom }}>
         <Animated.View
           style={[
             styles.sheetWrap,
             {
-              height: SHEET_H + Math.max(insets.bottom, 10),
+              // Con teclado abierto la hoja no puede crecer por encima de la barra de estado.
+              height: Math.min(
+                SHEET_H + Math.max(insets.bottom, 10),
+                keyboardH > 0
+                  ? SCREEN_H - keyboardH + insets.bottom - insets.top - 8
+                  : Infinity,
+              ),
               transform: [{ translateY: sheetTranslateY }],
             },
           ]}
@@ -465,6 +477,7 @@ const FloatingChatModal: React.FC<FloatingChatModalProps> = ({
             </View>
           </View>
         </Animated.View>
+        </KeyboardStickyView>
       </KeyboardAvoidingView>
     </View>
   );

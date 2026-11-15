@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardAwareScrollView } from "@/common/utils/keyboardCompat";
 import {
   ActivityIndicator,
   FlatList,
@@ -6,7 +7,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -1209,10 +1209,12 @@ const CarsEditScreen = ({ navigation }: any) => {
           </View>
         </View>
 
-        <ScrollView
+        <KeyboardAwareScrollView
           style={styles.container}
           contentContainerStyle={[styles.content, { paddingBottom: footerBottomPadding + 130 }]}
           showsVerticalScrollIndicator={false}
+          bottomOffset={24}
+          keyboardShouldPersistTaps="handled"
         >
           <View style={styles.heroCard}>
             <Text style={styles.heroTag}>T+plus</Text>
@@ -1315,7 +1317,7 @@ const CarsEditScreen = ({ navigation }: any) => {
             {renderTextField("Numero de Pasajeros", "vehiclePassengers", "Ej. 4", "numeric")}
             {renderSelectField("Tipo de Carroceria", "vehicleMetalup", "Selecciona una carroceria", bodyworkTypes.map((type) => ({ label: type, value: type })))}
           </View>
-        </ScrollView>
+        </KeyboardAwareScrollView>
 
         <View style={[styles.fixedBottom, { paddingBottom: footerBottomPadding }]}> 
           <Text style={styles.fixedBottomMeta}>Completa los campos obligatorios. La foto principal ahora es opcional para guardar.</Text>
