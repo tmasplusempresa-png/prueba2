@@ -28,6 +28,8 @@ import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
 import { updateProfile } from "@/common/actions/authactions";
 import BookingsView from "@/components/BookingsView";
+import { startDriverLocationTracking } from "@/common/services/driverLocationTask";
+import { isOnboardingBlockingOtherAlerts, subscribeOnboardingState, evaluateAcceptGate, isDriverRegistrationIncomplete, requestOnboardingModal } from "@/common/services/onboardingGate";
 import {
   acceptBooking,
   listenForNewBookings,
@@ -581,9 +583,20 @@ const MapScreen = () => {
     }
   }, [activeMembership, user?.kilometers]);
 
+  // El modal de registro tiene prioridad: el recordatorio de membresía espera a que se cierre.
+  const [onboardingBlocking, setOnboardingBlocking] = useState<boolean>(
+    isOnboardingBlockingOtherAlerts(),
+  );
+  useEffect(() => {
+    const sync = () => setOnboardingBlocking(isOnboardingBlockingOtherAlerts());
+    sync();
+    return subscribeOnboardingState(sync);
+  }, []);
+
   // Recordatorio amigable de renovación al iniciar sesión (una vez por sesión)
   useEffect(() => {
     if (!isDriverView) return;
+    if (onboardingBlocking) return;
     if (membershipsLoading) return;
     if (!driverConductorId) return;
     // Espera a que el primer fetch de membresías para este conductor haya resuelto.
@@ -616,6 +629,7 @@ const MapScreen = () => {
     );
   }, [
     isDriverView,
+    onboardingBlocking,
     membershipsLoading,
     driverConductorId,
     membershipFetchedFor,
@@ -882,6 +896,15 @@ const MapScreen = () => {
   }, [user]);
 
   const handleAccept = (booking: any) => {
+    // Primero el gate de registro: con pasos pendientes se abre el modal, antes de cualquier otra alerta.
+    const acceptGate = isDriverView
+      ? evaluateAcceptGate(isDriverRegistrationIncomplete(), user?.approved)
+      : 'allow';
+    if (acceptGate === 'onboarding') {
+      requestOnboardingModal();
+      return;
+    }
+
     // Bloquear toma de servicios si el conductor no tiene membresía ACTIVA.
     // Regla de negocio: sin membresía activa, puede ver pero no tomar.
     if (isDriverView && !activeMembership) {
@@ -913,7 +936,7 @@ const MapScreen = () => {
     }
 
     // La BD tambien lo exige (trigger reserva_requiere_conductor_aprobado); esto evita el viaje de ida y vuelta.
-    if (isDriverView && user.approved === false) {
+    if (acceptGate === 'unverified') {
       showAlert('warning', 'Cuenta no verificada', 'Tu cuenta aún no ha sido verificada. Podrás tomar servicios cuando el equipo apruebe tu documentación.');
       return;
     }
@@ -923,8 +946,17 @@ const MapScreen = () => {
     dispatch(acceptBooking({ booking, driverProfile: user }))
       .unwrap()
       .then(() => {
+        // Arrancar el tracking ya, con la app en primer plano (Android 12+ no
+        // deja iniciar un foreground service desde segundo plano). El hook
+        // global lo mantiene después; si ya está activo, no hace nada.
+        const driverPublicId = String(user.id || '');
+        if (booking?.id && driverPublicId) {
+          startDriverLocationTracking(String(booking.id), driverPublicId).catch((e) =>
+            console.warn('[handleAccept] startDriverLocationTracking falló:', e),
+          );
+        }
         // Enviar notificaci�n
-       
+
         fetch(
           "https://us-central1-treasupdate.cloudfunctions.net/sendMassNotification",
           {
