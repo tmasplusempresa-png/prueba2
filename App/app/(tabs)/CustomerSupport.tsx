@@ -144,7 +144,7 @@ const CustomerSupport = ({ navigation }: Props) => {
           <View style={styles.headerBadgeIcon}>
             <Ionicons name="chatbubble-ellipses-outline" size={15} color="#00E5FF" />
           </View>
-          <Text style={styles.headerText}>Chat con tmasplus</Text>
+          <Text style={styles.headerText}>Chatea con TmasPlus</Text>
         </View>
         <View style={styles.iconBtnPlaceholder} />
       </View>

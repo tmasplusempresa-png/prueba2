@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
   Platform, ActivityIndicator, Dimensions, Keyboard, KeyboardAvoidingView,
   TouchableWithoutFeedback, Animated, PanResponder, Pressable, Image,
-  LayoutAnimation, UIManager, Modal,
+  LayoutAnimation, UIManager, Modal, Easing,
 } from 'react-native';
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -20,7 +20,7 @@ import { API_KEY, getMapboxAccessToken } from '@/config/AppConfig';
 import supabase, { SUPABASE_URL, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { encodeTripTypeObservation } from '@/common/store/bookingsSlice';
 import { FareCalculator } from '@/common/actions/FareCalculator';
-import { isNearAirport } from '@/common/utils/airports';
+import { isNearAirport, snapElDoradoDestination } from '@/common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '@/constants/fare';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -35,10 +35,19 @@ import {
   encodeCostCenterHeader,
 } from '@/common/services/companiesService';
 import { requestTripForClient } from '@/common/services/recommendationsService';
+import { useAppDispatch } from '@/common/store/hooks';
+import { fetchMemberships } from '@/common/reducers/membershipSlice';
+import { preferredConductorId } from '@/common/utils/driverIds';
+import { findActiveMembership } from '@/common/utils/membershipStatus';
 
 const { height: SH } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = 'tmasplus_recent_destination_searches';
 const MAX_RECENT_SEARCHES = 4;
+
+/** "25000" -> "25.000" (pesos colombianos, sin decimales). */
+const formatCopDigits = (digits: string) => digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+/** Deja solo dígitos, sin ceros a la izquierda y con un tope razonable. */
+const onlyMoneyDigits = (text: string) => text.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 9);
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -78,6 +87,65 @@ const OptionRow = ({ icon, title, subtitle, selected, onPress }: OptionRowProps)
     </View>
   </TouchableOpacity>
 );
+
+/** Campo con label flotante y borde visible (sin BlurView: en Android cierra el teclado). */
+const FloatingMoneyField = ({
+  label,
+  value,
+  onChangeText,
+  placeholder,
+  keyboardType = 'number-pad',
+  multiline,
+  error,
+}: {
+  label: string;
+  value: string;
+  onChangeText: (v: string) => void;
+  placeholder?: string;
+  keyboardType?: 'default' | 'number-pad';
+  multiline?: boolean;
+  error?: string | null;
+}) => {
+  const [focused, setFocused] = useState(false);
+  const floated = focused || value.length > 0;
+  const anim = useRef(new Animated.Value(floated ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: floated ? 1 : 0,
+      duration: 160,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: false,
+    }).start();
+  }, [floated, anim]);
+  const labelTop = anim.interpolate({ inputRange: [0, 1], outputRange: [16, 4] });
+  const labelSize = anim.interpolate({ inputRange: [0, 1], outputRange: [14, 11] });
+  return (
+    <View style={{ marginBottom: 4 }}>
+      <View style={[st.floatField, focused && st.floatFieldOn, !!error && st.fieldError]}>
+        <Animated.Text
+          style={[st.floatFieldLabel, { top: labelTop, fontSize: labelSize, color: focused ? '#00E5FF' : 'rgba(255,255,255,0.5)' }]}
+          pointerEvents="none"
+        >
+          {label}
+        </Animated.Text>
+        <TextInput
+          style={[st.floatFieldInput, multiline && { minHeight: 72, textAlignVertical: 'top' }]}
+          value={value}
+          onChangeText={onChangeText}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          keyboardType={keyboardType}
+          placeholder={floated ? placeholder : ''}
+          placeholderTextColor="rgba(255,255,255,0.3)"
+          multiline={multiline}
+          blurOnSubmit={false}
+          autoCorrect={false}
+        />
+      </View>
+      {error ? <Text style={st.fieldErrorTxt}>{error}</Text> : null}
+    </View>
+  );
+};
 
 type VehicleType = {
   key: string;
@@ -274,8 +342,10 @@ const CreateReservationScreen = () => {
   const nav = useNavigation<any>();
   const route = useRoute();
   const insets = useSafeAreaInsets();
+  const dispatch = useAppDispatch();
   const user = useSelector((s: RootState) => s.auth.user) as any;
   const profile = useSelector((s: RootState) => s.auth.profile) as any;
+  const memberships = useSelector((s: RootState) => s.memberships.memberships);
 
   const params = (route.params || {}) as any;
   const topPad = Math.max(insets.top, Platform.OS === 'ios' ? 20 : 18) + 6;
@@ -288,7 +358,8 @@ const CreateReservationScreen = () => {
   // teclado ni el alto de pantalla, y eso se sumaba al KeyboardAvoidingView que
   // ya estaba levantando el contenido: doble compensacion. El panel acababa
   // montado sobre el header y la lista de sugerencias se quedaba sin sitio.
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  // No usar useState para la altura del teclado: un setState al abrir
+// re-renderiza el sheet y en Android cierra el TextInput (el Login no hace esto).
 
   /* ── Map / Location refs ── */
   const mapRef = useRef<MapView>(null);
@@ -313,7 +384,12 @@ const CreateReservationScreen = () => {
   // centro del país (valor inicial de myLat/myLng) antes de tener la ubicación.
   const [hasMyLocation, setHasMyLocation] = useState(false);
   const [origin, setOrigin] = useState<any>(params.origin || null);
-  const [destination, setDestination] = useState<any>(params.destination || null);
+  const [destination, setDestinationState] = useState<any>(
+    params.destination ? snapElDoradoDestination(params.destination) : null,
+  );
+  const setDestination = useCallback((loc: any) => {
+    setDestinationState(loc ? snapElDoradoDestination(loc) : loc);
+  }, []);
   const [routeCoords, setRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
   // 'search' = hoja de direcciones; 'locate' = fijar punto moviendo el mapa
   const [sheetMode, setSheetMode] = useState<'search' | 'locate'>('search');
@@ -388,9 +464,22 @@ const CreateReservationScreen = () => {
   /* ── Reserva recomendada: un conductor pide el viaje a nombre de un cliente de su cartera ── */
   const recommendedClient: { id: string; name: string } | null = params.recommendedClient ?? null;
   const isRecommended = !!recommendedClient;
+  const driverConductorId = useMemo(
+    () => preferredConductorId(user, profile),
+    [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
+  );
+  const activeMembership = useMemo(
+    () => findActiveMembership(memberships),
+    [memberships],
+  );
+  useEffect(() => {
+    if (isRecommended && driverConductorId) {
+      dispatch(fetchMemberships(driverConductorId));
+    }
+  }, [dispatch, driverConductorId, isRecommended]);
   const [fareSource, setFareSource] = useState<'recomendada' | 'manual'>('recomendada');
-  const [manualMin, setManualMin] = useState('');
-  const [manualMax, setManualMax] = useState('');
+  /** Valor fijo manual (recomendados ya no usan rango). */
+  const [manualFixed, setManualFixed] = useState('');
   const [agreedValue, setAgreedValue] = useState('');
 
   const canChooseCorporate = !isRecommended && companies.length > 0;
@@ -596,12 +685,16 @@ const CreateReservationScreen = () => {
     })();
   }, [user, profile]);
 
-  /* ── Destinos recientes = últimas búsquedas (AsyncStorage, máx 4) ── */
+  /* ── Destinos recientes = últimas búsquedas (AsyncStorage, máx 4) ──
+   * Viaje para un cliente de la cartera: los recientes son los de ese cliente, no los del conductor. */
+  const recentSearchesKey = recommendedClient
+    ? `${RECENT_SEARCHES_KEY}_cliente_${recommendedClient.id}`
+    : RECENT_SEARCHES_KEY;
   useEffect(() => {
     (async () => {
       setLoadingRecents(true);
       try {
-        const raw = await AsyncStorage.getItem(RECENT_SEARCHES_KEY);
+        const raw = await AsyncStorage.getItem(recentSearchesKey);
         if (!raw) {
           setRecentDestinations([]);
           return;
@@ -616,7 +709,7 @@ const CreateReservationScreen = () => {
         setLoadingRecents(false);
       }
     })();
-  }, []);
+  }, [recentSearchesKey]);
 
   const pushRecentSearch = useCallback(async (place: RecentDestination) => {
     try {
@@ -627,9 +720,9 @@ const CreateReservationScreen = () => {
         ),
       ].slice(0, MAX_RECENT_SEARCHES);
       setRecentDestinations(next);
-      await AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next));
+      await AsyncStorage.setItem(recentSearchesKey, JSON.stringify(next));
     } catch {}
-  }, [recentDestinations]);
+  }, [recentDestinations, recentSearchesKey]);
 
   const handleSelectFavorite = (place: FavoritePlace) => {
     preferFormRef.current = false;
@@ -678,16 +771,12 @@ const CreateReservationScreen = () => {
 
     const keyboardShowSub = Keyboard.addListener(showEvent, (e: any) => {
       const kbHeight = e?.endCoordinates?.height ?? 0;
-      setKeyboardHeight(kbHeight);
-      // Step 2 animation
+      // Solo Animated (sin setState): evita remount/blur del TextInput en Android.
       Animated.timing(keyboardOffsetAnim, {
         toValue: -30,
         duration: 220,
         useNativeDriver: true,
       }).start();
-      // Step 1: el KeyboardAvoidingView ya hace el grueso del trabajo. Aqui
-      // solo se ajusta un poco, acotado, para que el panel nunca se salga por
-      // arriba ni tape el header.
       Animated.timing(mapKeyboardOffsetAnim, {
         toValue: -Math.min(kbHeight * 0.22, 70),
         duration: 220,
@@ -696,14 +785,11 @@ const CreateReservationScreen = () => {
     });
 
     const keyboardHideSub = Keyboard.addListener(hideEvent, () => {
-      setKeyboardHeight(0);
-      // Step 2 animation
       Animated.timing(keyboardOffsetAnim, {
         toValue: 0,
         duration: 260,
         useNativeDriver: true,
       }).start();
-      // Step 1 animation (search panel back down)
       Animated.timing(mapKeyboardOffsetAnim, {
         toValue: 0,
         duration: 260,
@@ -1367,8 +1453,9 @@ const CreateReservationScreen = () => {
     Animated.spring(detailsHeightAnim, {
       toValue: expand ? DETAILS_SHEET_EXPANDED : DETAILS_SHEET_COLLAPSED,
       useNativeDriver: false,
-      friction: 9,
-      tension: 68,
+      friction: 12,
+      tension: 64,
+      overshootClamping: true,
     }).start(() => {
       detailsExpandLock.current = false;
     });
@@ -1377,7 +1464,22 @@ const CreateReservationScreen = () => {
   const setDetailsSheetExpandedRef = useRef(setDetailsSheetExpanded);
   setDetailsSheetExpandedRef.current = setDetailsSheetExpanded;
 
+  const keyboardOpenRef = useRef(false);
+  useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => { keyboardOpenRef.current = true; },
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => { keyboardOpenRef.current = false; },
+    );
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
   const handleDetailsScroll = useCallback((e: any) => {
+    // No colapsar/expandir el sheet mientras el teclado está abierto (cierra el focus).
+    if (keyboardOpenRef.current) return;
     const y = e?.nativeEvent?.contentOffset?.y ?? 0;
     if (y > 28) setDetailsSheetExpandedRef.current(true);
     else if (y <= 2) setDetailsSheetExpandedRef.current(false);
@@ -1392,12 +1494,28 @@ const CreateReservationScreen = () => {
     }
   }, [step, detailsHeightAnim]);
 
+  const detailsDragStartRef = useRef(DETAILS_SHEET_COLLAPSED);
   const detailsSheetPan = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 10,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 4,
+      onPanResponderGrant: () => {
+        detailsHeightAnim.stopAnimation((v) => {
+          detailsDragStartRef.current = v;
+        });
+      },
+      onPanResponderMove: (_, g) => {
+        const next = Math.min(
+          DETAILS_SHEET_EXPANDED,
+          Math.max(DETAILS_SHEET_COLLAPSED, detailsDragStartRef.current - g.dy),
+        );
+        detailsHeightAnim.setValue(next);
+      },
       onPanResponderRelease: (_, g) => {
-        if (g.dy < -28) setDetailsSheetExpandedRef.current(true);
-        else if (g.dy > 28) setDetailsSheetExpandedRef.current(false);
+        detailsHeightAnim.stopAnimation((v) => {
+          const mid = (DETAILS_SHEET_EXPANDED + DETAILS_SHEET_COLLAPSED) / 2;
+          const expand = g.vy < -0.3 || (Math.abs(g.vy) < 0.3 && v > mid) || g.dy < -28;
+          setDetailsSheetExpandedRef.current(expand);
+        });
       },
     }),
   ).current;
@@ -1424,29 +1542,52 @@ const CreateReservationScreen = () => {
 
 
   const canContinue = !!origin && !!destination && distance > 0 && !calculating;
-  const canSubmit = canContinue && !saving;
 
-  /* ── Rango que verá el conductor que acepte el viaje recomendado ── */
-  const recommendedRange = useMemo(() => {
-    if (fareSource === 'manual') {
-      return { min: Number(manualMin) || 0, max: Number(manualMax) || 0 };
-    }
-    return { min: Math.round(driverPrice || 0), max: Math.round(clientPrice || 0) };
-  }, [fareSource, manualMin, manualMax, driverPrice, clientPrice]);
-  // Lo peor que le puede quedar al solicitante: acordado menos el máximo del rango.
-  const recommendedEarnings = agreedValue && recommendedRange.max > 0
-    ? Number(agreedValue) - recommendedRange.max
+  /* ── Precio fijo que verá el conductor que acepte (recomendados: sin rango ni recálculo) ── */
+  const recommendedFixed = useMemo(() => {
+    if (fareSource === 'manual') return Number(manualFixed) || 0;
+    return Math.round(driverPrice || 0);
+  }, [fareSource, manualFixed, driverPrice]);
+  const recommendedEarnings = agreedValue && recommendedFixed > 0
+    ? Number(agreedValue) - recommendedFixed
     : null;
+
+  const fixedFareError = useMemo(() => {
+    if (fareSource !== 'manual') return null;
+    if (!manualFixed) return null;
+    if ((Number(manualFixed) || 0) <= 0) return 'Debe ser mayor a $ 0';
+    return null;
+  }, [fareSource, manualFixed]);
+  const fixedFareComplete = fareSource !== 'manual' || !!manualFixed;
+  const fixedFareValid = fixedFareComplete && !fixedFareError && recommendedFixed > 0;
+  const canSubmit = canContinue && !saving && (!isRecommended || fixedFareValid);
 
   const submitRecommended = async () => {
     if (!recommendedClient || !origin || !destination) return;
-    const { min, max } = recommendedRange;
-    if (min <= 0 || max < min) {
-      showAlert('error', 'Rango inválido', 'El máximo debe ser mayor o igual al mínimo y ambos mayores que cero.');
+    if (!activeMembership) {
+      const expired = memberships.length > 0;
+      showAlert(
+        'warning',
+        expired ? 'Membresía vencida' : 'Activa tu membresía',
+        expired
+          ? 'Tu membresía no está vigente. Renúevala en Mi Billetera para solicitar viajes recomendados.'
+          : 'Para solicitar viajes recomendados necesitas una membresía activa.',
+        [
+          { text: 'Ahora no', style: 'cancel', onPress: () => setAlertVisible(false) },
+          {
+            text: expired ? 'Renovar membresía' : 'Activar membresía',
+            onPress: () => {
+              setAlertVisible(false);
+              nav.navigate('Wallet');
+            },
+          },
+        ],
+      );
       return;
     }
-    if (max > min * 3) {
-      showAlert('error', 'Rango inválido', 'El máximo no puede superar tres veces el mínimo.');
+    const fixed = recommendedFixed;
+    if (fixed <= 0) {
+      showAlert('error', 'Tarifa inválida', 'Define un valor fijo mayor a cero.');
       return;
     }
     const categoryId = vehicleRates?.[carType]?.id;
@@ -1466,8 +1607,8 @@ const CreateReservationScreen = () => {
         distance_km: parseFloat(distance.toFixed(2)),
         duration_min: Math.round(duration),
         fare_source: fareSource,
-        fare_min: min,
-        fare_max: max,
+        fare_min: fixed,
+        fare_max: fixed,
         agreed_value: agreedValue ? Number(agreedValue) : null,
         observations: encodeTripTypeObservation(tripLabel, observations),
       });
@@ -1948,7 +2089,11 @@ const CreateReservationScreen = () => {
               nestedScrollEnabled
             >
               <Text style={st.recentsTitle}>
-                {showSuggestions ? 'Sugerencias' : 'Búsquedas destinos recientes'}
+                {showSuggestions
+                  ? 'Sugerencias'
+                  : isRecommended
+                  ? 'Destinos recientes del cliente'
+                  : 'Búsquedas destinos recientes'}
               </Text>
               {showSuggestions ? (
                 loadingSuggestions ? (
@@ -1971,7 +2116,9 @@ const CreateReservationScreen = () => {
               ) : loadingRecents ? (
                 <ActivityIndicator size="small" color="#00E5FF" style={{ marginVertical: 12 }} />
               ) : recentDestinations.length === 0 ? (
-                <Text style={st.recentsEmpty}>No hay destinos recientes</Text>
+                <Text style={st.recentsEmpty}>
+                  {isRecommended ? 'Aún no hay destinos recientes de este cliente' : 'No hay destinos recientes'}
+                </Text>
               ) : (
                 recentDestinations.map(item => (
                   <TouchableOpacity
@@ -1997,7 +2144,7 @@ const CreateReservationScreen = () => {
               <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.4)" />
             </TouchableOpacity>
 
-            {favoritePlaces.length > 0 && !showSuggestions && (
+            {favoritePlaces.length > 0 && !showSuggestions && !isRecommended && (
               <View style={st.favoritesSection}>
                 <View style={st.favoritesHeader}>
                   <Ionicons name="star" size={12} color="#00E5FF" />
@@ -2123,7 +2270,7 @@ const CreateReservationScreen = () => {
                   contentContainerStyle={st.detailsContent}
                   showsVerticalScrollIndicator={false}
                   keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+                  keyboardDismissMode="none"
                   bounces
                   nestedScrollEnabled
                   onScroll={handleDetailsScroll}
@@ -2265,7 +2412,9 @@ const CreateReservationScreen = () => {
                               adjustsFontSizeToFit
                               minimumFontScale={0.8}
                             >
-                              {`$ ${fare.low.toLocaleString('es-CO')} – ${fare.high.toLocaleString('es-CO')}`}
+                              {isRecommended
+                                ? `$ ${fare.low.toLocaleString('es-CO')}`
+                                : `$ ${fare.low.toLocaleString('es-CO')} – ${fare.high.toLocaleString('es-CO')}`}
                             </Text>
                           ) : active ? (
                             <Ionicons name="checkmark-circle" size={22} color="#00E5FF" />
@@ -2302,79 +2451,60 @@ const CreateReservationScreen = () => {
                         <OptionRow
                           icon="sparkles"
                           title="Tarifa recomendada"
-                          subtitle={`$ ${Math.round(driverPrice || 0).toLocaleString('es-CO')} – $ ${Math.round(clientPrice || 0).toLocaleString('es-CO')} según la app`}
+                          subtitle={`$ ${formatCopDigits(String(Math.round(driverPrice || 0)))} (valor fijo según T+Plus)`}
                           selected={fareSource === 'recomendada'}
                           onPress={() => { animateChipSelect(); setFareSource('recomendada'); }}
                         />
                         <View style={st.optDivider} />
                         <OptionRow
                           icon="create"
-                          title="Definir un rango"
-                          subtitle="Tú pones el mínimo y el máximo"
+                          title="Definir valor fijo"
+                          subtitle="Tú pones el único valor del viaje"
                           selected={fareSource === 'manual'}
                           onPress={() => { animateChipSelect(); setFareSource('manual'); }}
                         />
                       </View>
                       {fareSource === 'manual' && (
-                        <View style={st.rangeRow}>
-                          {([
-                            ['Mínimo', manualMin, setManualMin],
-                            ['Máximo', manualMax, setManualMax],
-                          ] as const).map(([label, value, setter]) => (
-                            <View key={label} style={[st.obsGlass, st.costCenterGlass, st.rangeField]}>
-                              <BlurView intensity={18} tint="dark" style={st.segBlur} />
-                              <TextInput
-                                style={st.costCenterInput}
-                                placeholder={`${label} $`}
-                                placeholderTextColor="rgba(255,255,255,0.35)"
-                                keyboardType="number-pad"
-                                value={value}
-                                onChangeText={(v) => setter(v.replace(/\D/g, ''))}
-                              />
-                            </View>
-                          ))}
+                        <View style={st.fixedFareBlock}>
+                          <FloatingMoneyField
+                            label="Valor fijo $"
+                            value={manualFixed ? `$ ${formatCopDigits(manualFixed)}` : ''}
+                            onChangeText={(v) => setManualFixed(onlyMoneyDigits(v))}
+                            placeholder="Ej.: $ 35.000"
+                            error={fixedFareError}
+                          />
+                          {!fixedFareComplete && !fixedFareError ? (
+                            <Text style={st.recommendedHint}>Ingresa el valor fijo para poder pedir el viaje.</Text>
+                          ) : null}
                         </View>
                       )}
-                      <View style={st.labelRow}>
-                        <Text style={[st.label, st.labelInRow]}>Valor acordado con el cliente</Text>
-                        <Text style={st.labelHint}>Privado · opcional</Text>
-                      </View>
-                      <View style={[st.obsGlass, st.costCenterGlass]}>
-                        <BlurView intensity={18} tint="dark" style={st.segBlur} />
-                        <TextInput
-                          style={st.costCenterInput}
-                          placeholder="Ej.: 50000"
-                          placeholderTextColor="rgba(255,255,255,0.35)"
-                          keyboardType="number-pad"
-                          value={agreedValue}
-                          onChangeText={(v) => setAgreedValue(v.replace(/\D/g, ''))}
+                      <View style={st.recFieldBlock}>
+                        <FloatingMoneyField
+                          label="Valor acordado con el cliente · privado"
+                          value={agreedValue ? `$ ${formatCopDigits(agreedValue)}` : ''}
+                          onChangeText={(v) => setAgreedValue(onlyMoneyDigits(v))}
+                          placeholder="Ej.: $ 50.000 (opcional)"
                         />
+                        <Text style={st.recommendedHint}>
+                          El conductor que acepte verá este valor fijo. No hay recálculo al finalizar: ese es el cobro.
+                          Le pagas dentro de 24 h. El cliente no ve precios en la app; el valor acordado solo lo ves tú.
+                          {recommendedEarnings !== null && fixedFareValid
+                            ? ` Tu ganancia estimada: ${recommendedEarnings < 0 ? '-' : ''}$ ${formatCopDigits(String(Math.abs(recommendedEarnings)))}.`
+                            : ''}
+                        </Text>
                       </View>
-                      <Text style={st.recommendedHint}>
-                        El conductor que acepte solo verá el rango. Al completar el viaje le pagas el valor final dentro
-                        de 24 h. El cliente no ve precios en la app; el valor acordado solo lo ves tú.
-                        {recommendedEarnings !== null
-                          ? ` Tu ganancia estimada: $ ${recommendedEarnings.toLocaleString('es-CO')}.`
-                          : ''}
-                      </Text>
                     </>
                   )}
 
                   {/* Notas para el conductor */}
-                  <View style={st.labelRow}>
-                    <Text style={[st.label, st.labelInRow]}>Notas para el conductor</Text>
-                    <Text style={st.labelHint}>Opcional</Text>
-                  </View>
-                  <View style={st.obsGlass}>
-                    <BlurView intensity={18} tint="dark" style={st.segBlur} />
-                    <TextInput
-                      style={st.obsInput}
-                      placeholder="Ej.: punto de encuentro, referencias o paradas"
-                      placeholderTextColor="rgba(255,255,255,0.35)"
+                  <View style={st.recFieldBlock}>
+                    <FloatingMoneyField
+                      label="Notas para el conductor · opcional"
                       value={observations}
                       onChangeText={setObservations}
+                      placeholder="Ej.: punto de encuentro, referencias o paradas"
+                      keyboardType="default"
                       multiline
-                      maxLength={500}
                     />
                   </View>
                   <View style={{ height: 12 }} />
@@ -2387,9 +2517,11 @@ const CreateReservationScreen = () => {
                       <View style={st.payHeaderRow}>
                         <Text style={st.footerLabel}>Viaje recomendado</Text>
                         <View style={st.pricePill}>
-                          <Text style={st.pricePillTxt}>$ {recommendedRange.min.toLocaleString('es-CO')}</Text>
-                          <Text style={st.pricePillSep}>–</Text>
-                          <Text style={st.pricePillTxt}>$ {recommendedRange.max.toLocaleString('es-CO')}</Text>
+                          {fixedFareValid ? (
+                            <Text style={st.pricePillTxt}>$ {formatCopDigits(String(recommendedFixed))}</Text>
+                          ) : (
+                            <Text style={st.pricePillTxt}>Define el valor</Text>
+                          )}
                         </View>
                       </View>
                     ) : isCorporate ? (
@@ -3178,6 +3310,7 @@ const st = StyleSheet.create({
   optSub: {
     marginTop: 2,
     fontSize: 11.5,
+    fontWeight: '400',
     color: 'rgba(255,255,255,0.45)',
   },
   optDivider: {
@@ -3261,6 +3394,7 @@ const st = StyleSheet.create({
   vehicleDesc: {
     marginTop: 2,
     fontSize: 12,
+    fontWeight: '400',
     color: 'rgba(255,255,255,0.5)',
   },
   vehiclePriceTxt: {
@@ -3300,6 +3434,62 @@ const st = StyleSheet.create({
   },
   rangeField: {
     flex: 1,
+  },
+  fixedFareBlock: {
+    marginTop: 12,
+    marginBottom: 4,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.28)',
+    backgroundColor: 'rgba(0,229,255,0.06)',
+  },
+  recFieldBlock: {
+    marginTop: 12,
+  },
+  floatField: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,229,255,0.45)',
+    backgroundColor: 'rgba(8,42,58,0.95)',
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    minHeight: 56,
+    justifyContent: 'flex-end',
+  },
+  floatFieldOn: {
+    borderColor: '#00E5FF',
+    backgroundColor: 'rgba(0,229,255,0.08)',
+  },
+  floatFieldLabel: {
+    position: 'absolute',
+    left: 14,
+    fontWeight: '600',
+  },
+  floatFieldInput: {
+    marginTop: 14,
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    padding: 0,
+    minHeight: 22,
+  },
+  fieldError: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,138,128,0.7)',
+  },
+  fieldErrorRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 4,
+    marginTop: 5,
+    paddingHorizontal: 4,
+  },
+  fieldErrorTxt: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 15,
+    color: '#FF8A80',
   },
   recommendedHint: {
     marginTop: 8,

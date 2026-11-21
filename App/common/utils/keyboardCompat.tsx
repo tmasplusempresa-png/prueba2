@@ -1,16 +1,16 @@
 /**
- * Acceso seguro a react-native-keyboard-controller. Si el módulo nativo no está
- * en el binario (p. ej. un dev client viejo), todo degrada a los componentes de
- * react-native y la app no se cae. `keyboardControllerAvailable` permite que un
- * componente conserve su lógica manual de teclado en ese caso.
+ * Acceso seguro a react-native-keyboard-controller.
+ * En Android el KeyboardProvider reajusta el layout y a menudo cierra el teclado
+ * apenas se abre (cualquier TextInput). Solo se activa en iOS; en Android se
+ * usan los componentes nativos de React Native.
  */
 import React from 'react';
-import { ScrollView, TurboModuleRegistry } from 'react-native';
+import { Platform, ScrollView, TurboModuleRegistry } from 'react-native';
 import type { ScrollViewProps } from 'react-native';
 
 let KC: any = null;
 try {
-  if (TurboModuleRegistry.get('KeyboardController')) {
+  if (Platform.OS === 'ios' && TurboModuleRegistry.get('KeyboardController')) {
     KC = require('react-native-keyboard-controller');
   }
 } catch {

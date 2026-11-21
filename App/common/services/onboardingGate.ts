@@ -20,6 +20,11 @@ export function isDriverRegistrationIncomplete(): boolean {
   return snapshot.loaded && snapshot.userType === 'driver' && snapshot.pending > 0;
 }
 
+/** Snapshot actual (para banners en GO). */
+export function getOnboardingSnapshot(): Snapshot {
+  return { ...snapshot };
+}
+
 /** Pide al modal que se abra ya (p. ej. al intentar aceptar un servicio). */
 export function requestOnboardingModal(): void {
   requestListeners.forEach((fn) => {

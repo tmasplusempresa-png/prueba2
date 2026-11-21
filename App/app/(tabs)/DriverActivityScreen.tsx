@@ -126,8 +126,9 @@ const DriverActivityScreen = () => {
     route.params?.initialTab === 'requested' ? 'requested' : 'completed',
   );
   useEffect(() => {
-    if (route.params?.initialTab === 'requested') setListTab('requested');
-  }, [route.params?.initialTab]);
+    const tab = route.params?.initialTab;
+    if (tab === 'requested' || tab === 'completed') setListTab(tab);
+  }, [route.params?.initialTab, route.params?.openedAt]);
   const [completas, setCompletas] = useState<Reservation[]>([]);
   const [corporateInfo, setCorporateInfo] = useState<Record<string, BookingCompany>>({});
   // Viajes recomendados que hice yo (me paga quien los pidió) y los que pedí para mis clientes.
@@ -329,6 +330,11 @@ const DriverActivityScreen = () => {
   };
 
   const handleViewDetail = (reservation: Reservation) => {
+    // Viaje recomendado que hice: el detalle incluye el pago con quien lo pidió y soporte.
+    if (isRecommendedPayment(reservation.payment_mode) && recommendedInfo[String(reservation.id)]?.viewerRole === 'conductor') {
+      nav.navigate('RecommendedTripDetail', { bookingId: String(reservation.id) });
+      return;
+    }
     nav.navigate('ReservationDetail', { reservation });
   };
 
@@ -450,10 +456,17 @@ const DriverActivityScreen = () => {
 
   const renderRequestItem = ({ item, index }: { item: RecommendedRequest; index: number }) => (
     <Animatable.View animation="fadeInUp" duration={400} delay={Math.min(index, 8) * 50} useNativeDriver>
-      <View style={st.reqCard}>
+      <TouchableOpacity
+        style={st.reqCard}
+        activeOpacity={0.85}
+        onPress={() => nav.navigate('RecommendedTripDetail', { bookingId: item.id })}
+      >
         <View style={st.reqHead}>
           <Text style={st.miniRef}>{item.reference || item.id.slice(0, 8).toUpperCase()}</Text>
-          <Text style={st.reqStatus}>{REQUEST_STATUS[item.status] ?? item.status}</Text>
+          <View style={st.reqHeadRight}>
+            <Text style={st.reqStatus}>{REQUEST_STATUS[item.status] ?? item.status}</Text>
+            <Ionicons name="chevron-forward" size={14} color="rgba(0,229,255,0.7)" />
+          </View>
         </View>
         <Text style={st.reqClient} numberOfLines={1}>{item.clientName}</Text>
         <Text style={st.reqRoute} numberOfLines={1}>{item.pickupAddress} → {item.dropAddress}</Text>
@@ -463,9 +476,9 @@ const DriverActivityScreen = () => {
         </Text>
         <View style={st.reqNumbers}>
           <View style={st.reqNum}>
-            <Text style={st.reqNumLabel}>{item.finalPrice !== null ? 'Precio final' : 'Rango'}</Text>
+            <Text style={st.reqNumLabel}>{item.finalPrice !== null ? 'Precio final' : 'Tarifa fija'}</Text>
             <Text style={st.reqNumValue}>
-              {item.finalPrice !== null ? fmtMoney(item.finalPrice) : `${fmtMoney(item.fareMin)} – ${fmtMoney(item.fareMax)}`}
+              {item.finalPrice !== null ? fmtMoney(item.finalPrice) : fmtMoney(item.fareMin)}
             </Text>
           </View>
           {item.agreedValue !== null ? (
@@ -486,7 +499,7 @@ const DriverActivityScreen = () => {
         {item.settlement
           ? renderSettlement(item.id, item.settlement, 'pagador', item.driverName || 'el conductor')
           : null}
-      </View>
+      </TouchableOpacity>
     </Animatable.View>
   );
 
@@ -955,6 +968,7 @@ const st = StyleSheet.create({
     backgroundColor: 'rgba(10,46,61,0.48)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.1)',
   },
   reqHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  reqHeadRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   reqStatus: { fontSize: 11, fontWeight: '700', color: '#00E5FF' },
   reqClient: { marginTop: 4, fontSize: 15, fontWeight: '700', color: '#FFF' },
   reqRoute: { marginTop: 2, fontSize: 12, color: 'rgba(255,255,255,0.65)' },

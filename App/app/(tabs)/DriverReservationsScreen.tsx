@@ -3,7 +3,12 @@ import { evaluateAcceptGate, isDriverRegistrationIncomplete, requestOnboardingMo
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, RefreshControl, Platform, Dimensions, Modal, ScrollView,
+  LayoutAnimation, UIManager, Animated, Easing,
 } from 'react-native';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import CustomAlert, { AlertButton } from '@/components/CustomAlert';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSelector } from 'react-redux';
@@ -21,6 +26,7 @@ import { useAppDispatch } from '@/common/store/hooks';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseAuthHeaders } from '@/config/SupabaseConfig';
 import { updateDriverNotification, notifyNewBooking, claimNewBookingNotice } from '@/hooks/DriverNotificationService';
 import { fetchMemberships } from '@/common/reducers/membershipSlice';
+import { findActiveMembership } from '@/common/utils/membershipStatus';
 import { toCanonicalCarType } from '@/common/utils/carType';
 import { resolveTripTypeLabel } from '@/common/store/bookingsSlice';
 import { formatBookingFareRange, getBookingFareRange } from '@/constants/fare';
@@ -227,6 +233,61 @@ const formatTripKmSuffix = (distance: unknown) => {
   return Number.isFinite(tripKm) && tripKm > 0 ? ` · ${tripKm.toFixed(1)} km` : '';
 };
 
+/** Pill «Desconectar»: icono log-out centrado, slide suave, sin giro. */
+const DisconnectSwitch = ({ onPress }: { onPress: () => void }) => {
+  const [busy, setBusy] = useState(false);
+  const slide = useRef(new Animated.Value(0)).current;
+  const fade = useRef(new Animated.Value(1)).current;
+
+  const handlePress = () => {
+    if (busy) return;
+    setBusy(true);
+    Animated.parallel([
+      Animated.timing(slide, {
+        toValue: 1,
+        duration: 380,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(fade, {
+        toValue: 0.72,
+        duration: 260,
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) onPress();
+    });
+  };
+
+  const labelShift = slide.interpolate({ inputRange: [0, 1], outputRange: [0, -4] });
+
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={handlePress} disabled={busy}>
+      <Animated.View
+        style={[
+          s.disconnectSwitch,
+          busy && s.disconnectSwitchBusy,
+          { opacity: fade },
+        ]}
+      >
+        <Animated.View style={{ transform: [{ translateX: labelShift }] }}>
+          <Text {...FIXED_TEXT_PROPS} style={[s.disconnectSwitchLabel, busy && s.disconnectSwitchLabelBusy]}>
+            {busy ? 'Saliendo…' : 'Desconectar'}
+          </Text>
+        </Animated.View>
+        <View style={[s.disconnectSwitchIconWrap, busy && s.disconnectSwitchIconWrapBusy]}>
+          <Ionicons
+            name="log-out-outline"
+            size={14}
+            color={busy ? '#FF8A80' : '#00E5FF'}
+            style={s.disconnectSwitchIcon}
+          />
+        </View>
+      </Animated.View>
+    </TouchableOpacity>
+  );
+};
+
 const DriverReservationsScreen = ({
   embedded = false,
   initialTab: initialTabProp,
@@ -257,11 +318,12 @@ const DriverReservationsScreen = ({
     () => preferredConductorId(user, profile),
     [profile?.id, profile?.auth_id, user?.id, user?.auth_id, user?.uid],
   );
-  const activeMembership = memberships.find(
-    (m: any) =>
-      m.status === 'ACTIVA' &&
+  const activeMembership = useMemo(() => {
+    const mine = memberships.filter((m: any) =>
       driverIdCandidates.includes(String(m.conductor)),
-  );
+    );
+    return findActiveMembership(mine.length > 0 ? mine : memberships);
+  }, [memberships, driverIdCandidates]);
 
   useEffect(() => {
     // Un solo fetch con el id canónico (auth_id). Disparar uno por cada
@@ -306,6 +368,24 @@ const DriverReservationsScreen = ({
     }
     wasOnlineRef.current = driverOnline;
   }, [driverOnline, embedded]);
+
+  const switchTab = useCallback((tab: 'reservations' | 'immediate' | 'active') => {
+    LayoutAnimation.configureNext({
+      duration: 280,
+      update: { type: LayoutAnimation.Types.easeInEaseOut },
+      create: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
+      delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
+    });
+    setActiveTab(tab);
+    setRefreshing(false);
+  }, []);
+
+  // Tab "En curso" solo si hay viajes activos; si se vacía, volver a Inmediatos/Reservas.
+  useEffect(() => {
+    if (activeTab === 'active' && (!activeTripIsDriver || activeTrips.length === 0)) {
+      switchTab(driverOnline ? 'immediate' : 'reservations');
+    }
+  }, [activeTab, activeTripIsDriver, activeTrips.length, driverOnline, switchTab]);
 
   const [immediateServices, setImmediateServices] = useState<Reservation[]>([]);
   const [searchingImmediate, setSearchingImmediate] = useState(false);
@@ -1421,20 +1501,7 @@ const DriverReservationsScreen = ({
         </View>
         <View style={s.headerActions}>
           {embedded && driverOnline && (
-            <TouchableOpacity
-              style={s.disconnectSwitch}
-              activeOpacity={0.85}
-              onPress={() => invokeDriverGoDeactivate()}
-            >
-              <Text {...FIXED_TEXT_PROPS} style={s.disconnectSwitchLabel}>Desconectar</Text>
-              <View style={s.disconnectSwitchKnob}>
-                <Image
-                  source={require('@/assets/images/logo-Preview-Photoroom.png')}
-                  style={s.disconnectSwitchLogo}
-                  resizeMode="contain"
-                />
-              </View>
-            </TouchableOpacity>
+            <DisconnectSwitch onPress={() => invokeDriverGoDeactivate()} />
           )}
           {activeTab === 'immediate' && !driverOnline && (
             <TouchableOpacity
@@ -1458,7 +1525,7 @@ const DriverReservationsScreen = ({
             }}
             activeOpacity={0.75}
           >
-            <Ionicons name="refresh" size={20} color="#00E5FF" />
+            <Ionicons name="refresh-outline" size={18} color="#00E5FF" style={s.refreshBtnIcon} />
           </TouchableOpacity>
           )}
         </View>
@@ -1468,10 +1535,7 @@ const DriverReservationsScreen = ({
       <View style={[s.tabContainer, embedded && s.tabContainerEmbedded]}>
         <TouchableOpacity
           style={[s.tab, activeTab === 'reservations' && s.tabActive]}
-          onPress={() => {
-            setActiveTab('reservations');
-            setRefreshing(false);
-          }}
+          onPress={() => switchTab('reservations')}
         >
           <Ionicons name="calendar-outline" size={14} color={activeTab === 'reservations' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
           <Text
@@ -1493,10 +1557,8 @@ const DriverReservationsScreen = ({
         <TouchableOpacity
           style={[s.tab, activeTab === 'immediate' && s.tabActive]}
           onPress={() => {
-            setActiveTab('immediate');
-            if (driverOnline) {
-              searchImmediateServices();
-            }
+            switchTab('immediate');
+            if (driverOnline) searchImmediateServices();
           }}
         >
           <Ionicons name="flash-outline" size={14} color={activeTab === 'immediate' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
@@ -1516,22 +1578,21 @@ const DriverReservationsScreen = ({
           ) : null}
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[s.tab, activeTab === 'active' && s.tabActive]}
-          onPress={() => {
-            setActiveTab('active');
-            setRefreshing(false);
-          }}
-        >
-          <Ionicons name="navigate-circle-outline" size={14} color={activeTab === 'active' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
-          <Text
-            {...FIXED_TEXT_PROPS}
-            numberOfLines={1}
-            style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'active' && s.tabTxtActive]}
+        {activeTripIsDriver && activeTrips.length > 0 ? (
+          <TouchableOpacity
+            style={[s.tab, activeTab === 'active' && s.tabActive]}
+            onPress={() => switchTab('active')}
           >
-            En curso{activeTrips.length > 0 ? ` (${activeTrips.length})` : ''}
-          </Text>
-        </TouchableOpacity>
+            <Ionicons name="navigate-circle-outline" size={14} color={activeTab === 'active' ? '#00E5FF' : 'rgba(255,255,255,0.5)'} />
+            <Text
+              {...FIXED_TEXT_PROPS}
+              numberOfLines={1}
+              style={[s.tabTxt, embedded && s.tabTxtEmbedded, activeTab === 'active' && s.tabTxtActive]}
+            >
+              En curso ({activeTrips.length})
+            </Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {loading && activeTab === 'reservations' ? (
@@ -1946,38 +2007,56 @@ const s = StyleSheet.create({
   disconnectSwitch: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    width: 118,
+    justifyContent: 'center',
+    gap: 8,
+    minWidth: 118,
     height: 34,
+    paddingHorizontal: 10,
+    paddingRight: 8,
     borderRadius: 17,
-    backgroundColor: 'rgba(0,229,255,0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(0,229,255,0.3)',
-    paddingLeft: 10,
-    paddingRight: 2,
+    borderColor: 'rgba(0,229,255,0.4)',
+    backgroundColor: 'rgba(0,229,255,0.08)',
+  },
+  disconnectSwitchBusy: {
+    borderColor: 'rgba(255,138,128,0.45)',
+    backgroundColor: 'rgba(255,138,128,0.1)',
   },
   disconnectSwitchLabel: {
     color: '#00E5FF',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
-    letterSpacing: 0.1,
+    letterSpacing: 0.2,
   },
-  disconnectSwitchKnob: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#FFFFFF',
+  disconnectSwitchLabelBusy: {
+    color: '#FFB4AE',
+  },
+  disconnectSwitchIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.18,
-    shadowRadius: 3,
-    elevation: 3,
+    backgroundColor: 'rgba(5,26,38,0.55)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.35)',
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.22,
+    shadowRadius: 2.5,
+    elevation: 2,
   },
-  disconnectSwitchLogo: {
-    width: 18,
-    height: 18,
+  disconnectSwitchIconWrapBusy: {
+    backgroundColor: 'rgba(40,18,18,0.55)',
+    borderColor: 'rgba(255,138,128,0.4)',
+    shadowColor: '#FF8A80',
+    shadowOpacity: 0.2,
+  },
+  disconnectSwitchIcon: {
+    textAlign: 'center',
+    ...(Platform.OS === 'android'
+      ? { includeFontPadding: false, lineHeight: 14 }
+      : {}),
   },
   backBtn: {
     width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
@@ -1986,8 +2065,25 @@ const s = StyleSheet.create({
   headerTitle: { fontSize: 17, fontWeight: '700', color: '#FFF', letterSpacing: -0.3 },
   headerTitleEmbedded: { fontSize: 16 },
   refreshBtn: {
-    width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.2)',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(5,26,38,0.55)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,229,255,0.35)',
+    shadowColor: '#00E5FF',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2.5,
+    elevation: 2,
+  },
+  refreshBtnIcon: {
+    textAlign: 'center',
+    ...(Platform.OS === 'android'
+      ? { includeFontPadding: false, lineHeight: 18 }
+      : {}),
   },
   goToggleBtn: {
     width: 40,
@@ -2021,8 +2117,8 @@ const s = StyleSheet.create({
   emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100, gap: 10 },
   emptyWrapPinned: { paddingTop: 8, paddingBottom: 12, alignItems: 'center' },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: 'rgba(255,255,255,0.7)' },
-  emptySub: { fontSize: 13, color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 40 },
-  emptySubPinned: { fontSize: 12, color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 20 },
+  emptySub: { fontSize: 13, fontWeight: '400', color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 40 },
+  emptySubPinned: { fontSize: 12, fontWeight: '400', color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 20 },
   card: {
     borderRadius: 12,
     paddingVertical: 8,

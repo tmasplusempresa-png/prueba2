@@ -17,6 +17,7 @@ import {
   type OnboardingStep,
 } from '@/common/utils/onboardingSteps';
 import { setOnboardingSnapshot } from '@/common/services/onboardingGate';
+import { fetchMyPaymentMethods } from '@/common/services/driverPaymentMethodsService';
 
 // Solo el perfil (fila de users) es fiable: al arrancar, `user` trae un tipo por
 // defecto ('customer') que luego cambia a 'driver'; usarlo abría el modal del
@@ -49,6 +50,7 @@ export function useOnboardingSteps(): OnboardingState {
 
   const [remote, setRemote] = useState<OnboardingProfile | null>(null);
   const [vehicleCount, setVehicleCount] = useState<number | null>(null);
+  const [daviplataOk, setDaviplataOk] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const reqSeq = useRef(0);
 
@@ -85,6 +87,14 @@ export function useOnboardingSteps(): OnboardingState {
           const cars = await c.json();
           setVehicleCount(Array.isArray(cars) ? cars.length : null);
         }
+        try {
+          const pay = await fetchMyPaymentMethods();
+          if (seq === reqSeq.current) {
+            setDaviplataOk(!!pay?.daviplata_numero && String(pay.daviplata_numero).replace(/\D/g, '').length === 10);
+          }
+        } catch {
+          if (seq === reqSeq.current) setDaviplataOk(null);
+        }
       }
     } catch (e) {
       console.warn('[useOnboardingSteps] refresh falló:', e);
@@ -109,8 +119,8 @@ export function useOnboardingSteps(): OnboardingState {
   }, [refresh]);
 
   const steps = useMemo(
-    () => buildOnboardingSteps(userType, mergeProfiles(remote, profile), vehicleCount),
-    [userType, remote, profile, vehicleCount],
+    () => buildOnboardingSteps(userType, mergeProfiles(remote, profile), vehicleCount, daviplataOk),
+    [userType, remote, profile, vehicleCount, daviplataOk],
   );
   const pending = steps.filter((s) => !s.done).length;
 

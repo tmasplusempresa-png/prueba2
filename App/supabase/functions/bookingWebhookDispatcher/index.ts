@@ -120,7 +120,8 @@ async function decidePayload(evt: WebhookPayload): Promise<PushPayload | null> {
   // La app solo avisaba con una notificación local mientras la cartelera estaba abierta; con la app en
   // segundo plano el conductor no se enteraba.
   if (evt.type === "INSERT" && !record.id_conductor && !esProgramado && esEstadoAbierto(record.estado)) {
-    const driverIds = await onlyOnlineDrivers(await getEligibleDriverIds(record.id_categoria, carTypeName));
+    const eligible = await excludeRequester(record, await getEligibleDriverIds(record.id_categoria, carTypeName));
+    const driverIds = await onlyOnlineDrivers(eligible, isRecomendado(record));
     if (driverIds.length === 0) {
       console.log("[bookingWebhookDispatcher] servicio inmediato sin conductores elegibles", {
         bookingId: record.id, id_categoria: record.id_categoria,
@@ -129,7 +130,7 @@ async function decidePayload(evt: WebhookPayload): Promise<PushPayload | null> {
     }
     return {
       user_ids: driverIds,
-      title: `⚡ Nuevo servicio inmediato${isEmpresarial(record) ? " · Empresarial" : ""}`,
+      title: `⚡ Nuevo servicio inmediato${paymentTag(record)}`,
       body: buildDriverBody(record, carTypeName, "inmediato"),
       data: { type: "new-service-loop", bookingId: record.id },
       sound: "default",
@@ -139,12 +140,9 @@ async function decidePayload(evt: WebhookPayload): Promise<PushPayload | null> {
 
   // ─── INSERT reserva SIN conductor → fan-out a conductores elegibles ─────
   if (evt.type === "INSERT" && !record.id_conductor && esProgramado && esEstadoAbierto(record.estado)) {
-    let driverIds = await getEligibleDriverIds(record.id_categoria, carTypeName);
-    if (isRecomendado(record)) {
-      // El conductor que pidió el viaje para su cliente no puede tomarlo: no se le avisa.
-      const { data: rr } = await admin.from("reserva_recomendada").select("id_solicitante").eq("id_reserva", record.id).maybeSingle();
-      if (rr?.id_solicitante) driverIds = driverIds.filter((id) => id !== rr.id_solicitante);
-    }
+    const eligible = await excludeRequester(record, await getEligibleDriverIds(record.id_categoria, carTypeName));
+    // Las reservas normales avisan a todos los elegibles; las recomendadas solo a quien tiene GO activo.
+    const driverIds = isRecomendado(record) ? await onlyOnlineDrivers(eligible, true) : eligible;
     if (driverIds.length === 0) {
       console.log("[bookingWebhookDispatcher] reserva nueva sin conductores elegibles", {
         bookingId: record.id, id_categoria: record.id_categoria,
@@ -230,22 +228,22 @@ async function getEligibleDriverIds(idCategoria: any, carTypeName: string | null
   return [...new Set(ids)];
 }
 
-// Conductores con GO activo (users.driver_active_status). Hoy la app guarda el GO solo en Firebase, así que el
-// campo suele estar en false para todos: si nadie aparece en línea (o la consulta falla) se avisa a todos los
-// elegibles. Es preferible un aviso de más a que nadie se entere del servicio.
-async function onlyOnlineDrivers(driverIds: string[]): Promise<string[]> {
+// Conductores con GO activo (perfil_conductor.en_servicio, lo guarda la app con app_conductor_set_en_linea).
+// strict: solo los que tienen GO (recomendadas). Sin strict, mientras haya apps sin la actualización que guarda
+// el GO, si nadie aparece en línea se avisa a todos los elegibles para que el servicio no quede sin aviso.
+async function onlyOnlineDrivers(driverIds: string[], strict = false): Promise<string[]> {
   if (driverIds.length === 0) return [];
   const { data, error } = await admin
-    .from("users")
-    .select("id")
-    .in("id", driverIds)
-    .eq("driver_active_status", true);
+    .from("perfil_conductor")
+    .select("id_persona")
+    .in("id_persona", driverIds)
+    .eq("en_servicio", true);
   if (error) {
-    console.error("[bookingWebhookDispatcher] users (en línea) query failed:", error);
-    return driverIds;
+    console.error("[bookingWebhookDispatcher] perfil_conductor (en línea) query failed:", error);
+    return strict ? [] : driverIds;
   }
-  const online = (data ?? []).map((u: any) => u.id).filter(Boolean);
-  return online.length > 0 ? online : driverIds;
+  const online = (data ?? []).map((p: any) => p.id_persona).filter(Boolean);
+  return online.length > 0 || strict ? online : driverIds;
 }
 
 function isEmpresarial(record: Record<string, any>): boolean {
@@ -256,9 +254,19 @@ function isRecomendado(record: Record<string, any>): boolean {
   return String(record.modo_pago ?? "").toLowerCase() === "recomendado";
 }
 
+function paymentTag(record: Record<string, any>): string {
+  return isEmpresarial(record) ? " · Empresarial" : isRecomendado(record) ? " · Recomendado" : "";
+}
+
+// El conductor que pidió un viaje recomendado para su cliente no puede tomarlo: no se le avisa.
+async function excludeRequester(record: Record<string, any>, driverIds: string[]): Promise<string[]> {
+  if (!isRecomendado(record) || driverIds.length === 0) return driverIds;
+  const { data: rr } = await admin.from("reserva_recomendada").select("id_solicitante").eq("id_reserva", record.id).maybeSingle();
+  return rr?.id_solicitante ? driverIds.filter((id) => id !== rr.id_solicitante) : driverIds;
+}
+
 function buildDriverBody(record: Record<string, any>, carTypeName: string | null, tipo: "inmediato" | "programado"): string {
-  const tag = isEmpresarial(record) ? " · Empresarial" : isRecomendado(record) ? " · Recomendado" : "";
-  const car = `${carTypeName ?? "Servicio"}${tag}`;
+  const car = `${carTypeName ?? "Servicio"}${paymentTag(record)}`;
   const pickup = truncate(record.origen_direccion ?? "Ubicación por definir", 60);
   if (tipo === "programado") {
     const when = record.solicitado_en ? formatShortDate(record.solicitado_en) : "";

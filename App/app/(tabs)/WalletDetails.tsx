@@ -17,7 +17,7 @@ import { Ionicons, MaterialIcons, FontAwesome, Feather } from "@expo/vector-icon
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSelector, useDispatch } from "react-redux";
 import { RootState, AppDispatch } from "@/common/store";
-import { format, differenceInDays } from "date-fns";
+import { format } from "date-fns";
 import {
   fetchWalletHistory,
   selectWalletHistory,
@@ -32,6 +32,12 @@ import { supabase } from "@/config/SupabaseConfig";
 import { PUEDE_COMPRAR_EN_APP } from "@/config/appStoreCompliance";
 import { useDriverNavBottomPad, useIsDriverUser } from "@/components/DriverBottomNav";
 import { collectDriverIdCandidates, preferredConductorId } from "@/common/utils/driverIds";
+import {
+  findActiveMembership,
+  findCurrentMembership,
+  membershipDaysRemaining,
+  resolveMembershipDisplayStatus,
+} from "@/common/utils/membershipStatus";
 
 type Props = NativeStackScreenProps<any>;
 
@@ -79,18 +85,14 @@ const WalletDetails = ({ navigation }: Props) => {
     if (user?.id) {
       dispatch(fetchWalletHistory(user?.id));
     }
-    if (driverConductorId) {
-      // Un único fetch con el id canónico (igual que index.tsx). Disparar uno
-      // por cada candidato sobrescribe state.memberships y borra la membresía
-      // activa cuando el último candidato no tiene filas.
-      dispatch(fetchMemberships(driverConductorId));
-    }
-  }, [dispatch, user?.id, driverConductorId]);
+  }, [dispatch, user?.id]);
 
-  // 🔄 Configurar Realtime listener solo cuando la pantalla está enfocada
+  // 🔄 Al enfocar: refetch + realtime (así un cambio en admin se ve al volver a Billetera)
   useFocusEffect(
     React.useCallback(() => {
       if (!driverConductorId) return;
+
+      dispatch(fetchMemberships(driverConductorId));
 
       const channel = supabase
         .channel(`memberships-${driverConductorId}`)
@@ -186,87 +188,43 @@ const WalletDetails = ({ navigation }: Props) => {
     ).start();
   }, [glow1, glow2, glow3, shineAnim]);
 
-  const calculateDaysRemaining = (endDate: string | Date | undefined) => {
-    if (!endDate) return 0;
-    try {
-      const end = typeof endDate === 'string' ? new Date(endDate) : endDate;
-      return differenceInDays(end, new Date());
-    } catch (e) {
-      console.error('Error calculando días restantes:', e);
-      return 0;
-    }
-  };
-
-  // 🎯 Filtrar por candidatos de conductor para no confundir membresías de otro id
-  // (fetchMemberships sobrescribe state.memberships con el último candidato consultado).
-  const activeMembership = useMemo(() => {
-    if (!memberships || memberships.length === 0) return null;
+  // Misma regla que el admin: membresía actual = la más reciente (created_at).
+  // Antes se prefería cualquier ACTIVA vieja y no se veía el cambio a VENCIDA.
+  const myMemberships = useMemo(() => {
+    if (!memberships || memberships.length === 0) return [];
     const mine = memberships.filter((m: any) =>
       driverIdCandidates.includes(String(m.conductor))
     );
-    const list = mine.length > 0 ? mine : memberships;
-    return (
-      list.find((m: any) => m?.status?.toString().toUpperCase() === 'ACTIVA') ||
-      list[0] ||
-      null
-    );
+    return mine.length > 0 ? mine : memberships;
   }, [memberships, driverIdCandidates]);
 
+  const activeMembership = useMemo(
+    () => findCurrentMembership(myMemberships),
+    [myMemberships],
+  );
+  const hasValidActive = useMemo(
+    () => !!findActiveMembership(myMemberships),
+    [myMemberships],
+  );
+
   const daysRemaining = useMemo(
-    () =>
-      activeMembership
-        ? calculateDaysRemaining(activeMembership.fecha_terminada)
-        : 0,
-    [activeMembership]
+    () => membershipDaysRemaining(activeMembership),
+    [activeMembership],
   );
 
   const walletBalance = user?.walletBalance || 0;
   const hasHistory = Array.isArray(walletHistory) && walletHistory.length > 0;
 
-  // 🟢 Memoizar el estado de membresía
   const { membershipStatus, expiryDate, startDate } = useMemo(() => {
-    let status = "Sin datos";
-    let isActive = false;
-
-    if (activeMembership) {
-      const estado = activeMembership.status?.toUpperCase();
-
-      if (estado === 'ACTIVA' && daysRemaining > 0) {
-        status = "ACTIVA";
-        isActive = true;
-      } else if (estado === 'ACTIVA' && daysRemaining <= 0) {
-        status = "VENCIDA";
-      } else if (estado === 'PENDIENTE') {
-        status = "PENDIENTE";
-      } else if (estado === 'CANCELADA') {
-        status = "CANCELADA";
-      } else {
-        status = `${estado}`;
-      }
-    }
-
+    const status = resolveMembershipDisplayStatus(activeMembership);
     const expiry = activeMembership?.fecha_terminada
       ? format(new Date(activeMembership.fecha_terminada), "dd/MM/yyyy")
       : "-- / --";
-
     const start = activeMembership?.fecha_inicio
       ? format(new Date(activeMembership.fecha_inicio), "dd/MM/yyyy")
       : "-- / --";
-
-    const renewal = activeMembership && daysRemaining > 0
-      ? `Te quedan ${daysRemaining} ${daysRemaining === 1 ? 'día' : 'días'} de membresía`
-      : activeMembership?.status === 'PENDIENTE'
-      ? "Tu membresía está pendiente de activación"
-      : "No tienes membresía registrada. Adquiere una para poder aceptar servicios.";
-
-    return {
-      membershipStatus: status,
-      isMembershipActive: isActive,
-      expiryDate: expiry,
-      startDate: start,
-      renewalText: renewal,
-    };
-  }, [activeMembership, daysRemaining]);
+    return { membershipStatus: status, expiryDate: expiry, startDate: start };
+  }, [activeMembership]);
 
   const [cardSize, setCardSize] = useState({ width: 0, height: 0 });
 
@@ -504,7 +462,7 @@ const WalletDetails = ({ navigation }: Props) => {
           </View>
         </View>
 
-        {activeMembership ? (
+        {hasValidActive ? (
           <View style={styles.supportBannerHighlight}>
             <View style={styles.supportBannerContent}>
               <Text style={styles.supportBannerTitle}>¡Ya eres miembro!</Text>

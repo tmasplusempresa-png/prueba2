@@ -282,6 +282,175 @@ export const reportSettlement = (bookingId: string, action: SettlementAction, no
     p_nota: note ?? null,
   });
 
+/** Detalle de un viaje recomendado para el solicitante o el conductor que lo hizo. */
+export interface RecommendedTripDetail {
+  id: string;
+  role: 'solicitante' | 'conductor';
+  reference: string | null;
+  status: string;
+  bookingType: string | null;
+  bookingDate: string | null;
+  createdAt: string | null;
+  carType: string | null;
+  pickup: { address: string; lat: number | null; lng: number | null };
+  drop: { address: string; lat: number | null; lng: number | null };
+  distanceKm: number | null;
+  durationMin: number | null;
+  observations: string | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  driverName: string | null;
+  driverPhone: string | null;
+  driverImage: string | null;
+  plate: string | null;
+  vehicle: string | null;
+  arrivedAt: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  finalPrice: number | null;
+  requesterName: string;
+  requesterPhone: string | null;
+  fareSource: 'recomendada' | 'manual';
+  fareMin: number;
+  fareMax: number;
+  /** Solo para el solicitante. */
+  agreedValue: number | null;
+  settlement: (Settlement & { receivedReportedAt: string | null }) | null;
+  support: {
+    requestedAt: string;
+    requestedBy: string | null;
+    mine: boolean;
+    note: string | null;
+    attendedAt: string | null;
+    response: string | null;
+    /** Solo el admin cierra el hilo; mientras sea null se puede seguir escribiendo. */
+    closedAt: string | null;
+    messages: { id: number; role: 'conductor' | 'admin'; body: string; createdAt: string; mine: boolean }[];
+  } | null;
+  route: { latitude: number; longitude: number }[];
+  events: { type: string; createdAt: string; note: string | null }[];
+  /** Métodos del conductor que hizo el viaje (para que el solicitante sepa cómo pagarle). */
+  receiverPaymentMethods: {
+    efectivo: boolean;
+    daviplata: boolean;
+    daviplataNumero: string | null;
+    nequi: boolean;
+    nequiNumero: string | null;
+    nequiBreb: string | null;
+  } | null;
+}
+
+export const fetchRecommendedTripDetail = async (bookingId: string, signal?: AbortSignal): Promise<RecommendedTripDetail> => {
+  const d = await rpc<any>('app_recomendacion_detalle', { p_reserva: bookingId }, signal);
+  const s = d.settlement;
+  return {
+    id: String(d.id ?? bookingId),
+    role: d.role,
+    reference: d.reference ?? null,
+    status: String(d.status ?? ''),
+    bookingType: d.booking_type ?? null,
+    bookingDate: d.booking_date ?? null,
+    createdAt: d.created_at ?? null,
+    carType: d.car_type ?? null,
+    pickup: { address: d.pickup_address ?? '', lat: num(d.pickup_lat), lng: num(d.pickup_lng) },
+    drop: { address: d.drop_address ?? '', lat: num(d.drop_lat), lng: num(d.drop_lng) },
+    distanceKm: num(d.distance),
+    durationMin: d.duration == null ? null : Math.round(Number(d.duration) / 60),
+    observations: d.observations ?? null,
+    customerName: d.customer_name ?? null,
+    customerPhone: d.customer_contact ?? null,
+    driverName: d.driver_name ?? null,
+    driverPhone: d.driver_contact ?? null,
+    driverImage: d.driver_image ?? null,
+    plate: d.plate_number ?? null,
+    vehicle: [d.vehicle_make, d.vehicle_color].filter(Boolean).join(' · ') || null,
+    arrivedAt: d.driver_arrived_time ?? null,
+    startedAt: d.trip_start_time ?? null,
+    endedAt: d.trip_end_time ?? null,
+    finalPrice: num(d.final_price),
+    requesterName: d.requester_name || 'Conductor',
+    requesterPhone: d.requester_contact ?? null,
+    fareSource: d.fare_source,
+    fareMin: Number(d.fare_min || 0),
+    fareMax: Number(d.fare_max || 0),
+    agreedValue: num(d.agreed_value),
+    settlement: s
+      ? {
+          status: s.status,
+          amount: Number(s.amount ?? 0),
+          dueAt: s.due_at,
+          overdue: s.overdue === true,
+          paidReportedAt: s.paid_reported_at ?? null,
+          received: s.received ?? null,
+          receivedReportedAt: s.received_reported_at ?? null,
+          resolution: s.resolution ?? null,
+          resolutionNote: s.resolution_note ?? null,
+        }
+      : null,
+    support: d.support
+      ? {
+          requestedAt: d.support.requested_at,
+          requestedBy: d.support.requested_by ?? null,
+          mine: d.support.mine === true,
+          note: d.support.note ?? null,
+          attendedAt: d.support.attended_at ?? null,
+          response: d.support.response ?? null,
+          closedAt: d.support.closed_at ?? null,
+          messages: (Array.isArray(d.support.messages) ? d.support.messages : []).map((m: any) => ({
+            id: Number(m.id),
+            role: m.role === 'admin' ? 'admin' as const : 'conductor' as const,
+            body: String(m.body ?? ''),
+            createdAt: m.created_at,
+            mine: m.mine === true,
+          })),
+        }
+      : null,
+    route: (Array.isArray(d.route) ? d.route : [])
+      .map((p: any) => ({ latitude: Number(p.lat), longitude: Number(p.lng) }))
+      .filter((p: { latitude: number; longitude: number }) => Number.isFinite(p.latitude) && Number.isFinite(p.longitude)),
+    events: (Array.isArray(d.events) ? d.events : []).map((e: any) => ({
+      type: e.type,
+      createdAt: e.created_at,
+      note: e.note ?? null,
+    })),
+    receiverPaymentMethods: d.receiver_payment_methods
+      ? {
+          efectivo: d.receiver_payment_methods.efectivo === true,
+          daviplata: d.receiver_payment_methods.daviplata === true,
+          daviplataNumero: d.receiver_payment_methods.daviplata_numero ?? null,
+          nequi: d.receiver_payment_methods.nequi === true,
+          nequiNumero: d.receiver_payment_methods.nequi_numero ?? null,
+          nequiBreb: d.receiver_payment_methods.nequi_breb ?? null,
+        }
+      : null,
+  };
+};
+
+export const reportRecommendationSupport = (bookingId: string, note: string) =>
+  rpc('app_recomendacion_reportar_soporte', { p_reserva: bookingId, p_nota: note });
+
+const FINISHED_TRIP_STATUSES = ['COMPLETE', 'PAID', 'CANCELLED'];
+const OPEN_SETTLEMENT_STATUSES: SettlementStatus[] = ['pendiente', 'pago_reportado', 'en_disputa'];
+
+/** Contadores para el GO: viajes pedidos en curso y completados con el pago entre conductores sin cerrar. */
+export const countOpenRequests = (requests: RecommendedRequest[]) => ({
+  active: requests.filter((r) => !FINISHED_TRIP_STATUSES.includes(String(r.status).toUpperCase())).length,
+  unpaid: requests.filter((r) => r.settlement && OPEN_SETTLEMENT_STATUSES.includes(r.settlement.status)).length,
+});
+
+export const RECOMMENDATION_EVENT_LABELS: Record<string, string> = {
+  creada: 'Viaje solicitado',
+  cancelada: 'Viaje cancelado',
+  liquidacion_abierta: 'Viaje completado: empieza el plazo de 24 h para pagar',
+  monto_actualizado: 'Valor final ajustado',
+  pago_reportado: 'El solicitante reportó el pago',
+  pago_recibido: 'El conductor confirmó que recibió el pago',
+  pago_no_recibido: 'El conductor reportó que no recibió el pago',
+  resuelta: 'Soporte resolvió la liquidación',
+  soporte_reportado: 'Mensaje enviado a soporte',
+  soporte_atendido: 'Soporte respondió o cerró el caso',
+};
+
 export const SETTLEMENT_LABELS: Record<SettlementStatus, string> = {
   pendiente: 'Pendiente de pago',
   pago_reportado: 'Pago reportado',

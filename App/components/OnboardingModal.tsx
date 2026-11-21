@@ -57,6 +57,13 @@ const DRIVER_STAGES: Stage[] = [
     stepKeys: ['id_front', 'id_back', 'license_front', 'license_back', 'soat', 'card_front', 'card_back'],
   },
   { key: 'vehiculo', label: 'Vehículo', target: 'CarsEdit', button: 'Agregar vehículo', stepKeys: ['vehicle'] },
+  {
+    key: 'pago',
+    label: 'Pago',
+    target: 'DriverPaymentMethods',
+    button: 'Configurar DaviPlata',
+    stepKeys: ['daviplata'],
+  },
 ];
 
 const CUSTOMER_STAGES: Stage[] = [
@@ -188,7 +195,7 @@ const OnboardingModal: React.FC = () => {
   const closeLabel = isCustomer ? 'Ahora no' : 'Más tarde';
   const title = isCustomer ? 'Ayúdanos a mejorar la seguridad' : 'Completa tu registro';
   const subtitle = isDriver
-    ? 'Para poder aceptar servicios necesitas completar tu registro.'
+    ? `Te faltan ${pending} paso${pending === 1 ? '' : 's'} para aceptar solicitudes. Elige una sección abajo, revisa lo pendiente y pulsa el botón para completarlo.`
     : 'Verificar tu foto y tu cédula nos ayuda a proteger a pasajeros y conductores. Puedes pedir servicios sin completarlo.';
 
   return (
@@ -201,7 +208,7 @@ const OnboardingModal: React.FC = () => {
       <View style={[st.overlay, { backgroundColor: c.overlay }]}>
         <View style={[st.card, { backgroundColor: c.card, borderColor: c.border }]}>
           <Text maxFontSizeMultiplier={MAX_FONT_SCALE} style={[st.title, { color: c.title }]}>{title}</Text>
-          <Text maxFontSizeMultiplier={MAX_FONT_SCALE} style={[st.subtitle, { color: c.text }]}>{subtitle}</Text>
+          <Text maxFontSizeMultiplier={MAX_FONT_SCALE} style={[st.subtitle, { color: c.muted }]}>{subtitle}</Text>
 
           <View style={st.stagesRow}>
             {stages.map((stg) => {
@@ -314,41 +321,41 @@ const st = StyleSheet.create({
   overlay: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
   card: {
     width: '100%',
-    maxWidth: 420,
-    maxHeight: '85%',
-    borderRadius: 22,
+    maxWidth: 400,
+    maxHeight: '78%',
+    borderRadius: 20,
     borderWidth: 1,
-    padding: 20,
+    padding: 16,
   },
-  title: { fontSize: 20, fontWeight: '800', marginBottom: 6, flexShrink: 0 },
-  subtitle: { fontSize: 14, lineHeight: 20, marginBottom: 16 },
-  progressRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  progressText: { fontSize: 14, fontWeight: '700' },
-  progressPct: { fontSize: 14, fontWeight: '800' },
-  track: { height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 14 },
-  fill: { height: 8, borderRadius: 4 },
+  title: { fontSize: 18, fontWeight: '800', marginBottom: 4, flexShrink: 0 },
+  subtitle: { fontSize: 13, lineHeight: 18, fontWeight: '400', marginBottom: 12, opacity: 0.85 },
+  progressRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  progressText: { fontSize: 12, fontWeight: '600' },
+  progressPct: { fontSize: 12, fontWeight: '700' },
+  track: { height: 6, borderRadius: 3, overflow: 'hidden', marginBottom: 10 },
+  fill: { height: 6, borderRadius: 3 },
   list: { flexGrow: 0, flexShrink: 1 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    marginBottom: 8,
-    gap: 10,
-    minHeight: 44,
+    borderRadius: 10,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    marginBottom: 5,
+    gap: 8,
+    minHeight: 36,
     flexShrink: 0,
   },
-  rowLabel: { flex: 1, fontSize: 14, lineHeight: 20, fontWeight: '600' },
-  stagesRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
-  stage: { flex: 1, borderRadius: 12, borderWidth: 1.5, paddingVertical: 8, paddingHorizontal: 8 },
-  stageHead: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  stageLabel: { flex: 1, fontSize: 12, fontWeight: '800' },
-  stageState: { fontSize: 11, fontWeight: '700', marginTop: 4 },
-  stageCount: { fontSize: 11, fontWeight: '700', marginTop: 1 },
-  stageBtn: { borderRadius: 12, paddingVertical: 11, alignItems: 'center', marginTop: 4, flexShrink: 0 },
+  rowLabel: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: '400' },
+  stagesRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  stage: { flex: 1, borderRadius: 10, borderWidth: 1.5, paddingVertical: 6, paddingHorizontal: 6 },
+  stageHead: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  stageLabel: { flex: 1, fontSize: 11, fontWeight: '700' },
+  stageState: { fontSize: 10, fontWeight: '500', marginTop: 3 },
+  stageCount: { fontSize: 10, fontWeight: '500', marginTop: 1 },
+  stageBtn: { borderRadius: 12, paddingVertical: 11, alignItems: 'center', marginTop: 6, flexShrink: 0 },
   rowBtn: { borderRadius: 10, paddingVertical: 7, paddingHorizontal: 12 },
-  rowBtnText: { fontSize: 12, fontWeight: '800' },
+  rowBtnText: { fontSize: 13, fontWeight: '800' },
   supportBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -356,12 +363,12 @@ const st = StyleSheet.create({
     gap: 8,
     borderWidth: 1,
     borderRadius: 12,
-    paddingVertical: 11,
+    paddingVertical: 10,
     marginTop: 6,
   },
-  supportText: { fontSize: 14, fontWeight: '700' },
-  closeBtn: { alignItems: 'center', paddingTop: 12, paddingBottom: 2 },
-  closeText: { fontSize: 14, fontWeight: '700' },
+  supportText: { fontSize: 13, fontWeight: '600' },
+  closeBtn: { alignItems: 'center', paddingTop: 10, paddingBottom: 2 },
+  closeText: { fontSize: 13, fontWeight: '500' },
 });
 
 export default OnboardingModal;

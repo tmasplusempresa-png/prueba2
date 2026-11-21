@@ -332,7 +332,7 @@ const s = StyleSheet.create({
   loadingTxt: { fontSize: 14, color: 'rgba(255,255,255,0.5)' },
   emptyWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100, gap: 10 },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: 'rgba(255,255,255,0.7)' },
-  emptySub: { fontSize: 13, color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 40 },
+  emptySub: { fontSize: 13, fontWeight: '400', color: 'rgba(255,255,255,0.4)', textAlign: 'center', paddingHorizontal: 40 },
   card: {
     overflow: 'hidden', borderRadius: 20, padding: 18, marginBottom: 16,
     backgroundColor: 'rgba(10,46,61,0.55)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.14)',

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Image,
@@ -144,8 +144,11 @@ export default function DriverBottomNav({ state, navigation }: MaterialTopTabBar
     [active, navigation]
   );
 
+  const [connecting, setConnecting] = useState(false);
+  const connectGlow = useRef(new Animated.Value(0)).current;
+
   const onGoPress = useCallback(() => {
-    if (goLockRef.current) return;
+    if (goLockRef.current || connecting) return;
     goLockRef.current = true;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     Animated.sequence([
@@ -156,12 +159,27 @@ export default function DriverBottomNav({ state, navigation }: MaterialTopTabBar
       navigation.navigate('Map');
     }
     if (!driverOnline) {
+      setConnecting(true);
+      connectGlow.setValue(0);
+      const glowLoop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(connectGlow, { toValue: 1, duration: 650, useNativeDriver: true }),
+          Animated.timing(connectGlow, { toValue: 0, duration: 650, useNativeDriver: true }),
+        ]),
+      );
+      glowLoop.start();
       invokeDriverGoActivate();
+      setTimeout(() => {
+        glowLoop.stop();
+        setConnecting(false);
+        goLockRef.current = false;
+      }, 1600);
+      return;
     }
     setTimeout(() => {
       goLockRef.current = false;
     }, 1800);
-  }, [active, driverOnline, goCtrScale, navigation]);
+  }, [active, connecting, connectGlow, driverOnline, goCtrScale, navigation]);
 
   const bottomOffset = insets.bottom + 10;
 
@@ -247,6 +265,19 @@ export default function DriverBottomNav({ state, navigation }: MaterialTopTabBar
                     style={styles.goLogo}
                     resizeMode="contain"
                   />
+                ) : connecting ? (
+                  <Animated.Text
+                    {...FIXED_TEXT_PROPS}
+                    style={[
+                      styles.goText,
+                      styles.goTextConnecting,
+                      {
+                        opacity: connectGlow.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }),
+                      },
+                    ]}
+                  >
+                    …
+                  </Animated.Text>
                 ) : (
                   <Text {...FIXED_TEXT_PROPS} style={styles.goText}>GO</Text>
                 )}
@@ -389,6 +420,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '900',
     letterSpacing: 0.5,
+  },
+  goTextConnecting: {
+    fontSize: 22,
+    letterSpacing: 1,
   },
   navLbl: {
     fontSize: 10,

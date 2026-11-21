@@ -6,7 +6,7 @@
  * conductores aprobados con documentos incompletos.
  */
 
-export type OnboardingTarget = 'ImageGallery' | 'Docs' | 'CarsEdit';
+export type OnboardingTarget = 'ImageGallery' | 'Docs' | 'CarsEdit' | 'DriverPaymentMethods';
 
 export type OnboardingStep = {
   key: string;
@@ -50,11 +50,13 @@ export function mergeProfiles(
 /**
  * @param vehicleCount número de vehículos del conductor, o null si no se pudo
  *   consultar (se asume cumplido para no molestar por un fallo de red).
+ * @param daviplataOk true si ya tiene DaviPlata de 10 dígitos; null = no consultado (no bloquear).
  */
 export function buildOnboardingSteps(
   userType: string,
   p: OnboardingProfile,
   vehicleCount: number | null,
+  daviplataOk: boolean | null = null,
 ): OnboardingStep[] {
   const t = String(userType || '').trim().toLowerCase();
 
@@ -69,6 +71,12 @@ export function buildOnboardingSteps(
       { key: 'card_front', label: 'Tarjeta de propiedad (frente)', done: hasValue(p.card_prop_image), target: 'ImageGallery' },
       { key: 'card_back', label: 'Tarjeta de propiedad (reverso)', done: hasValue(p.card_prop_image_bk), target: 'ImageGallery' },
       { key: 'vehicle', label: 'Al menos un vehículo', done: vehicleCount == null ? true : vehicleCount > 0, target: 'CarsEdit' },
+      {
+        key: 'daviplata',
+        label: 'DaviPlata (método de pago)',
+        done: daviplataOk == null ? true : daviplataOk,
+        target: 'DriverPaymentMethods',
+      },
     ];
   }
 

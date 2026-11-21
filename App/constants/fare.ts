@@ -39,6 +39,7 @@ export const maxFromMinConductor = (minConductor: number): number =>
  * Rango unificado a mostrar en UI (conductor y cliente).
  * Cotización / en curso: min = trip_cost|driver_share, max = estimate|price.
  * COMPLETE: un solo valor (price|trip_cost|estimate).
+ * Recomendados: siempre un solo valor fijo (nunca rango ni máximo).
  */
 export function getBookingFareRange(booking: any): {
   min: number;
@@ -50,11 +51,23 @@ export function getBookingFareRange(booking: any): {
     status === 'COMPLETE' ||
     status === 'COMPLETED' ||
     status === 'PAID';
+  const payment = String(booking?.payment_mode || booking?.paymentMode || booking?.modo_pago || '').toLowerCase();
+  const recommended = payment === 'recomendado' || payment === 'recommended';
 
   const num = (v: any) => {
     const n = typeof v === 'string' ? parseFloat(v) : Number(v);
     return Number.isFinite(n) && n > 0 ? n : 0;
   };
+
+  if (recommended) {
+    // Precio fijo: trip_cost/driver_share (o price) — nunca estimate/max.
+    const fixed =
+      num(booking?.trip_cost) ||
+      num(booking?.driver_share) ||
+      num(booking?.price) ||
+      num(booking?.estimate);
+    return { min: fixed, max: fixed, isComplete: true };
+  }
 
   if (isComplete) {
     // Cierre: trip_cost / driver_share son la liquidación del conductor.

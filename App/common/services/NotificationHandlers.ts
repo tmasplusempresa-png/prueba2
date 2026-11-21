@@ -19,6 +19,8 @@ export interface NotificationData {
     | 'new-service-loop'   // driver: nueva reserva immediate — sonido en loop hasta aceptar
     | 'booking-scheduled'  // driver: servicio programado (reservation)
     | 'booking-taken'      // driver: otro conductor tomó el booking — silenciar loop
+    | 'recomendacion-pagador'  // driver: liquidación de un viaje que pidió para su cliente
+    | 'recomendacion-receptor' // driver: liquidación de un viaje recomendado que hizo
     | 'unknown';
   bookingId?: string;
   role?: 'driver' | 'customer';
@@ -82,6 +84,11 @@ export const handleNotificationResponse = async (
 
       case 'booking-scheduled':
         await handleBookingScheduledNotification(data, navigation);
+        break;
+
+      case 'recomendacion-pagador':
+      case 'recomendacion-receptor':
+        handleRecommendationSettlementNotification(data, navigation);
         break;
 
       case 'booking-taken':
@@ -233,6 +240,27 @@ const handleNewServiceLoopNotification = async (
   }, 500);
 
   console.log('[NotificationHandlers] Nuevo servicio (loop) — bookingId:', data.bookingId);
+};
+
+/**
+ * Liquidación de un viaje recomendado: abre Historial en "Solicitados por mí" (quien paga) o en
+ * "Completadas" (quien hizo el viaje y recibe el pago).
+ */
+const handleRecommendationSettlementNotification = (
+  data: NotificationData,
+  navigation: NavigationProp<any>,
+): void => {
+  const initialTab = data.type === 'recomendacion-pagador' ? 'requested' : 'completed';
+  setTimeout(() => {
+    try {
+      navigation.navigate('HomeScreen', {
+        screen: 'Historial',
+        params: { initialTab, openedAt: Date.now() },
+      });
+    } catch (error) {
+      console.warn('[NotificationHandlers] Error navegando al Historial:', error);
+    }
+  }, 500);
 };
 
 /**

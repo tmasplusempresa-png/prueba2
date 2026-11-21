@@ -34,6 +34,7 @@ import * as TaskManager from "expo-task-manager";
 import * as Location from "expo-location";
 import { fetchAndSyncUserRating, countCompletedTrips } from '@/common/utils/userRating';
 import { useMyCompanies } from '@/hooks/useMyCompanies';
+import { saveDriverOnlineStatus } from '@/common/services/driverStatusService';
 
 const emptyProfile = {
   firstName: null as string | null,
@@ -405,7 +406,7 @@ const ProfileScreen = ({ navigation }: Props) => {
       setLoading(true);
       if (user?.usertype === "driver") {
         await Promise.race([
-          stopBackgroundLocation(),
+          Promise.all([stopBackgroundLocation(), saveDriverOnlineStatus(false)]),
           new Promise<void>((_, reject) =>
             setTimeout(() => reject(new Error('timeout')), 5000)
           ),
@@ -501,6 +502,7 @@ const ProfileScreen = ({ navigation }: Props) => {
           { key: "carnet", label: "Carnet", icon: "card-outline", onPress: () => navigation.navigate("Carnet") },
           { key: "my-vehicles", label: "Mis Vehiculos", icon: "car-outline", onPress: () => navigation.navigate("CarsScreen") },
           { key: "insurance", label: "Aseguradora", icon: "shield-checkmark-outline", onPress: () => navigation.navigate("Insurance") },
+          { key: "payment-methods", label: "Mi método de pago", icon: "wallet-outline", onPress: () => navigation.navigate("DriverPaymentMethods") },
         ],
       });
       sections.push({
@@ -530,7 +532,7 @@ const ProfileScreen = ({ navigation }: Props) => {
       {
         title: "Soporte",
         items: [
-          { key: "chat", label: "Chat con tmasplus", icon: "chatbubble-ellipses-outline", onPress: () => navigation.navigate("Soporte") },
+          { key: "chat", label: "Chatea con TmasPlus", icon: "chatbubble-ellipses-outline", onPress: () => navigation.navigate("Soporte") },
           { key: "complaints", label: "Quejas y reclamos", icon: "help-buoy-outline", onPress: () => navigation.navigate("Complain") },
         ],
       },

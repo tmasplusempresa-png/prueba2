@@ -5,7 +5,7 @@ const MAX_ACTIVE_IMMEDIATE_TRIPS = 2;
 const ACTIVE_IMMEDIATE_STATUSES = ['PENDING', 'ACCEPTED', 'ARRIVED', 'STARTED', 'IN_PROGRESS', 'TRIP_STARTED', 'NEW'];
 import { roundPrice } from '../../hooks/roundPrice';
 import { FareCalculator } from '../../common/actions/FareCalculator';
-import { isNearAirport } from '../../common/utils/airports';
+import { isNearAirport, snapElDoradoDestination } from '../../common/utils/airports';
 import { DEFAULT_UMBRAL_INTERMUNICIPAL_KM } from '../../constants/fare';
 import { OtpService } from '../../common/services/OtpService';
 import { saveBooking } from '../../common/actions/saveBooking';
@@ -72,7 +72,10 @@ const BookingScreen = () => {
 
   // State declarations - initialize from route params
   const [origin, setOrigin] = useState<any>(route.params?.origin || null);
-  const [destination, setDestination] = useState<any>(route.params?.destination || null);
+  const [destination, setDestination] = useState<any>(() => {
+    const d = route.params?.destination || null;
+    return d ? snapElDoradoDestination(d) : null;
+  });
   const [distance, setDistance] = useState<number | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);

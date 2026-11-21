@@ -44,6 +44,7 @@ import ReservationsScreen from '../(tabs)/ReservationsScreen';
 import CreateReservationScreen from '../(tabs)/CreateReservationScreen';
 import DriverReservationsScreen from '../(tabs)/DriverReservationsScreen';
 import ReservationDetailScreen from '../(tabs)/ReservationDetailScreen';
+import RecommendedTripDetailScreen from '../(tabs)/RecommendedTripDetailScreen';
 import ReservationTripScreen from '../(tabs)/ReservationTripScreen';
 import CustomerActiveTripScreen from '../(tabs)/CustomerActiveTripScreen';
 import DriverActivityScreen from '../(tabs)/DriverActivityScreen';
@@ -52,6 +53,7 @@ import NotificationsScreen from '../(tabs)/NotificationsScreen';
 import PlateTrackingScreen from '../Booking/PlateTrackingScreen';
 import ChangePasswordScreen from '../(tabs)/ChangePasswordScreen';
 import DriverClientsScreen from '../(tabs)/DriverClientsScreen';
+import DriverPaymentMethodsScreen from '../(tabs)/DriverPaymentMethodsScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -112,6 +114,7 @@ const Navigation = () => {
           <Stack.Screen name="CreateReservation" component={CreateReservationScreen} />
           <Stack.Screen name="DriverReservations" component={DriverReservationsScreen} />
           <Stack.Screen name="ReservationDetail" component={ReservationDetailScreen} />
+          <Stack.Screen name="RecommendedTripDetail" component={RecommendedTripDetailScreen} />
           <Stack.Screen name="ReservationTrip" component={ReservationTripScreen} />
           <Stack.Screen name="CustomerActiveTrip" component={CustomerActiveTripScreen} />
           <Stack.Screen name="DriverActivity" component={DriverActivityScreen} />
@@ -121,6 +124,7 @@ const Navigation = () => {
           <Stack.Screen name="PlateTracking" component={PlateTrackingScreen} />
           <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
           <Stack.Screen name="DriverClients" component={DriverClientsScreen} />
+          <Stack.Screen name="DriverPaymentMethods" component={DriverPaymentMethodsScreen} />
         </Stack.Group>
       ) : (
         <Stack.Group screenOptions={{ headerShown: false }}>

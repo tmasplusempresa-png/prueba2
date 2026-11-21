@@ -377,25 +377,33 @@ export const addActualsToBooking = async (
 
     console.log('Tarifas calculadas:', { totalCost, grandTotal, convenience_fees });
 
-    // Aplicar el piso: el precio final del servicio nunca queda por debajo del
-    // mínimo cotizado. Si el recálculo real es mayor (viaje más largo), se
-    // cobra el recálculo; si es menor (viaje corto / no se llegó al destino),
-    // se cobra el mínimo cotizado.
-    // Viaje recomendado: el conductor que lo pidió fijó el rango con el cliente; el precio final no lo excede.
+    // Viaje recomendado: precio fijo acordado al pedir el servicio. Sin recálculo
+    // por km/tiempo: el estimado inicial es el mismo valor al finalizar.
     const recommended = isRecommendedPayment(booking.payment_mode ?? booking.paymentMode);
-    const quotedMaxFare = parseFloat(booking.estimate) || parseFloat(booking.price) || 0;
-    const finalCost = recommended && quotedMaxFare > 0
-      ? Math.min(Math.max(totalCost, quotedMinFare), Math.max(quotedMaxFare, quotedMinFare))
-      : Math.max(totalCost, quotedMinFare);
-    const floorApplied = finalCost > totalCost;
-    if (floorApplied) {
+    const quotedFixed =
+      quotedMinFare ||
+      parseFloat(booking.estimate) ||
+      parseFloat(booking.price) ||
+      0;
+
+    let finalCost: number;
+    let floorApplied = false;
+    if (recommended && quotedFixed > 0) {
+      finalCost = quotedFixed;
       console.log(
-        `[addActualsToBooking] Piso aplicado (conductor): recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`
+        `[addActualsToBooking] Recomendado: tarifa fija ${finalCost} (sin recálculo; km/tiempo real = ${totalCost}).`,
       );
+    } else {
+      // Aplicar el piso: el precio final nunca queda por debajo del mínimo cotizado.
+      finalCost = Math.max(totalCost, quotedMinFare);
+      floorApplied = finalCost > totalCost;
+      if (floorApplied) {
+        console.log(
+          `[addActualsToBooking] Piso aplicado (conductor): recalculado ${totalCost} < mínimo cotizado ${quotedMinFare}. Se cobra el mínimo cotizado ${finalCost}.`,
+        );
+      }
     }
 
-    // Precio al finalizar: mismo valor para cliente y conductor (sin margen
-    // de rango). El piso ya está en finalCost.
     const finalClientCost = finalCost;
 
     booking.drop = { add: booking.drop?.add, lat: booking.drop?.lat, lng: booking.drop?.lng };
@@ -404,9 +412,6 @@ export const addActualsToBooking = async (
     booking.price = finalClientCost;
     booking.estimate = finalClientCost;
     booking.distance = parseFloat(distance).toFixed(settings.decimal);
-    // Si se aplicó el piso, conservar la comisión cotizada originalmente para
-    // que el total tampoco baje; si el recálculo mandó, usar la recalculada.
-    // En recomendados no se suma comisión: el total es exactamente el rango acordado entre conductores.
     booking.convenience_fees = recommended
       ? (parseFloat(booking.convenience_fees) || 0)
       : floorApplied

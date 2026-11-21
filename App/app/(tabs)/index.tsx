@@ -22,14 +22,25 @@ import {
   Linking,
   FlatList,
   Animated,
+  Easing,
   InteractionManager,
+  PanResponder,
 } from "react-native";
 import { useSelector } from "react-redux";
 import { RootState } from "@/common/store";
 import { updateProfile } from "@/common/actions/authactions";
+import { saveDriverOnlineStatus } from "@/common/services/driverStatusService";
+import { RecommendationGoChip } from "@/components/RecommendationGoChip";
 import BookingsView from "@/components/BookingsView";
 import { startDriverLocationTracking } from "@/common/services/driverLocationTask";
-import { isOnboardingBlockingOtherAlerts, subscribeOnboardingState, evaluateAcceptGate, isDriverRegistrationIncomplete, requestOnboardingModal } from "@/common/services/onboardingGate";
+import {
+  isOnboardingBlockingOtherAlerts,
+  subscribeOnboardingState,
+  evaluateAcceptGate,
+  isDriverRegistrationIncomplete,
+  requestOnboardingModal,
+  getOnboardingSnapshot,
+} from "@/common/services/onboardingGate";
 import {
   acceptBooking,
   listenForNewBookings,
@@ -79,6 +90,7 @@ import { ensureDriverGoPermissions, openAppSettings } from '@/common/utils/drive
 import { FIXED_TEXT_PROPS } from '@/common/utils/typography';
 import { collectDriverIdCandidates, preferredConductorId } from '@/common/utils/driverIds';
 import { useDriverNavBottomPad } from '@/components/DriverBottomNav';
+import { findActiveMembership } from '@/common/utils/membershipStatus';
 
 const tourImage = require("../../assets/images/icon.png");
 
@@ -86,7 +98,7 @@ const tourImage = require("../../assets/images/icon.png");
 // in the current app session. Reset on app reload (i.e. on next login).
 const driversShownRenewalReminder = new Set<string>();
 
-/** Puntos animados para "Buscando servicios..." */
+/** Puntos animados para "Buscando solicitudes..." */
 function SearchingServicesLabel({ style }: { style?: object }) {
   const [dots, setDots] = useState('');
   useEffect(() => {
@@ -99,7 +111,7 @@ function SearchingServicesLabel({ style }: { style?: object }) {
   }, []);
   return (
     <Text style={style}>
-      Buscando servicios
+      Buscando solicitudes
       <Text style={{ color: '#00E5FF' }}>{dots || ''}</Text>
     </Text>
   );
@@ -162,6 +174,10 @@ const calculateImmediateDistanceKm = (lat1: number, lng1: number, lat2: number, 
 
 
 const MapScreen = () => {
+  // supabase.channel(nombre) devuelve el canal ya suscrito si el nombre se repite, y agregarle .on() lanza error.
+  // Esta pantalla puede montarse dos veces a la vez (p. ej. al navegar al Historial), así que cada montaje usa
+  // nombres propios.
+  const channelSuffix = useRef(Math.random().toString(36).slice(2, 8)).current;
   const topBarOffset = useHeaderTopPadding(4, 50);
   const scrollTopPadding = useHeaderTopPadding(12, 60);
   const dispatch = useAppDispatch();
@@ -418,7 +434,7 @@ const MapScreen = () => {
   useEffect(() => {
     if (!user?.id) return;
     const channel = supabase
-      .channel(`balance-bookings-${user.id}`)
+      .channel(`balance-bookings-${user.id}-${channelSuffix}`)
       .on(
         'postgres_changes' as any,
         { event: '*', schema: 'public', table: 'reserva', filter: `id_conductor=eq.${user.id}` },
@@ -426,7 +442,7 @@ const MapScreen = () => {
       )
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [user?.id]);
+  }, [user?.id, channelSuffix]);
 
   useEffect(() => {
     let isMounted = true;
@@ -549,12 +565,11 @@ const MapScreen = () => {
     }
   }, [dispatch, driverConductorId]);
 
-  // El API ya filtra por conductor; basta con detectar una membresía con status ACTIVA y vigente.
-  const activeMembership = memberships.find((membership) => {
-    if (membership?.status?.toString().toUpperCase() !== "ACTIVA") return false;
-    if (!membership?.fecha_terminada) return true;
-    return differenceInDays(new Date(membership.fecha_terminada), new Date()) >= 0;
-  });
+  // Misma regla que admin/billetera: solo la membresía más reciente cuenta como vigente.
+  const activeMembership = useMemo(
+    () => findActiveMembership(memberships),
+    [memberships],
+  );
 
   useEffect(() => {
     console.log('[Membership] check', {
@@ -709,7 +724,7 @@ const MapScreen = () => {
 
     // Realtime: nuevas reservas y cambios de estado
     const channel = supabase
-      .channel('index-new-bookings')
+      .channel(`index-new-bookings-${channelSuffix}`)
       .on(
         'postgres_changes' as any,
         { event: 'INSERT', schema: 'public', table: 'reserva', filter: 'estado=eq.NEW' },
@@ -736,7 +751,7 @@ const MapScreen = () => {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [user?.carType, user?.location]);
+  }, [user?.carType, user?.location, channelSuffix]);
   
   // Funci�n para calcular distancia en metros
   const getDistanceFromLatLonInMeters = (
@@ -989,6 +1004,9 @@ const MapScreen = () => {
   const [driverOnline, setDriverOnline] = useState(
     Boolean(profile?.driver_active_status || user?.driver_active_status || user?.driverActiveStatus)
   );
+  const [goConnecting, setGoConnecting] = useState(false);
+  const goConnectAnim = useRef(new Animated.Value(0)).current;
+  const goConnectPulse = useRef(new Animated.Value(0)).current;
   const [showIncomingRequest, setShowIncomingRequest] = useState(false);
   const [showNovedades, setShowNovedades] = useState(false);
   const [showDriverServicesModal, setShowDriverServicesModal] = useState(false);
@@ -1006,13 +1024,104 @@ const MapScreen = () => {
   // necesite el modal de solicitud entrante, una vez descartado el GL.
   const ENABLE_DRIVER_MAP_RESERVATIONS = false;
   const [driverReservationsMinimized, setDriverReservationsMinimized] = useState(false);
+  const [registrationIncomplete, setRegistrationIncomplete] = useState(false);
+  const [registrationPending, setRegistrationPending] = useState(0);
   const goToggleLockRef = useRef(false);
   const mapSensorRef = useRef<MapSensorHandle>(null);
   const [mapViewMode, setMapViewMode] = useState<MapViewMode>('2D');
   const [mapTheme, setMapTheme] = useState<GoogleMapTheme>('dark');
   const [mapBearing, setMapBearing] = useState(0);
   const { bookings: activeTripBookings, hasActiveTrip } = useActiveTripBanner();
-  const driverReservationsExpandedHeight = Math.max(300, Math.round(screenHeight * 0.52));
+  // Sheet expandido: llega justo debajo de HOY + campana.
+  const driverReservationsExpandedHeight = Math.max(
+    340,
+    Math.round(screenHeight - topBarOffset - 64 - (driverNavBottomPad - 12) - 10),
+  );
+  const sheetCollapsedH = 108;
+  // Misma altura lógica que el padding del mapa (el aviso de registro flota fuera del sheet).
+  const sheetExpandedH = Math.max(300, driverReservationsExpandedHeight - (registrationIncomplete ? 76 : 0));
+  const sheetHeightAnim = useRef(new Animated.Value(sheetExpandedH)).current;
+  const sheetDragStartRef = useRef(sheetExpandedH);
+  const sheetCollapsedHRef = useRef(sheetCollapsedH);
+  const sheetExpandedHRef = useRef(sheetExpandedH);
+  sheetCollapsedHRef.current = sheetCollapsedH;
+  sheetExpandedHRef.current = sheetExpandedH;
+  const mapControlsAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    const sync = () => {
+      setRegistrationIncomplete(isDriverRegistrationIncomplete());
+      setRegistrationPending(getOnboardingSnapshot().pending || 0);
+    };
+    sync();
+    return subscribeOnboardingState(sync);
+  }, []);
+
+  useEffect(() => {
+    if (!isDriverView || !driverOnline) {
+      Animated.timing(mapControlsAnim, { toValue: 1, duration: 220, useNativeDriver: true }).start();
+      return;
+    }
+    Animated.timing(mapControlsAnim, {
+      toValue: driverReservationsMinimized ? 1 : 0,
+      duration: 280,
+      useNativeDriver: true,
+    }).start();
+  }, [isDriverView, driverOnline, driverReservationsMinimized, mapControlsAnim]);
+
+  const springSheetTo = useCallback((minimize: boolean) => {
+    setDriverReservationsMinimized(minimize);
+    Animated.spring(sheetHeightAnim, {
+      toValue: minimize ? sheetCollapsedHRef.current : sheetExpandedHRef.current,
+      useNativeDriver: false,
+      friction: 12,
+      tension: 64,
+      overshootClamping: true,
+    }).start();
+  }, [sheetHeightAnim]);
+
+  useEffect(() => {
+    Animated.spring(sheetHeightAnim, {
+      toValue: driverReservationsMinimized ? sheetCollapsedH : sheetExpandedH,
+      useNativeDriver: false,
+      friction: 12,
+      tension: 64,
+      overshootClamping: true,
+    }).start();
+  }, [driverReservationsMinimized, sheetCollapsedH, sheetExpandedH, sheetHeightAnim]);
+
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onStartShouldSetPanResponderCapture: () => true,
+        onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
+        onMoveShouldSetPanResponderCapture: (_, g) => Math.abs(g.dy) > 2,
+        onPanResponderTerminationRequest: () => false,
+        onShouldBlockNativeResponder: () => true,
+        onPanResponderGrant: () => {
+          sheetHeightAnim.stopAnimation((v) => {
+            sheetDragStartRef.current = v;
+          });
+        },
+        onPanResponderMove: (_, g) => {
+          const next = Math.min(
+            sheetExpandedHRef.current,
+            Math.max(sheetCollapsedHRef.current, sheetDragStartRef.current - g.dy),
+          );
+          sheetHeightAnim.setValue(next);
+        },
+        onPanResponderRelease: (_, g) => {
+          sheetHeightAnim.stopAnimation((v) => {
+            const mid = (sheetExpandedHRef.current + sheetCollapsedHRef.current) / 2;
+            const minimize =
+              g.vy > 0.35 || (Math.abs(g.vy) < 0.35 && v < mid) || g.dy > 48;
+            springSheetTo(minimize);
+          });
+        },
+      }),
+    [sheetHeightAnim, springSheetTo],
+  );
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertType, setAlertType] = useState<'success' | 'error' | 'warning' | 'info' | 'confirm'>('error');
   const [alertTitle, setAlertTitle] = useState('');
@@ -1493,12 +1602,35 @@ const MapScreen = () => {
         showAlert('warning', perm.title, perm.message, buttons);
         return;
       }
+
+      // Overlay suave «Conectando GO» antes de pasar a online
+      goToggleLockRef.current = true;
+      setGoConnecting(true);
+      goConnectAnim.setValue(0);
+      goConnectPulse.setValue(0);
+      const pulseLoop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(goConnectPulse, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+          Animated.timing(goConnectPulse, { toValue: 0, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+        ]),
+      );
+      pulseLoop.start();
+      Animated.timing(goConnectAnim, {
+        toValue: 1,
+        duration: 480,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      }).start();
+      await new Promise((r) => setTimeout(r, 900));
+      pulseLoop.stop();
+      setGoConnecting(false);
     }
 
     goToggleLockRef.current = true;
 
     setDriverOnline(newStatus);
     dispatch(updateUserProfile({ driver_active_status: newStatus }));
+    void saveDriverOnlineStatus(newStatus);
     setDriverReservationsMinimized(!newStatus);
     setShowIncomingRequest(false);
     setShowNovedades(false);
@@ -1581,7 +1713,7 @@ const MapScreen = () => {
     if (!userId) return;
 
     const channel = supabase
-      .channel(`user-profile-${userId}`)
+      .channel(`user-profile-${userId}-${channelSuffix}`)
       .on(
         'postgres_changes' as any,
         { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
@@ -1596,7 +1728,7 @@ const MapScreen = () => {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [dispatch, user]);
+  }, [dispatch, user, channelSuffix]);
 
   const takePhoto = async (variable: "profile" | "verifyId") => {
     // El boton vive dentro de un <Modal>; en iOS hay que cerrarlo antes o la
@@ -2642,19 +2774,26 @@ const MapScreen = () => {
     return count * 118;
   }, [driverOnline, hasActiveTrip, activeTripBookings.length]);
 
+  const registrationBannerH = registrationIncomplete ? 76 : 0;
+  // Altura “lógica” del sheet para padding del mapa (el arrastre visual usa sheetHeightAnim).
+  const driverSheetHeight = driverReservationsMinimized
+    ? sheetCollapsedH
+    : Math.max(300, driverReservationsExpandedHeight - registrationBannerH);
+
   const driverServicesPanelHeight = useMemo(() => {
     if (!isDriverView || showNovedades) return 0;
     if (driverOnline) {
-      return driverReservationsMinimized ? 108 : driverReservationsExpandedHeight;
+      return driverSheetHeight + (registrationIncomplete ? registrationBannerH + 8 : 0);
     }
-    return driverOfflinePanelHeight + offlineActiveBannerExtra;
+    return driverOfflinePanelHeight + offlineActiveBannerExtra + (registrationIncomplete ? registrationBannerH + 8 : 0);
   }, [
     isDriverView,
     showNovedades,
     driverOnline,
-    driverReservationsMinimized,
-    driverReservationsExpandedHeight,
+    driverSheetHeight,
     offlineActiveBannerExtra,
+    registrationIncomplete,
+    registrationBannerH,
   ]);
 
   const mapBottomPadding = isDriverView
@@ -2687,7 +2826,19 @@ const MapScreen = () => {
               />
             )}
             {isDriverView && (
-              <View pointerEvents="box-none" style={[nS.driverMapZoomControls, { bottom: mapControlsBottom }]}>
+              <Animated.View
+                pointerEvents={driverOnline && !driverReservationsMinimized ? 'none' : 'box-none'}
+                style={[
+                  nS.driverMapZoomControls,
+                  {
+                    bottom: mapControlsBottom,
+                    opacity: mapControlsAnim,
+                    transform: [{
+                      translateY: mapControlsAnim.interpolate({ inputRange: [0, 1], outputRange: [18, 0] }),
+                    }],
+                  },
+                ]}
+              >
                 <TouchableOpacity
                   style={nS.driverMapCtrlBtn}
                   activeOpacity={0.85}
@@ -2702,10 +2853,23 @@ const MapScreen = () => {
                 >
                   <Ionicons name="remove" size={22} color="#00E5FF" />
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             )}
             {isDriverView && (
-              <View pointerEvents="box-none" style={[nS.driverMapControls, { bottom: mapControlsBottom }]}>
+              <Animated.View
+                pointerEvents={driverOnline && !driverReservationsMinimized ? 'none' : 'box-none'}
+                style={[
+                  nS.driverMapControls,
+                  {
+                    bottom: mapControlsBottom,
+                    opacity: mapControlsAnim,
+                    transform: [{
+                      translateY: mapControlsAnim.interpolate({ inputRange: [0, 1], outputRange: [18, 0] }),
+                    }],
+                  },
+                ]}
+              >
+                {/* Día / noche — comentado a pedido (no eliminar).
                 <TouchableOpacity
                   style={nS.driverMapCtrlBtn}
                   activeOpacity={0.85}
@@ -2717,6 +2881,7 @@ const MapScreen = () => {
                     color="#00E5FF"
                   />
                 </TouchableOpacity>
+                */}
                 <TouchableOpacity
                   style={nS.driverMapCtrlBtn}
                   activeOpacity={0.85}
@@ -2742,13 +2907,15 @@ const MapScreen = () => {
                 >
                   <Ionicons name="locate" size={20} color="#00E5FF" />
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             )}
             <View style={[nS.driverTopBar, { top: topBarOffset }]}>
               <View style={nS.driverEarningsPill}>
                 <Text style={nS.driverEarningsLabel}>Hoy</Text>
                 <Text style={nS.driverEarningsAmount}>$ {Number(balance || 0).toLocaleString('es-CO')}</Text>
               </View>
+
+              <RecommendationGoChip navigation={navigation} />
 
               <TouchableOpacity
                 style={nS.driverNotifBtn}
@@ -2816,34 +2983,91 @@ const MapScreen = () => {
               </View>
             )}
 
-            {!showNovedades && !driverOnline && (
+            {!showNovedades && (!driverOnline || goConnecting) && (
               <View style={[nS.driverOfflineStack, { bottom: driverNavBottomPad - 12 }]}>
                 <ActiveTripBannerStack
                   stackNavigation={navigation}
                   maxItems={4}
                   tripFilter="all"
                 />
-                <View style={nS.driverMiniPanel}>
-                  <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={nS.driverMiniPanelTitle}>Conductor desconectado</Text>
-                  <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverMiniPanelSub}>Activa GO para iniciar</Text>
-
+                {registrationIncomplete && !goConnecting ? (
                   <TouchableOpacity
-                    style={nS.driverReservasBtn}
-                    activeOpacity={0.82}
-                    onPress={() =>
-                      navigation.navigate('DriverReservations' as never, { initialTab: 'reservations' } as never)
-                    }
+                    style={nS.registrationWarnBanner}
+                    activeOpacity={0.88}
+                    onPress={() => requestOnboardingModal()}
                   >
-                    <View style={nS.driverReservasBtnIcon}>
-                      <Ionicons name="calendar-outline" size={22} color="#051A26" />
+                    <View style={nS.registrationWarnIcon}>
+                      <Ionicons name="warning" size={18} color="#8A6A00" />
                     </View>
-                    <View style={nS.driverReservasBtnTextWrap}>
-                      <Text style={nS.driverReservasBtnTitle}>Reservas Disponibles</Text>
-                      <Text style={nS.driverReservasBtnSub}>Ver y aceptar reservas de clientes</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={nS.registrationWarnTitle}>Resuelve estos problemas primero</Text>
+                      <Text style={nS.registrationWarnSub} numberOfLines={2}>
+                        Completa tu registro ({registrationPending} pendiente{registrationPending === 1 ? '' : 's'}) para poder aceptar solicitudes.
+                      </Text>
                     </View>
-                    <Ionicons name="chevron-forward" size={20} color="rgba(0,229,255,0.7)" />
+                    <Ionicons name="chevron-forward" size={18} color="#8A6A00" />
                   </TouchableOpacity>
-                </View>
+                ) : null}
+                <Animated.View
+                  style={[
+                    nS.driverMiniPanel,
+                    goConnecting && {
+                      opacity: goConnectAnim.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }),
+                      shadowColor: '#00E5FF',
+                      shadowOpacity: goConnectPulse.interpolate({ inputRange: [0, 1], outputRange: [0.25, 0.7] }) as any,
+                      shadowRadius: 16,
+                      shadowOffset: { width: 0, height: 0 },
+                      elevation: 10,
+                      borderColor: 'rgba(0,229,255,0.55)',
+                    },
+                  ]}
+                >
+                  {goConnecting ? (
+                    <>
+                      <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={[nS.driverMiniPanelTitle, { color: '#00E5FF' }]}>
+                        Conectando GO
+                      </Text>
+                      <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverMiniPanelSub}>
+                        Preparando ubicación y notificaciones…
+                      </Text>
+                      <View style={nS.goConnectingBarTrack}>
+                        <Animated.View
+                          style={[
+                            nS.goConnectingBarFill,
+                            {
+                              width: goConnectAnim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: ['18%', '100%'],
+                              }),
+                            },
+                          ]}
+                        />
+                      </View>
+                    </>
+                  ) : (
+                    <>
+                      <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={nS.driverMiniPanelTitle}>Conductor desconectado</Text>
+                      <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverMiniPanelSub}>Activa GO para iniciar</Text>
+
+                      <TouchableOpacity
+                        style={nS.driverReservasBtn}
+                        activeOpacity={0.82}
+                        onPress={() =>
+                          navigation.navigate('DriverReservations' as never, { initialTab: 'reservations' } as never)
+                        }
+                      >
+                        <View style={nS.driverReservasBtnIcon}>
+                          <Ionicons name="calendar-outline" size={22} color="#051A26" />
+                        </View>
+                        <View style={nS.driverReservasBtnTextWrap}>
+                          <Text style={nS.driverReservasBtnTitle}>Reservas Disponibles</Text>
+                          <Text style={nS.driverReservasBtnSub}>Ver y aceptar reservas de clientes</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color="rgba(0,229,255,0.7)" />
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </Animated.View>
               </View>
             )}
 
@@ -2892,55 +3116,85 @@ const MapScreen = () => {
           </View>
 
           {isDriverView && driverOnline && !showNovedades && (
-            <View
-              style={[
-                nS.driverReservationsHalf,
-                { bottom: driverNavBottomPad - 12, height: driverReservationsExpandedHeight },
-                driverReservationsMinimized && nS.driverReservationsHalfMinimized,
-              ]}
-            >
-              <View style={nS.driverReservationsHeaderRow}>
-                <View style={nS.driverReservationsHandle} />
-                {driverReservationsMinimized ? (
-                  <View style={nS.driverCollapsedRow}>
-                    <SearchingServicesLabel style={nS.driverSearchingText} />
-                    <TouchableOpacity
-                      style={nS.driverReservationsToggleBtn}
-                      activeOpacity={0.85}
-                      onPress={() => setDriverReservationsMinimized(false)}
-                    >
-                      <Ionicons name="chevron-up" size={17} color="#00E5FF" />
-                      <Text style={nS.driverReservationsToggleText}>Maximizar servicios</Text>
-                    </TouchableOpacity>
+            <>
+              {/* Aviso fuera del sheet: encima del modal, no dentro del swipe. */}
+              {registrationIncomplete ? (
+                <TouchableOpacity
+                  style={[
+                    nS.registrationWarnBanner,
+                    nS.registrationWarnFloating,
+                    {
+                      bottom: (driverNavBottomPad - 12) + driverSheetHeight + 8,
+                      left: 12,
+                      right: 12,
+                    },
+                  ]}
+                  activeOpacity={0.88}
+                  onPress={() => requestOnboardingModal()}
+                >
+                  <View style={nS.registrationWarnIcon}>
+                    <Ionicons name="warning" size={18} color="#8A6A00" />
                   </View>
-                ) : (
-                  <TouchableOpacity
-                    style={nS.driverReservationsToggleBtn}
-                    activeOpacity={0.85}
-                    onPress={() => setDriverReservationsMinimized(true)}
-                  >
-                    <Ionicons name="chevron-down" size={17} color="#00E5FF" />
-                    <Text style={nS.driverReservationsToggleText}>Minimizar servicios</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={nS.registrationWarnTitle}>Resuelve estos problemas primero</Text>
+                    <Text style={nS.registrationWarnSub} numberOfLines={2}>
+                      Completa tu registro ({registrationPending} pendiente{registrationPending === 1 ? '' : 's'}) para aceptar solicitudes.
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color="#8A6A00" />
+                </TouchableOpacity>
+              ) : null}
 
-              {!driverReservationsMinimized && (
-                <View style={nS.driverReservationsBody}>
-                  <Text {...FIXED_TEXT_PROPS} numberOfLines={2} style={nS.driverConnectedSub}>Conectado y esperando solicitudes</Text>
-                  <DriverReservationsScreen
-                    embedded
-                    initialTab="immediate"
-                    pendingDetailBooking={pendingServiceDetail}
-                    onPendingDetailConsumed={() => setPendingServiceDetail(null)}
-                    onAvailableServicesChange={(counts) => {
-                      const total = (counts.immediate || 0) + (counts.reservation || 0);
-                      setDriverAvailableServiceCount(total);
-                    }}
-                  />
+              <Animated.View
+                style={[
+                  nS.driverReservationsHalf,
+                  { bottom: driverNavBottomPad - 12, height: sheetHeightAnim },
+                  driverReservationsMinimized && nS.driverReservationsHalfMinimized,
+                ]}
+              >
+                <View style={nS.driverReservationsHeaderRow} {...sheetPanResponder.panHandlers}>
+                  <View style={nS.driverReservationsHandle} />
+                  {driverReservationsMinimized ? (
+                    <View style={nS.driverCollapsedRow}>
+                      <SearchingServicesLabel style={nS.driverSearchingText} />
+                      <TouchableOpacity
+                        style={nS.driverReservationsToggleBtnCompact}
+                        activeOpacity={0.85}
+                        onPress={() => springSheetTo(false)}
+                      >
+                        <Ionicons name="chevron-up" size={18} color="#00E5FF" />
+                        {driverAvailableServiceCount > 0 ? (
+                          <View style={nS.sheetServiceBadge}>
+                            <Text style={nS.sheetServiceBadgeTxt}>
+                              {driverAvailableServiceCount > 99 ? '99+' : driverAvailableServiceCount}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <Text {...FIXED_TEXT_PROPS} numberOfLines={1} style={nS.driverConnectedSub}>
+                      Conectado y esperando solicitudes
+                    </Text>
+                  )}
                 </View>
-              )}
-            </View>
+
+                {!driverReservationsMinimized && (
+                  <View style={nS.driverReservationsBody}>
+                    <DriverReservationsScreen
+                      embedded
+                      initialTab="immediate"
+                      pendingDetailBooking={pendingServiceDetail}
+                      onPendingDetailConsumed={() => setPendingServiceDetail(null)}
+                      onAvailableServicesChange={(counts) => {
+                        const total = (counts.immediate || 0) + (counts.reservation || 0);
+                        setDriverAvailableServiceCount(total);
+                      }}
+                    />
+                  </View>
+                )}
+              </Animated.View>
+            </>
           )}
           </View>
       ) : (
@@ -4569,13 +4823,14 @@ const nS = StyleSheet.create({
     height: 108,
   },
   driverReservationsHeaderRow: {
-    minHeight: 62,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(8,33,46,0.95)',
     borderBottomWidth: 0,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingTop: 8,
+    paddingBottom: 4,
   },
   driverCollapsedRow: {
     width: '100%',
@@ -4591,10 +4846,11 @@ const nS = StyleSheet.create({
   driverConnectedSub: {
     color: 'rgba(255,255,255,0.72)',
     fontSize: 12,
-    marginBottom: 8,
-    marginTop: 0,
+    fontWeight: '400',
+    marginBottom: 2,
+    marginTop: 2,
     textAlign: 'center',
-    backgroundColor: 'rgba(8,33,46,0.95)',
+    backgroundColor: 'transparent',
   },
   driverTopGradient: {
     position: 'absolute',
@@ -4661,6 +4917,74 @@ const nS = StyleSheet.create({
     color: '#00E5FF',
     fontSize: 12,
     fontWeight: '700',
+  },
+  driverReservationsToggleBtnCompact: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 56,
+    minHeight: 34,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,229,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,229,255,0.25)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  sheetServiceBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FF5252',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: '#08212E',
+  },
+  sheetServiceBadgeTxt: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  registrationWarnBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 236, 179, 0.92)',
+    borderWidth: 1,
+    borderColor: 'rgba(212, 168, 55, 0.45)',
+  },
+  registrationWarnFloating: {
+    position: 'absolute',
+    zIndex: 28,
+    elevation: 28,
+    marginBottom: 0,
+  },
+  registrationWarnIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(212, 168, 55, 0.28)',
+  },
+  registrationWarnTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#5C4500',
+  },
+  registrationWarnSub: {
+    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 15,
+    color: '#6E5608',
   },
   driverReservationsBody: {
     flex: 1,
@@ -5059,6 +5383,18 @@ const nS = StyleSheet.create({
     elevation: 40,
     gap: 8,
     alignItems: 'center',
+  },
+  goConnectingBarTrack: {
+    marginTop: 14,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(0,229,255,0.15)',
+    overflow: 'hidden',
+  },
+  goConnectingBarFill: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#00E5FF',
   },
   driverMiniPanel: {
     borderRadius: 18,

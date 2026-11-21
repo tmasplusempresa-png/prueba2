@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import * as Location from 'expo-location';
-import { isCorporatePayment, isPassengerFareHidden } from '@/common/utils/paymentMode';
+import { isCorporatePayment, isPassengerFareHidden, isRecommendedPayment } from '@/common/utils/paymentMode';
 
 const ACTIVE_TRIP_CHANNEL_ID = 'tmasplus-active-trip';
 const BACKGROUND_LOCATION_TASK_NAME = 'background-location-task';
@@ -36,7 +36,11 @@ const buildTitle = (booking: any, role: 'customer' | 'driver'): string => {
 
 const buildBody = (booking: any, role: 'customer' | 'driver'): string => {
   if (!booking) return 'Abre la app para ver el estado completo de tu viaje.';
-  const price = booking.trip_cost || booking.estimate || booking.price || 0;
+  // Recomendados: siempre el valor fijo (trip_cost/driver_share), nunca el máximo cotizado.
+  const recommended = isRecommendedPayment(booking.payment_mode);
+  const price = recommended
+    ? (booking.trip_cost || booking.driver_share || booking.price || booking.estimate || 0)
+    : (booking.trip_cost || booking.estimate || booking.price || 0);
   const displayPrice = Number(price).toLocaleString('es-CO');
   const otp = booking.otp_code || booking.verification_code || '';
 
